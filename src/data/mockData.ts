@@ -9,7 +9,9 @@ export const counselors = [
     role: 'Administrator BK (Akses Penuh)',
     nip: '-',
     avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-    allowedClasses: [] as string[]
+    allowedClasses: [] as string[],
+    username: 'admin',
+    password: 'admin'
   },
   {
     id: 'c1',
@@ -17,7 +19,9 @@ export const counselors = [
     role: 'Guru Pembimbing Kelas 8',
     nip: 'NIP. 19931231 202221 1 002',
     avatar: auliaAvatar,
-    allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G']
+    allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
+    username: 'aulia',
+    password: 'aulia'
   },
   {
     id: 'c2',
@@ -25,7 +29,9 @@ export const counselors = [
     role: 'Guru Pembimbing Kelas 7',
     nip: 'NIP. 19950412 202312 2 003',
     avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=120',
-    allowedClasses: ['7A', '7B', '7C', '7D', '7F']
+    allowedClasses: ['7A', '7B', '7C', '7D', '7F'],
+    username: 'nona',
+    password: 'nona'
   },
   {
     id: 'c3',
@@ -33,7 +39,9 @@ export const counselors = [
     role: 'Guru Pembimbing Kelas 9',
     nip: 'NIP. 19880615 201804 2 001',
     avatar: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&q=80&w=120',
-    allowedClasses: ['9A', '9B', '9C', '9D', '9E', '9F', '9G']
+    allowedClasses: ['9A', '9B', '9C', '9D', '9E', '9F', '9G'],
+    username: 'tri',
+    password: 'tri'
   }
 ];
 

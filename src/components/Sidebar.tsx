@@ -7,7 +7,8 @@ interface SidebarProps {
   onNavigate: (view: string) => void;
   activeCounselor: Counselor;
   allCounselors: Counselor[];
-  onChangeCounselor: (counselor: Counselor) => void;
+  onChangeCounselor?: (counselor: Counselor) => void;
+  onLogout: () => void;
   isOpen?: boolean;
   onClose?: () => void;
 }
@@ -18,6 +19,7 @@ export default function Sidebar({
   activeCounselor,
   allCounselors,
   onChangeCounselor,
+  onLogout,
   isOpen = false,
   onClose,
 }: SidebarProps) {
@@ -58,25 +60,29 @@ export default function Sidebar({
           </button>
         </div>
 
-      {/* Counselor Selection Quick Switcher (Extremely slick feature) */}
+      {/* Counselor Class Permissions Display */}
       <div className="px-4 mb-4">
-        <label className="text-[10px] font-bold text-[#3d4947]/60 uppercase tracking-widest block mb-1.5">
-          Ganti Profil Konselor
+        <label className="text-[10px] font-extrabold text-[#3d4947]/60 uppercase tracking-widest block mb-1.5">
+          Hak Akses Bimbingan
         </label>
-        <select
-          value={activeCounselor.id}
-          onChange={(e) => {
-            const found = allCounselors.find((c) => c.id === e.target.value);
-            if (found) onChangeCounselor(found);
-          }}
-          className="w-full text-xs bg-[#eff4ff] border border-[#bcc9c6]/40 rounded-lg py-1.5 px-2.5 font-medium text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 cursor-pointer"
-        >
-          {allCounselors.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name} ({c.role})
-            </option>
-          ))}
-        </select>
+        <div className="p-3 bg-teal-50/50 border border-[#00685f]/15 rounded-xl">
+          <p className="text-[10px] font-bold text-[#00685f] mb-1">
+            {activeCounselor.allowedClasses.length === 0 ? 'Seluruh Kelas (Administrator)' : 'Kelas Bimbingan:'}
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {activeCounselor.allowedClasses.length === 0 ? (
+              <span className="text-[10px] font-bold bg-[#00685f]/10 text-[#00685f] px-2 py-0.5 rounded-full">
+                Akses Penuh
+              </span>
+            ) : (
+              activeCounselor.allowedClasses.map((cls) => (
+                <span key={cls} className="text-[10px] font-extrabold bg-[#00685f]/10 text-[#00685f] px-2 py-0.5 rounded">
+                  {cls}
+                </span>
+              ))
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Main Navigation */}
@@ -231,7 +237,7 @@ export default function Sidebar({
         <button
           onClick={() => {
             if (confirm('Apakah Anda yakin ingin keluar dari aplikasi?')) {
-              alert('Keluar berhasil.');
+              onLogout();
             }
           }}
           className="flex items-center gap-3 px-4 py-2 text-xs font-semibold text-[#ba1a1a] hover:bg-[#ffdad6]/40 rounded-xl transition-colors"

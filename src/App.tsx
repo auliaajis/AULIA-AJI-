@@ -10,6 +10,7 @@ import AbsensiView from './components/AbsensiView';
 import GoogleIntegrationView from './components/GoogleIntegrationView';
 import JurnalHarianView from './components/JurnalHarianView';
 import PanggilanOrangTuaView from './components/PanggilanOrangTuaView';
+import LoginView from './components/LoginView';
 import { downloadServicePDF } from './utils/pdfGenerator';
 
 import {
@@ -28,8 +29,16 @@ export default function App() {
   const [currentView, setCurrentView] = useState<string>('dashboard');
   const [preSelectedStudentId, setPreSelectedStudentId] = useState<string | undefined>(undefined);
 
-  // Active user counselor session state
-  const [activeCounselor, setActiveCounselor] = useState(counselors[0]);
+  // Authentication states
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
+    return localStorage.getItem('bk_is_logged_in') === 'true';
+  });
+
+  const [activeCounselor, setActiveCounselor] = useState<Counselor>(() => {
+    const savedId = localStorage.getItem('bk_active_counselor_id');
+    const found = counselors.find((c) => c.id === savedId);
+    return found || counselors[0];
+  });
 
   // Search State
   const [searchQuery, setSearchQuery] = useState('');
@@ -481,6 +490,20 @@ export default function App() {
     setCurrentView(tab);
   };
 
+  if (!isLoggedIn) {
+    return (
+      <LoginView
+        allCounselors={counselors}
+        onLoginSuccess={(counselor) => {
+          setActiveCounselor(counselor);
+          setIsLoggedIn(true);
+          localStorage.setItem('bk_is_logged_in', 'true');
+          localStorage.setItem('bk_active_counselor_id', counselor.id);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#f8fafa] text-[#0b1c30]">
       {/* Sidebar Controller */}
@@ -492,7 +515,12 @@ export default function App() {
         }}
         activeCounselor={activeCounselor}
         allCounselors={counselors}
-        onChangeCounselor={setActiveCounselor}
+        onLogout={() => {
+          setIsLoggedIn(false);
+          localStorage.removeItem('bk_is_logged_in');
+          localStorage.removeItem('bk_active_counselor_id');
+          setCurrentView('dashboard');
+        }}
         isOpen={isMobileSidebarOpen}
         onClose={() => setIsMobileSidebarOpen(false)}
       />
