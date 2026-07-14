@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Student } from '../types';
+import { Student, ViolationRecord, CounselingService } from '../types';
 import {
   UserPlus,
   Search,
@@ -14,13 +14,21 @@ import {
   X,
   BookOpen,
   User,
-  HeartHandshake
+  HeartHandshake,
+  UserCheck,
+  Upload,
+  FileSpreadsheet,
+  Download
 } from 'lucide-react';
+import { downloadViolationPDF, downloadServicePDF, downloadStudentRecapPDF } from '../utils/pdfGenerator';
 
 interface DataSiswaViewProps {
   students: Student[];
+  violations: ViolationRecord[];
+  services: CounselingService[];
   onAddStudent: (student: Omit<Student, 'id' | 'initials'>) => void;
   onDeleteStudent: (id: string) => void;
+  onClearAllStudents?: () => void;
   onNavigateToForm: (form: string, selectStudentId: string) => void;
   searchQuery: string;
   setSearchQuery: (query: string) => void;
@@ -28,8 +36,11 @@ interface DataSiswaViewProps {
 
 export default function DataSiswaView({
   students,
+  violations,
+  services,
   onAddStudent,
   onDeleteStudent,
+  onClearAllStudents,
   onNavigateToForm,
   searchQuery,
   setSearchQuery,
@@ -42,7 +53,110 @@ export default function DataSiswaView({
 
   // Modals state
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importText, setImportText] = useState('');
+
+  // Bulk import parser
+  const parsedImportStudents = useMemo(() => {
+    if (!importText.trim()) return [];
+    const lines = importText.split(/\r?\n/);
+    const result: Array<{ nis: string; name: string; class: string; gender: 'L' | 'P'; error?: string }> = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      // Detect separator: tab, semicolon, or comma
+      let cols: string[] = [];
+      if (line.includes('\t')) {
+        cols = line.split('\t');
+      } else if (line.includes(';')) {
+        cols = line.split(';');
+      } else {
+        cols = line.split(',');
+      }
+
+      // If columns are too short, skip
+      if (cols.length < 2) continue;
+
+      // Clean columns
+      const nis = cols[0].trim().replace(/\D/g, '');
+      const name = cols[1]?.trim();
+      const rawClass = cols[2]?.trim() || 'Kelas 7A';
+      const rawGender = cols[3]?.trim() || 'L';
+
+      // Skip headers
+      if (
+        nis.toLowerCase().includes('nis') || 
+        name.toLowerCase().includes('nama') || 
+        rawClass.toLowerCase().includes('kelas')
+      ) {
+        continue;
+      }
+
+      if (!nis) {
+        result.push({ nis: '', name: name || `Baris ${i + 1}`, class: rawClass, gender: 'L', error: 'NISN kosong atau non-angka' });
+        continue;
+      }
+      if (!name) {
+        result.push({ nis, name: '', class: rawClass, gender: 'L', error: 'Nama kosong' });
+        continue;
+      }
+
+      // Map gender
+      let gender: 'L' | 'P' = 'L';
+      const gLower = rawGender.toLowerCase();
+      if (gLower === 'p' || gLower.includes('perempuan') || gLower.includes('female') || gLower === 'w' || gLower.includes('wanita')) {
+        gender = 'P';
+      }
+
+      result.push({
+        nis,
+        name,
+        class: rawClass,
+        gender
+      });
+    }
+
+    return result;
+  }, [importText]);
+
+  const handleImportSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const validStudents = parsedImportStudents.filter((s) => !s.error);
+    if (validStudents.length === 0) {
+      alert('Tidak ada data siswa valid untuk diimpor!');
+      return;
+    }
+
+    // Call onAddStudent for each
+    validStudents.forEach((st) => {
+      onAddStudent({
+        nis: st.nis,
+        name: st.name,
+        class: st.class,
+        gender: st.gender,
+        violationPoints: 0,
+        bkServicesCount: 0,
+      });
+    });
+
+    alert(`Berhasil mengimpor ${validStudents.length} siswa ke dalam database!`);
+    setImportText('');
+    setShowImportModal(false);
+  };
   const [showDossierModal, setShowDossierModal] = useState<Student | null>(null);
+
+  // Student specific history
+  const studentViolations = useMemo(() => {
+    if (!showDossierModal) return [];
+    return violations.filter((v) => v.studentId === showDossierModal.id);
+  }, [showDossierModal, violations]);
+
+  const studentServices = useMemo(() => {
+    if (!showDossierModal) return [];
+    return services.filter((s) => s.students.some((st) => st.id === showDossierModal.id));
+  }, [showDossierModal, services]);
 
   // Add student form state
   const [newNis, setNewNis] = useState('');
@@ -111,7 +225,7 @@ export default function DataSiswaView({
       {/* Dossier Student detail view modal overlay */}
       {showDossierModal && (
         <div className="fixed inset-0 bg-[#0b1c30]/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-lg p-6 shadow-2xl relative border border-[#bcc9c6]/40 animate-in zoom-in-95 duration-200">
+          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 shadow-2xl relative border border-[#bcc9c6]/40 animate-in zoom-in-95 duration-200">
             <button
               onClick={() => setShowDossierModal(null)}
               className="absolute top-4 right-4 p-1.5 hover:bg-gray-100 rounded-full transition-colors"
@@ -145,7 +259,7 @@ export default function DataSiswaView({
             </div>
 
             {/* Student Score Overview */}
-            <div className="grid grid-cols-2 gap-4 mb-6">
+            <div className="grid grid-cols-2 gap-4 mb-5">
               <div className="bg-[#ffdad6]/20 border border-[#ba1a1a]/20 p-4 rounded-xl">
                 <p className="text-[10px] uppercase font-bold text-[#ba1a1a]/80 tracking-wider">
                   Akumulasi Pelanggaran
@@ -170,8 +284,81 @@ export default function DataSiswaView({
               </div>
             </div>
 
+            {/* Riwayat Pelanggaran & Layanan List */}
+            <div className="mb-6 pt-4 border-t border-[#bcc9c6]/20 space-y-4">
+              <div>
+                <h4 className="text-xs font-bold text-[#0b1c30] uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-[#ba1a1a]" />
+                  Riwayat Pelanggaran ({studentViolations.length})
+                </h4>
+                {studentViolations.length > 0 ? (
+                  <div className="space-y-2 max-h-32 overflow-y-auto pr-1">
+                    {studentViolations.map((v) => (
+                      <div key={v.id} className="bg-red-50/50 border border-[#ba1a1a]/15 rounded-xl p-2.5 flex items-center justify-between gap-3 text-xs">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-extrabold text-[#ba1a1a] truncate">{v.category}</p>
+                          <p className="text-[10px] text-gray-500 font-semibold">{v.date} &bull; {v.pointsAdded} Poin &bull; {v.location}</p>
+                          <p className="text-[10px] text-gray-600 line-clamp-1 italic mt-0.5">"{v.notes}"</p>
+                        </div>
+                        <button
+                          onClick={() => downloadViolationPDF(v)}
+                          className="p-1.5 bg-[#ba1a1a]/10 hover:bg-[#ba1a1a] text-[#ba1a1a] hover:text-white rounded-lg transition-all flex-shrink-0 cursor-pointer shadow-sm"
+                          title="Unduh Bukti Pelanggaran PDF"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-gray-400 font-medium italic bg-gray-50 p-2.5 rounded-xl text-center">Siswa ini tidak memiliki catatan pelanggaran.</p>
+                )}
+              </div>
+
+              <div>
+                <h4 className="text-xs font-bold text-[#0b1c30] uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                  <HeartHandshake className="w-4 h-4 text-[#00685f]" />
+                  Riwayat Layanan BK ({studentServices.length})
+                </h4>
+                {studentServices.length > 0 ? (
+                  <div className="space-y-2 max-h-32 overflow-y-auto pr-1">
+                    {studentServices.map((s) => (
+                      <div key={s.id} className="bg-teal-50/30 border border-[#00685f]/15 rounded-xl p-2.5 flex items-center justify-between gap-3 text-xs">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-extrabold text-[#00685f] truncate">{s.serviceType}</p>
+                          <p className="text-[10px] text-gray-500 font-semibold">{s.date} &bull; {s.startTime} WIB</p>
+                          <p className="text-[10px] text-[#0b1c30] font-medium truncate mt-0.5">{s.problem}</p>
+                        </div>
+                        <button
+                          onClick={() => downloadServicePDF(s)}
+                          className="p-1.5 bg-[#00685f]/10 hover:bg-[#00685f] text-[#00685f] hover:text-white rounded-lg transition-all flex-shrink-0 cursor-pointer shadow-sm"
+                          title="Unduh Bukti Layanan BK PDF"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-gray-400 font-medium italic bg-gray-50 p-2.5 rounded-xl text-center">Siswa ini belum pernah terlibat dalam bimbingan konseling.</p>
+                )}
+              </div>
+            </div>
+
+            {/* Download Recap PDF Button */}
+            <div className="mb-4">
+              <button
+                type="button"
+                onClick={() => downloadStudentRecapPDF(showDossierModal, studentViolations, studentServices)}
+                className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-sm font-extrabold transition-all shadow-md hover:shadow-lg active:scale-97 cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                <span>Unduh Rapor Rekapitulasi BK (PDF)</span>
+              </button>
+            </div>
+
             {/* Inner actions */}
-            <div className="flex gap-3 pt-2">
+            <div className="flex gap-3 pt-3 border-t border-[#bcc9c6]/20">
               <button
                 onClick={() => {
                   onNavigateToForm('pelanggaran', showDossierModal.id);
@@ -314,6 +501,128 @@ export default function DataSiswaView({
         </div>
       )}
 
+      {/* Bulk Import Modal overlay */}
+      {showImportModal && (
+        <div className="fixed inset-0 bg-[#0b1c30]/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <form
+            onSubmit={handleImportSubmit}
+            className="bg-white rounded-2xl w-full max-w-2xl p-6 shadow-2xl relative border border-[#bcc9c6]/40 animate-in zoom-in-95 duration-200 space-y-4"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setShowImportModal(false);
+                setImportText('');
+              }}
+              className="absolute top-4 right-4 p-1.5 hover:bg-gray-100 rounded-full transition-colors cursor-pointer"
+            >
+              <X className="w-5 h-5 text-gray-500" />
+            </button>
+            
+            <div className="border-b border-[#bcc9c6]/20 pb-3">
+              <h3 className="text-lg font-bold text-[#0b1c30] flex items-center gap-2">
+                <FileSpreadsheet className="w-5 h-5 text-[#00685f]" />
+                <span>Impor Massal Data Siswa</span>
+              </h3>
+              <p className="text-xs text-[#3d4947] opacity-75">
+                Salin baris data dari file <strong>Excel / Google Sheets</strong> Anda (kolom: NISN, Nama, Kelas, Gender) dan tempel di bawah ini, atau tulis format CSV.
+              </p>
+            </div>
+
+            {/* Instruction Banner */}
+            <div className="bg-[#eff4ff] p-3.5 rounded-xl border border-[#00685f]/15 text-xs text-[#0b1c30] space-y-1">
+              <p className="font-extrabold text-[#00685f] uppercase tracking-wider text-[10px]">Panduan Format Impor:</p>
+              <p className="leading-relaxed font-semibold">
+                Setiap baris berisi: <code className="bg-white/80 px-1 py-0.5 rounded font-mono border border-gray-200">NISN, Nama Siswa, Kelas, Gender (L/P)</code>
+              </p>
+              <p className="leading-relaxed opacity-85">
+                <em>Contoh copy-paste langsung dari Excel:</em>
+              </p>
+              <pre className="bg-white/90 p-2 rounded-lg font-mono text-[10px] text-gray-600 border border-gray-100 overflow-x-auto leading-normal">
+{`21221001\tAhmad Fauzi\tKelas 7A\tL
+21221002\tSiti Nurhaliza\tKelas 7E\tP`}
+              </pre>
+            </div>
+
+            {/* Textarea Input */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-[#0b1c30] block uppercase tracking-wider">
+                Tempel Data di Sini (Excel / CSV / Tab-separated / Semicolon)
+              </label>
+              <textarea
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+                placeholder="21221001, Ahmad Fauzi, Kelas 7A, L&#10;21221002, Siti Nurhaliza, Kelas 7E, P"
+                rows={6}
+                required
+                className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-3.5 py-2.5 text-xs font-mono text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 leading-relaxed"
+              />
+            </div>
+
+            {/* Parser Live Preview */}
+            {parsedImportStudents.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-[#0b1c30]">
+                    Pratinjau Hasil Pembacaan ({parsedImportStudents.filter((s) => !s.error).length} valid dari {parsedImportStudents.length} baris)
+                  </span>
+                </div>
+                <div className="border border-gray-200 rounded-xl overflow-hidden max-h-40 overflow-y-auto">
+                  <table className="w-full text-[11px] text-left border-collapse bg-gray-50/50">
+                    <thead className="bg-gray-100 sticky top-0 text-gray-700 font-bold border-b border-gray-200">
+                      <tr>
+                        <th className="px-3 py-2">NISN</th>
+                        <th className="px-3 py-2">Nama Siswa</th>
+                        <th className="px-3 py-2">Kelas</th>
+                        <th className="px-3 py-2 text-center">L/P</th>
+                        <th className="px-3 py-2 text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 bg-white">
+                      {parsedImportStudents.map((st, idx) => (
+                        <tr key={idx} className={st.error ? 'bg-red-50/50' : ''}>
+                          <td className="px-3 py-1.5 font-mono text-gray-600">{st.nis || '-'}</td>
+                          <td className="px-3 py-1.5 font-bold text-gray-800">{st.name || '-'}</td>
+                          <td className="px-3 py-1.5 text-gray-600">{st.class}</td>
+                          <td className="px-3 py-1.5 text-center font-bold text-gray-600">{st.gender}</td>
+                          <td className="px-3 py-1.5 text-right font-medium">
+                            {st.error ? (
+                              <span className="text-red-600 text-[10px]" title={st.error}>⚠️ Gagal</span>
+                            ) : (
+                              <span className="text-emerald-600 text-[10px] flex items-center justify-end gap-0.5">✅ Siap</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            <div className="pt-4 flex gap-3 border-t border-[#bcc9c6]/20">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowImportModal(false);
+                  setImportText('');
+                }}
+                className="flex-1 py-2.5 bg-gray-100 hover:bg-gray-200 rounded-xl text-xs font-bold text-gray-700 transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                disabled={parsedImportStudents.filter((s) => !s.error).length === 0}
+                className="flex-1 py-2.5 bg-[#00685f] hover:bg-[#005049] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold transition-all shadow-sm active:scale-97 cursor-pointer"
+              >
+                Impor Sekarang ({parsedImportStudents.filter((s) => !s.error).length} Siswa)
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -324,13 +633,41 @@ export default function DataSiswaView({
             Manajemen data profil, pelaporan insiden, dan rekam jejak bimbingan siswa.
           </p>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="flex items-center gap-2 px-5 py-3 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-sm font-bold transition-all shadow-md hover:shadow-lg active:scale-97 self-start cursor-pointer"
-        >
-          <UserPlus className="w-4.5 h-4.5" />
-          <span>Tambah Siswa</span>
-        </button>
+        <div className="flex flex-wrap gap-2 self-start">
+          {onClearAllStudents && students.length > 0 && (
+            <button
+              onClick={() => {
+                if (
+                  confirm(
+                    'PENTING: Apakah Anda yakin ingin menghapus SELURUH data siswa (termasuk semua data sampel, riwayat pelanggaran, dan konseling) untuk memulai database baru yang kosong?\n\nTindakan ini tidak dapat dibatalkan.'
+                  )
+                ) {
+                  onClearAllStudents();
+                  alert('Seluruh data berhasil dibersihkan! Database sekarang kosong dan siap diisi data siswa asli.');
+                }
+              }}
+              className="flex items-center gap-2 px-5 py-3 border border-red-200 hover:bg-red-50 text-red-600 rounded-xl text-sm font-bold transition-all active:scale-97 cursor-pointer"
+              title="Kosongkan Database Siswa"
+            >
+              <Trash2 className="w-4.5 h-4.5 text-red-500" />
+              <span>Kosongkan Semua Data</span>
+            </button>
+          )}
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="flex items-center gap-2 px-5 py-3 border border-[#00685f]/30 hover:bg-[#00685f]/5 text-[#00685f] rounded-xl text-sm font-bold transition-all active:scale-97 cursor-pointer"
+          >
+            <FileSpreadsheet className="w-4.5 h-4.5" />
+            <span>Impor Massal (Excel/CSV)</span>
+          </button>
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="flex items-center gap-2 px-5 py-3 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-sm font-bold transition-all shadow-md hover:shadow-lg active:scale-97 cursor-pointer"
+          >
+            <UserPlus className="w-4.5 h-4.5" />
+            <span>Tambah Siswa</span>
+          </button>
+        </div>
       </div>
 
       {/* Filters & Quick Stats */}
@@ -495,6 +832,19 @@ export default function DataSiswaView({
                             title="Lihat Profil Lengkap"
                           >
                             <Eye className="w-4.5 h-4.5" />
+                          </button>
+
+                          {/* Quick Student Recap PDF download */}
+                          <button
+                            onClick={() => {
+                              const sViolations = violations.filter((v) => v.studentId === student.id);
+                              const sServices = services.filter((s) => s.students.some((st) => st.id === student.id));
+                              downloadStudentRecapPDF(student, sViolations, sServices);
+                            }}
+                            className="p-1.5 text-[#00685f] hover:bg-[#00685f]/10 rounded-lg transition-colors cursor-pointer"
+                            title="Unduh Rekapitulasi Rapor BK (PDF)"
+                          >
+                            <Download className="w-4.5 h-4.5" />
                           </button>
 
                           {/* Quick Violation Record Shortcut */}

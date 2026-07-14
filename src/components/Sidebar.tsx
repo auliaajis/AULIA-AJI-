@@ -1,4 +1,5 @@
-import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut } from 'lucide-react';
+import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut, X, Settings } from 'lucide-react';
+import SchoolLogo from './SchoolLogo';
 
 interface Counselor {
   id: string;
@@ -14,6 +15,8 @@ interface SidebarProps {
   activeCounselor: Counselor;
   allCounselors: Counselor[];
   onChangeCounselor: (counselor: Counselor) => void;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
 export default function Sidebar({
@@ -22,17 +25,45 @@ export default function Sidebar({
   activeCounselor,
   allCounselors,
   onChangeCounselor,
+  isOpen = false,
+  onClose,
 }: SidebarProps) {
   return (
-    <aside className="w-64 fixed left-0 top-0 h-screen bg-white border-r border-[#bcc9c6]/30 flex flex-col p-4 gap-2 z-50">
-      <div className="mb-6 px-4 pt-2">
-        <h1 className="text-xl font-bold text-[#00685f] tracking-tight">
-          Sistem Informasi BK
-        </h1>
-        <p className="text-xs text-[#3d4947] opacity-70 font-medium">
-          Gridasus
-        </p>
-      </div>
+    <>
+      {/* Mobile Backdrop Overlay */}
+      {isOpen && (
+        <div
+          className="lg:hidden fixed inset-0 bg-black/40 z-40 backdrop-blur-xs transition-opacity duration-300"
+          onClick={onClose}
+        />
+      )}
+
+      <aside
+        className={`w-64 fixed left-0 top-0 h-screen bg-white border-r border-[#bcc9c6]/30 flex flex-col p-4 gap-2 z-50 transition-transform duration-300 ${
+          isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+        }`}
+      >
+        <div className="mb-6 px-4 pt-2 flex justify-between items-center">
+          <div className="flex items-center gap-3">
+            <SchoolLogo size={44} className="flex-shrink-0" />
+            <div>
+              <h1 className="text-xs font-black text-[#00685f] tracking-wider uppercase leading-none">
+                Bimbingan & Konseling
+              </h1>
+              <p className="text-[11px] text-[#3d4947] font-bold mt-1 opacity-90 leading-none">
+                SMP N 2 Susukan
+              </p>
+            </div>
+          </div>
+          {/* Close button for mobile drawer */}
+          <button
+            onClick={onClose}
+            className="lg:hidden p-1 text-[#3d4947] hover:bg-gray-100 rounded-lg cursor-pointer transition-colors"
+            title="Tutup Menu"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
 
       {/* Counselor Selection Quick Switcher (Extremely slick feature) */}
       <div className="px-4 mb-4">
@@ -104,6 +135,18 @@ export default function Sidebar({
           <HeartHandshake className="w-4.5 h-4.5" />
           <span>Layanan BK</span>
         </button>
+
+        <button
+          onClick={() => onNavigate('pengaturan')}
+          className={`flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 ${
+            currentView === 'pengaturan'
+              ? 'bg-[#008378] text-[#f4fffc] shadow-sm'
+              : 'text-[#3d4947] hover:bg-[#d3e4fe]/40'
+          }`}
+        >
+          <Settings className="w-4.5 h-4.5" />
+          <span>Pengaturan</span>
+        </button>
       </nav>
 
       {/* Action Area & Profiles */}
@@ -157,5 +200,6 @@ export default function Sidebar({
         </button>
       </div>
     </aside>
+  </>
   );
 }

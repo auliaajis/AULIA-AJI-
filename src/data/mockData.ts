@@ -1,26 +1,14 @@
 import { Student, ViolationRecord, CounselingService, ActivityLog } from '../types';
+// @ts-ignore
+import auliaAvatar from '../assets/images/aulia_aji_sasongko_1783735129196.jpg';
 
 export const counselors = [
   {
     id: 'c1',
-    name: 'Budi Santoso',
-    role: 'Admin BK',
-    nip: 'NIP. 19780512 200501 1 002',
-    avatar: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAbyCEztjas0B6fzPhlxxPW674q_i9B22dl1_HRajxedeDmrH8s9O-PSWhEMd-2U--7_FYiSuW3Cah8W4DS6ihuH1lVGikTnZsgK-s_dMuaSAJlQ9-qE0X5o6gvsoTspQxMzo9W76Pcgpp93BUMK695Kxdrj5wmkPNHBtebKazOZkgrAcsPROhBAPy3UyE3-XB3fDY9juv1aSLaa5BXpHGmSrUoB_a4k25wxyDX1PasVhSqu00kSBVbtw'
-  },
-  {
-    id: 'c2',
-    name: 'Ibu Rahayu, S.Pd',
-    role: 'Konselor Utama',
-    nip: 'NIP. 19801124 200812 2 003',
-    avatar: 'https://lh3.googleusercontent.com/aida-public/AB6AXuDecBZojVXfJdloRQMziC1PPM9X9fh3fnAMBq4csnBMBKQDvWkjTfeXY2EkpvbBxb1_uQb80K1MEUOUJxJvV-W6F9aJ02eY-6kCk8rthRJo5juBGzWmyWjK2GsJkMdqsFW6gvPcVe9eH-zi52FVyh7FVi4kndyeqYvLC8JaJ8MuHGLvvYE355cMC-Y2qW1eAEeF5p906wAvw0cEk-NXLEkkaPaDEolvhDqh6bbKNy5o19YBRlrfOjfxMA'
-  },
-  {
-    id: 'c3',
-    name: 'Ibu Sarah, M.Psi',
-    role: 'Guru Pembimbing',
-    nip: 'NIP. 19820412 201004 2 005',
-    avatar: 'https://lh3.googleusercontent.com/aida-public/AB6AXuDVCDZkrFlYCBJ0511W59H1H-5eCc_szDmst-lR-uBhyTXGKBFOKMYgYH-B5rTdHVril8npUYMUBm-uSeUpdbemJYDlZkJ89gvBJUmiR9qoWfPTrRkOGp2i2udPHA4XR4Oy59lOtx8ory9SH_RT_zSCTnq0rqu_X9w6v9falv0ZKIj1sw_VdaE3XAjLCoozeTp2UjeU7H4e6T57twxqur-15MVbB9ic0aDKObSwrkmkoYC_kAOVNq_w1w'
+    name: 'Aulia Aji Sasongko, S.Pd.',
+    role: 'Admin BK / Guru Pembimbing',
+    nip: 'NIP. 19931231 202221 1 002',
+    avatar: auliaAvatar
   }
 ];
 
@@ -176,7 +164,7 @@ export const initialViolations: ViolationRecord[] = [
     date: '2026-07-10',
     time: '08:30',
     location: 'Halaman Belakang',
-    reportedBy: 'Budi Santoso',
+    reportedBy: 'Aulia Aji Sasongko, S.Pd.',
     notes: 'Melanggar aturan sekolah dengan membolos di jam pelajaran ke-3.'
   },
   {

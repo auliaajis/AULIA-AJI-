@@ -5,6 +5,8 @@ import DashboardView from './components/DashboardView';
 import DataSiswaView from './components/DataSiswaView';
 import CatatPelanggaranForm from './components/CatatPelanggaranForm';
 import TambahLayananForm from './components/TambahLayananForm';
+import PengaturanView from './components/PengaturanView';
+import { downloadServicePDF } from './utils/pdfGenerator';
 
 import {
   initialStudents,
@@ -14,7 +16,7 @@ import {
   counselors
 } from './data/mockData';
 import { Student, ViolationRecord, CounselingService, ActivityLog } from './types';
-import { HeartHandshake, Calendar, Clock, Plus, UserCheck } from 'lucide-react';
+import { HeartHandshake, Calendar, Clock, Plus, UserCheck, Download } from 'lucide-react';
 
 export default function App() {
   // Navigation Routing States
@@ -26,6 +28,9 @@ export default function App() {
 
   // Search State
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Mobile navigation drawer toggle
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
   // Core database states synchronized with localStorage
   const [students, setStudents] = useState<Student[]>(() => {
@@ -83,16 +88,24 @@ export default function App() {
 
     const added: Student = {
       ...newStudent,
-      id: `s-${Date.now()}`,
+      id: `s-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
       initials,
     };
 
-    setStudents([added, ...students]);
+    setStudents((prev) => [added, ...prev]);
   };
 
   // State trigger: Delete student
   const handleDeleteStudent = (id: string) => {
     setStudents(students.filter((s) => s.id !== id));
+  };
+
+  // State trigger: Clear all students and start with a clean slate
+  const handleClearAllStudents = () => {
+    setStudents([]);
+    setViolations([]);
+    setServices([]);
+    setLogs([]);
   };
 
   // State trigger: Record violation and update scores & activity feeds
@@ -219,8 +232,11 @@ export default function App() {
         return (
           <DataSiswaView
             students={students}
+            violations={violations}
+            services={services}
             onAddStudent={handleAddStudent}
             onDeleteStudent={handleDeleteStudent}
+            onClearAllStudents={handleClearAllStudents}
             onNavigateToForm={handleNavigateToForm}
             searchQuery={searchQuery}
             setSearchQuery={setSearchQuery}
@@ -230,6 +246,7 @@ export default function App() {
         return (
           <CatatPelanggaranForm
             students={students}
+            violations={violations}
             activeCounselor={activeCounselor}
             preSelectedStudentId={preSelectedStudentId}
             onSaveViolation={handleSaveViolation}
@@ -305,16 +322,26 @@ export default function App() {
                     </div>
 
                     <div className="mt-4 pt-4 border-t border-[#bcc9c6]/10 flex justify-between items-center text-[10px] font-bold text-gray-500">
-                      <div className="flex items-center gap-1">
-                        <Calendar className="w-3.5 h-3.5 text-[#00685f]" />
-                        <span>{srv.date}</span>
+                      <div className="flex flex-col gap-1 sm:flex-row sm:gap-2">
+                        <div className="flex items-center gap-1">
+                          <Calendar className="w-3.5 h-3.5 text-[#00685f]" />
+                          <span>{srv.date}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Clock className="w-3.5 h-3.5 text-[#00685f]" />
+                          <span>
+                            {srv.startTime} - {srv.endTime}
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1">
-                        <Clock className="w-3.5 h-3.5 text-[#00685f]" />
-                        <span>
-                          {srv.startTime} - {srv.endTime}
-                        </span>
-                      </div>
+                      <button
+                        onClick={() => downloadServicePDF(srv)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-[#00685f]/10 text-[#00685f] hover:bg-[#00685f] hover:text-white rounded-lg text-[10px] font-bold transition-all cursor-pointer shadow-sm active:scale-95"
+                        title="Unduh Bukti Layanan BK (PDF)"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>PDF</span>
+                      </button>
                     </div>
                   </div>
                 );
@@ -334,6 +361,8 @@ export default function App() {
             }}
           />
         );
+      case 'pengaturan':
+        return <PengaturanView />;
       default:
         return null;
     }
@@ -352,24 +381,30 @@ export default function App() {
       {/* Sidebar Controller */}
       <Sidebar
         currentView={currentView}
-        onNavigate={setCurrentView}
+        onNavigate={(view) => {
+          setCurrentView(view);
+          setIsMobileSidebarOpen(false); // Auto close sidebar on mobile navigation
+        }}
         activeCounselor={activeCounselor}
         allCounselors={counselors}
         onChangeCounselor={setActiveCounselor}
+        isOpen={isMobileSidebarOpen}
+        onClose={() => setIsMobileSidebarOpen(false)}
       />
 
       {/* Main Column Wrapper */}
-      <div className="pl-64 min-h-screen flex flex-col">
+      <div className="lg:pl-64 min-h-screen flex flex-col transition-all duration-300">
         {/* Top Header bar with search input */}
         <Header
           activeCounselor={activeCounselor}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           onNavigateToStudent={handleNavigateToStudentTab}
+          onToggleSidebar={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
         />
 
         {/* Central Workspace view */}
-        <main className="mt-16 p-8 flex-1">
+        <main className="mt-16 p-4 sm:p-6 lg:p-8 flex-1">
           <div className="max-w-7xl mx-auto">{renderMainView()}</div>
         </main>
       </div>

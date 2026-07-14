@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Search, Bell, Calendar as CalendarIcon, Check } from 'lucide-react';
+import { Search, Bell, Calendar as CalendarIcon, Check, Menu } from 'lucide-react';
 
 interface Counselor {
   id: string;
@@ -13,6 +13,7 @@ interface HeaderProps {
   searchQuery: string;
   onSearchChange: (query: string) => void;
   onNavigateToStudent: () => void;
+  onToggleSidebar?: () => void;
 }
 
 export default function Header({
@@ -20,6 +21,7 @@ export default function Header({
   searchQuery,
   onSearchChange,
   onNavigateToStudent,
+  onToggleSidebar,
 }: HeaderProps) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [unreadCount, setUnreadCount] = useState(2);
@@ -56,32 +58,44 @@ export default function Header({
   };
 
   return (
-    <header className="fixed top-0 right-0 w-[calc(100%-16rem)] z-40 bg-white/90 backdrop-blur-md border-b border-[#bcc9c6]/30 h-16 px-6 flex justify-between items-center">
-      {/* Global Student Search Bar */}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          onNavigateToStudent();
-        }}
-        className="flex items-center bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-full px-4 py-1.5 w-96 transition-all focus-within:border-[#00685f] focus-within:ring-2 focus-within:ring-[#00685f]/10 shadow-sm"
-      >
-        <Search className="text-[#3d4947] opacity-60 w-5 h-5 flex-shrink-0" />
-        <input
-          type="text"
-          value={searchQuery}
-          onChange={(e) => onSearchChange(e.target.value)}
-          placeholder="Cari NISN atau Nama Siswa..."
-          className="bg-transparent border-none focus:outline-none focus:ring-0 text-sm w-full placeholder:text-[#3d4947]/40 ml-2 text-[#0b1c30]"
-        />
-        {searchQuery && (
-          <button
-            type="submit"
-            className="text-xs font-semibold text-[#00685f] hover:underline"
-          >
-            Filter
-          </button>
-        )}
-      </form>
+    <header className="fixed top-0 right-0 w-full lg:w-[calc(100%-16rem)] z-40 bg-white/90 backdrop-blur-md border-b border-[#bcc9c6]/30 h-16 px-4 sm:px-6 flex justify-between items-center transition-all duration-300">
+      <div className="flex items-center flex-1 mr-4 min-w-0">
+        {/* Toggle Sidebar Button on Mobile */}
+        <button
+          type="button"
+          onClick={onToggleSidebar}
+          className="lg:hidden p-2 text-[#3d4947] hover:bg-gray-100 rounded-xl transition-colors mr-2 cursor-pointer flex-shrink-0"
+          title="Buka Menu"
+        >
+          <Menu className="w-5.5 h-5.5" />
+        </button>
+
+        {/* Global Student Search Bar */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            onNavigateToStudent();
+          }}
+          className="flex items-center bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-full px-4 py-1.5 w-full max-w-[150px] sm:max-w-xs md:max-w-md transition-all focus-within:border-[#00685f] focus-within:ring-2 focus-within:ring-[#00685f]/10 shadow-sm"
+        >
+          <Search className="text-[#3d4947] opacity-60 w-5 h-5 flex-shrink-0" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Cari NISN..."
+            className="bg-transparent border-none focus:outline-none focus:ring-0 text-xs sm:text-sm w-full placeholder:text-[#3d4947]/40 ml-1.5 text-[#0b1c30]"
+          />
+          {searchQuery && (
+            <button
+              type="submit"
+              className="text-xs font-semibold text-[#00685f] hover:underline"
+            >
+              Filter
+            </button>
+          )}
+        </form>
+      </div>
 
       {/* Action Items */}
       <div className="flex items-center gap-4">
