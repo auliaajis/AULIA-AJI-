@@ -1,5 +1,5 @@
 import { jsPDF } from 'jspdf';
-import { Student, ViolationRecord, CounselingService } from '../types';
+import { Student, ViolationRecord, CounselingService, ClassAttendanceRecord, StudentAttendance } from '../types';
 
 export function drawSchoolLogo(doc: jsPDF, x: number, y: number, r: number) {
   // We draw a gorgeous circular seal
@@ -696,4 +696,249 @@ export function downloadServicePDF(service: CounselingService) {
 
   // Save the PDF file
   doc.save(`Bukti_Layanan_BK_${service.id}_${service.serviceType.replace(/\s+/g, '_')}.pdf`);
+}
+
+export function downloadAttendanceRecapPDF(
+  className: string,
+  startDate: string,
+  endDate: string,
+  allStudents: Student[],
+  attendanceHistory: ClassAttendanceRecord[]
+) {
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'mm',
+    format: 'a4',
+  });
+
+  const primaryColor = [11, 28, 48]; // #0b1c30 (Dark Navy/Slate)
+  const tealColor = [0, 104, 95]; // #00685f (Teal Accent)
+  const redColor = [186, 26, 26]; // #ba1a1a (Violation Red)
+  const grayColor = [61, 73, 71]; // #3d4947 (Charcoal)
+  const lightGrayColor = [240, 244, 244]; // Backgrounds
+
+  let currentY = 15;
+  const pageHeight = 297;
+
+  function checkPageBreak(neededHeight: number) {
+    if (currentY + neededHeight > pageHeight - 20) {
+      doc.addPage();
+      
+      // Page frame border / header line
+      doc.setDrawColor(220, 225, 225);
+      doc.setLineWidth(0.3);
+      doc.line(15, 15, 195, 15);
+
+      doc.setFont('Helvetica', 'italic');
+      doc.setFontSize(8);
+      doc.setTextColor(120, 130, 130);
+      doc.text(`Rekap Absensi Kelas ${className} - Halaman ${doc.getNumberOfPages()}`, 15, 12);
+      
+      currentY = 25;
+    }
+  }
+
+  function drawHeader() {
+    drawLetterhead(doc, tealColor);
+
+    // Document Title
+    doc.setFont('Helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.setTextColor(tealColor[0], tealColor[1], tealColor[2]);
+    doc.text('REKAPITULASI PRESENSI / KEHADIRAN SISWA', 105, 45, { align: 'center' });
+
+    doc.setFont('Helvetica', 'italic');
+    doc.setFontSize(8.5);
+    doc.setTextColor(grayColor[0], grayColor[1], grayColor[2]);
+    doc.text(`Dicetak otomatis pada: ${new Date().toLocaleDateString('id-ID')} - Sifat: Arsip BK`, 105, 50, { align: 'center' });
+  }
+
+  drawHeader();
+  currentY = 58;
+
+  // Render Recap Info
+  checkPageBreak(30);
+  doc.setFillColor(lightGrayColor[0], lightGrayColor[1], lightGrayColor[2]);
+  doc.rect(15, currentY, 180, 8, 'F');
+  doc.setFont('Helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+  doc.text('INFORMASI REKAPITULASI', 20, currentY + 5.5);
+
+  currentY += 13;
+  doc.setFont('Helvetica', 'normal');
+  doc.setFontSize(9.5);
+  doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+
+  doc.text('Kelas / Rombel', 20, currentY);
+  doc.text(':', 55, currentY);
+  doc.setFont('Helvetica', 'bold');
+  doc.text(className, 60, currentY);
+
+  doc.setFont('Helvetica', 'normal');
+  doc.text('Periode Laporan', 20, currentY + 6);
+  doc.text(':', 55, currentY + 6);
+  doc.text(`${startDate} s.d. ${endDate}`, 60, currentY + 6);
+
+  // Filter attendance record within dates and class
+  const filteredRecords = attendanceHistory.filter(
+    (h) => h.class === className && h.date >= startDate && h.date <= endDate
+  );
+
+  doc.text('Hari Efektif KBM', 115, currentY);
+  doc.text(':', 155, currentY);
+  doc.setFont('Helvetica', 'bold');
+  doc.text(`${filteredRecords.length} Hari Tercatat`, 160, currentY);
+
+  const classStudents = allStudents.filter((s) => s.class === className);
+
+  doc.setFont('Helvetica', 'normal');
+  doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+  doc.text('Jumlah Siswa', 115, currentY + 6);
+  doc.text(':', 155, currentY + 6);
+  doc.text(`${classStudents.length} Siswa`, 160, currentY + 6);
+
+  currentY += 16;
+
+  // Render student list with aggregated count
+  checkPageBreak(35);
+  doc.setFillColor(lightGrayColor[0], lightGrayColor[1], lightGrayColor[2]);
+  doc.rect(15, currentY, 180, 8, 'F');
+  doc.setFont('Helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+  doc.text(`DAFTAR PRESENSI SISWA - ${className}`, 20, currentY + 5.5);
+
+  currentY += 12;
+
+  // Header Table
+  doc.setFont('Helvetica', 'bold');
+  doc.setFontSize(8.5);
+  doc.setFillColor(230, 235, 235);
+  doc.rect(15, currentY, 180, 7, 'F');
+  doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+
+  doc.text('No', 18, currentY + 4.5);
+  doc.text('NISN', 26, currentY + 4.5);
+  doc.text('Nama Siswa', 52, currentY + 4.5);
+  doc.text('Hadir (H)', 105, currentY + 4.5, { align: 'center' });
+  doc.text('Sakit (S)', 122, currentY + 4.5, { align: 'center' });
+  doc.text('Izin (I)', 138, currentY + 4.5, { align: 'center' });
+  doc.text('Alpa (A)', 154, currentY + 4.5, { align: 'center' });
+  doc.text('% Kehadiran', 178, currentY + 4.5, { align: 'center' });
+
+  currentY += 7;
+  doc.setFont('Helvetica', 'normal');
+  doc.setFontSize(8);
+
+  if (classStudents.length === 0) {
+    doc.setFont('Helvetica', 'italic');
+    doc.setFontSize(9.5);
+    doc.setTextColor(100, 110, 110);
+    doc.text('Tidak ada siswa terdaftar di kelas ini.', 20, currentY + 5);
+    currentY += 12;
+  } else {
+    classStudents.forEach((student, index) => {
+      // Calculate individual attendance stats
+      let H = 0;
+      let S = 0;
+      let I = 0;
+      let A = 0;
+
+      filteredRecords.forEach((rec) => {
+        const studentRec = rec.records.find((r) => r.studentId === student.id);
+        if (studentRec) {
+          if (studentRec.status === 'H') H++;
+          else if (studentRec.status === 'S') S++;
+          else if (studentRec.status === 'I') I++;
+          else if (studentRec.status === 'A') A++;
+        } else {
+          // If no record found for a specific day, default to 'H' if the day exists
+          H++;
+        }
+      });
+
+      const totalRecordedDays = filteredRecords.length || 1;
+      const attendancePercentage = Math.round((H / totalRecordedDays) * 100);
+
+      const rowHeight = 7;
+      checkPageBreak(rowHeight);
+
+      // Alternate backgrounds
+      if (index % 2 === 1) {
+        doc.setFillColor(248, 249, 249);
+        doc.rect(15, currentY, 180, rowHeight, 'F');
+      }
+
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text(`${index + 1}`, 18, currentY + 4.5);
+      doc.text(student.nis, 26, currentY + 4.5);
+      doc.setFont('Helvetica', 'bold');
+      doc.text(student.name, 52, currentY + 4.5);
+      
+      doc.setFont('Helvetica', 'normal');
+      doc.text(`${H}`, 105, currentY + 4.5, { align: 'center' });
+      doc.text(`${S}`, 122, currentY + 4.5, { align: 'center' });
+      doc.text(`${I}`, 138, currentY + 4.5, { align: 'center' });
+      
+      if (A > 0) {
+        doc.setFont('Helvetica', 'bold');
+        doc.setTextColor(redColor[0], redColor[1], redColor[2]);
+        doc.text(`${A}`, 154, currentY + 4.5, { align: 'center' });
+      } else {
+        doc.text(`${A}`, 154, currentY + 4.5, { align: 'center' });
+      }
+
+      // Percentage column styling
+      doc.setFont('Helvetica', 'bold');
+      if (attendancePercentage < 80) {
+        doc.setTextColor(redColor[0], redColor[1], redColor[2]);
+      } else if (attendancePercentage < 90) {
+        doc.setTextColor(180, 100, 0);
+      } else {
+        doc.setTextColor(tealColor[0], tealColor[1], tealColor[2]);
+      }
+      doc.text(`${attendancePercentage}%`, 178, currentY + 4.5, { align: 'center' });
+
+      // Draw subtle bottom line
+      doc.setDrawColor(220, 225, 225);
+      doc.setLineWidth(0.1);
+      doc.line(15, currentY + rowHeight, 195, currentY + rowHeight);
+
+      currentY += rowHeight;
+    });
+  }
+
+  // Signatures section at the bottom
+  const finalNeededHeight = 45;
+  checkPageBreak(finalNeededHeight);
+
+  const finalY = currentY + 12;
+  const config = getSchoolConfig();
+
+  doc.setFont('Helvetica', 'normal');
+  doc.setFontSize(9.5);
+  doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+
+  doc.text('Mengetahui,', 20, finalY);
+  doc.text('Kepala Sekolah,', 20, finalY + 5);
+  doc.setFont('Helvetica', 'bold');
+  doc.text(config.principalName, 20, finalY + 27);
+  doc.setFont('Helvetica', 'normal');
+  doc.text(`NIP. ${config.principalNip}`, 20, finalY + 32);
+
+  doc.text('Guru Pembimbing / Konselor,', 130, finalY + 5);
+  doc.setFont('Helvetica', 'bold');
+  doc.text('Aulia Aji Sasongko, S.Pd.', 130, finalY + 27);
+  doc.setFont('Helvetica', 'normal');
+  doc.text('NIP. 19931231 202221 1 002', 130, finalY + 32);
+
+  // Footer metadata
+  doc.setFont('Helvetica', 'italic');
+  doc.setFontSize(8);
+  doc.setTextColor(120, 130, 130);
+  doc.text(`Dicetak otomatis melalui Portal BK ${config.schoolName} pada ${new Date().toLocaleDateString('id-ID')} ${new Date().toLocaleTimeString('id-ID')}`, 15, 282);
+
+  // Save the PDF file
+  doc.save(`Rekap_Absensi_BK_${className.replace(/\s+/g, '_')}_${startDate}_to_${endDate}.pdf`);
 }

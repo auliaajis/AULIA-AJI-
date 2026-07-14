@@ -49,10 +49,27 @@ export interface CounselingService {
 export interface ActivityLog {
   id: string;
   timeLabel: string; // e.g., "HARI INI, 09:45"
-  type: 'counseling' | 'violation' | 'homevisit';
+  type: 'counseling' | 'violation' | 'homevisit' | 'attendance';
   title: string;
   description: string;
   studentName: string;
   studentClass: string;
   timestamp: Date;
+}
+
+export interface StudentAttendance {
+  studentId: string;
+  studentName: string;
+  nis: string;
+  status: 'H' | 'S' | 'I' | 'A';
+  notes: string;
+}
+
+export interface ClassAttendanceRecord {
+  id: string; // e.g., "att-{class}-{date}"
+  class: string;
+  date: string; // "YYYY-MM-DD"
+  records: StudentAttendance[];
+  updatedAt: string;
+  submittedBy: string; // Counselor name
 }

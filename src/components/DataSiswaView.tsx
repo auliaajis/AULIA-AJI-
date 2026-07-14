@@ -55,12 +55,28 @@ export default function DataSiswaView({
   const [showAddModal, setShowAddModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [importText, setImportText] = useState('');
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleFileChange = (file: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      if (text) {
+        setImportText(text);
+      }
+    };
+    reader.readAsText(file);
+  };
 
   // Bulk import parser
   const parsedImportStudents = useMemo(() => {
     if (!importText.trim()) return [];
     const lines = importText.split(/\r?\n/);
     const result: Array<{ nis: string; name: string; class: string; gender: 'L' | 'P'; error?: string }> = [];
+    
+    // Auto-generate a sequential NISN base to avoid completely empty values
+    let autoNisCounter = 26000001 + Math.floor(Math.random() * 10000);
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
@@ -76,30 +92,69 @@ export default function DataSiswaView({
         cols = line.split(',');
       }
 
-      // If columns are too short, skip
-      if (cols.length < 2) continue;
+      // Filter empty columns and trim
+      cols = cols.map(c => c.trim()).filter(Boolean);
 
-      // Clean columns
-      const nis = cols[0].trim().replace(/\D/g, '');
-      const name = cols[1]?.trim();
-      const rawClass = cols[2]?.trim() || 'Kelas 7A';
-      const rawGender = cols[3]?.trim() || 'L';
+      // If columns are empty/too short, skip
+      if (cols.length === 0) continue;
+
+      let nis = '';
+      let name = '';
+      let rawClass = '';
+      let rawGender = '';
 
       // Skip headers
+      const firstColLower = cols[0]?.toLowerCase() || '';
+      const secondColLower = cols[1]?.toLowerCase() || '';
       if (
-        nis.toLowerCase().includes('nis') || 
-        name.toLowerCase().includes('nama') || 
-        rawClass.toLowerCase().includes('kelas')
+        firstColLower.includes('nis') || 
+        firstColLower.includes('nama') || 
+        firstColLower.includes('kelas') ||
+        secondColLower.includes('nama') ||
+        secondColLower.includes('siswa')
       ) {
         continue;
       }
 
-      if (!nis) {
-        result.push({ nis: '', name: name || `Baris ${i + 1}`, class: rawClass, gender: 'L', error: 'NISN kosong atau non-angka' });
-        continue;
+      // Smart Parsing Logic:
+      // If there is only 1 column, we treat it as the Name
+      if (cols.length === 1) {
+        name = cols[0];
+        nis = String(autoNisCounter++);
+        rawClass = 'Kelas 7A';
+        rawGender = 'L';
+      } 
+      // If first column contains letters (alphabetic), then it is most likely a NAME, not a NISN!
+      else if (/[a-zA-Z]/.test(cols[0])) {
+        name = cols[0];
+        const col1 = cols[1] || '';
+        const col2 = cols[2] || '';
+
+        // Check if col1 looks like gender (L / P)
+        const col1Lower = col1.toLowerCase();
+        if (col1Lower === 'l' || col1Lower === 'p' || col1Lower.includes('laki') || col1Lower.includes('perem')) {
+          rawGender = col1;
+          rawClass = col2 || 'Kelas 7A';
+        } else {
+          rawClass = col1 || 'Kelas 7A';
+          rawGender = col2 || 'L';
+        }
+        nis = String(autoNisCounter++);
+      } 
+      // Otherwise, assume standard format: NISN, Nama, Kelas, Gender
+      else {
+        nis = cols[0].replace(/\D/g, '');
+        name = cols[1] || '';
+        rawClass = cols[2] || 'Kelas 7A';
+        rawGender = cols[3] || 'L';
+
+        if (!nis) {
+          nis = String(autoNisCounter++);
+        }
       }
+
       if (!name) {
-        result.push({ nis, name: '', class: rawClass, gender: 'L', error: 'Nama kosong' });
+        result.push({ nis, name: '', class: rawClass, gender: 'L', error: 'Nama kosong atau tidak terbaca' });
         continue;
       }
 
@@ -544,19 +599,78 @@ export default function DataSiswaView({
               </pre>
             </div>
 
-            {/* Textarea Input */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-[#0b1c30] block uppercase tracking-wider">
-                Tempel Data di Sini (Excel / CSV / Tab-separated / Semicolon)
-              </label>
-              <textarea
-                value={importText}
-                onChange={(e) => setImportText(e.target.value)}
-                placeholder="21221001, Ahmad Fauzi, Kelas 7A, L&#10;21221002, Siti Nurhaliza, Kelas 7E, P"
-                rows={6}
-                required
-                className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-3.5 py-2.5 text-xs font-mono text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 leading-relaxed"
-              />
+            {/* File Attachment Dropzone & Textarea Input */}
+            <div className="space-y-4">
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                  const file = e.dataTransfer.files?.[0];
+                  if (file) handleFileChange(file);
+                }}
+                className={`border-2 border-dashed rounded-xl p-5 text-center transition-all ${
+                  isDragging
+                    ? 'border-[#00685f] bg-[#00685f]/5'
+                    : 'border-[#bcc9c6]/60 hover:border-[#00685f]/40 bg-[#f8f9ff]'
+                }`}
+              >
+                <input
+                  type="file"
+                  id="file-attachment-input"
+                  accept=".csv,.txt"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleFileChange(file);
+                  }}
+                  className="hidden"
+                />
+                <label
+                  htmlFor="file-attachment-input"
+                  className="cursor-pointer flex flex-col items-center justify-center gap-2"
+                >
+                  <div className="p-2.5 bg-white rounded-full shadow-sm text-[#00685f]">
+                    <Upload className="w-5 h-5 animate-bounce" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-[#0b1c30]">
+                      Unggah Lampiran File (.csv atau .txt)
+                    </p>
+                    <p className="text-[10px] text-[#3d4947] opacity-70 mt-0.5">
+                      Klik untuk memilih file atau seret file ke sini
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-[#0b1c30] block uppercase tracking-wider">
+                    Data Siswa (Tersalin / Terbaca dari File)
+                  </label>
+                  {importText && (
+                    <button
+                      type="button"
+                      onClick={() => setImportText('')}
+                      className="text-[10px] font-bold text-red-600 hover:underline cursor-pointer"
+                    >
+                      Bersihkan
+                    </button>
+                  )}
+                </div>
+                <textarea
+                  value={importText}
+                  onChange={(e) => setImportText(e.target.value)}
+                  placeholder="Format: NISN, Nama Siswa, Kelas, Gender&#10;Contoh: 21221001, Ahmad Fauzi, Kelas 7A, L&#10;Atau cukup: Nama Siswa, Kelas, Gender (NISN akan diisi otomatis)"
+                  rows={6}
+                  required
+                  className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-3.5 py-2.5 text-xs font-mono text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 leading-relaxed"
+                />
+              </div>
             </div>
 
             {/* Parser Live Preview */}

@@ -6,6 +6,7 @@ import DataSiswaView from './components/DataSiswaView';
 import CatatPelanggaranForm from './components/CatatPelanggaranForm';
 import TambahLayananForm from './components/TambahLayananForm';
 import PengaturanView from './components/PengaturanView';
+import AbsensiView from './components/AbsensiView';
 import { downloadServicePDF } from './utils/pdfGenerator';
 
 import {
@@ -214,6 +215,33 @@ export default function App() {
     setCurrentView('dashboard');
   };
 
+  const handleAddAttendanceActivityLog = (
+    title: string,
+    description: string,
+    studentName: string,
+    studentClass: string,
+    type: 'attendance'
+  ) => {
+    const today = new Date();
+    const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(
+      today.getMinutes()
+    ).padStart(2, '0')}`;
+    const timeLabel = `HARI INI, ${formattedHour}`;
+
+    const newLog: ActivityLog = {
+      id: `log-${Date.now()}`,
+      timeLabel,
+      type,
+      title,
+      description,
+      studentName,
+      studentClass,
+      timestamp: new Date(),
+    };
+
+    setLogs((prev) => [newLog, ...prev]);
+  };
+
   // Render individual view layout switch
   const renderMainView = () => {
     switch (currentView) {
@@ -226,6 +254,14 @@ export default function App() {
             logs={logs}
             onNavigateToTab={onNavigateToTab}
             onNavigateToForm={handleNavigateToForm}
+          />
+        );
+      case 'absensi':
+        return (
+          <AbsensiView
+            students={students}
+            activeCounselor={activeCounselor}
+            onAddActivityLog={handleAddAttendanceActivityLog}
           />
         );
       case 'data-siswa':

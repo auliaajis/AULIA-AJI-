@@ -518,6 +518,9 @@ export default function DashboardView({
               } else if (log.type === 'homevisit') {
                 iconBg = 'bg-[#6b38d4]';
                 iconSymbol = <Calendar className="w-3.5 h-3.5 text-white" />;
+              } else if (log.type === 'attendance') {
+                iconBg = 'bg-[#00685f]';
+                iconSymbol = <Calendar className="w-3.5 h-3.5 text-white" />;
               }
 
               return (

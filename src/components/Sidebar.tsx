@@ -1,4 +1,4 @@
-import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut, X, Settings } from 'lucide-react';
+import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut, X, Settings, Calendar } from 'lucide-react';
 import SchoolLogo from './SchoolLogo';
 
 interface Counselor {
@@ -110,6 +110,18 @@ export default function Sidebar({
         >
           <Users className="w-4.5 h-4.5" />
           <span>Data Siswa</span>
+        </button>
+
+        <button
+          onClick={() => onNavigate('absensi')}
+          className={`flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 ${
+            currentView === 'absensi'
+              ? 'bg-[#008378] text-[#f4fffc] shadow-sm'
+              : 'text-[#3d4947] hover:bg-[#d3e4fe]/40'
+          }`}
+        >
+          <Calendar className="w-4.5 h-4.5" />
+          <span>Absensi Kelas</span>
         </button>
 
         <button
