@@ -34,7 +34,7 @@ export default function Sidebar({
       )}
 
       <aside
-        className={`w-64 fixed left-0 top-0 h-screen bg-white border-r border-[#bcc9c6]/30 flex flex-col p-4 gap-2 z-50 transition-transform duration-300 ${
+        className={`w-64 fixed left-0 top-0 h-screen overflow-y-auto bg-white border-r border-[#bcc9c6]/30 flex flex-col p-4 gap-2 z-50 transition-transform duration-300 ${
           isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
       >
