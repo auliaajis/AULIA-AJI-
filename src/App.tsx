@@ -9,6 +9,7 @@ import PengaturanView from './components/PengaturanView';
 import AbsensiView from './components/AbsensiView';
 import GoogleIntegrationView from './components/GoogleIntegrationView';
 import JurnalHarianView from './components/JurnalHarianView';
+import PanggilanOrangTuaView from './components/PanggilanOrangTuaView';
 import { downloadServicePDF } from './utils/pdfGenerator';
 
 import {
@@ -454,6 +455,13 @@ export default function App() {
               data.studentClass,
               'attendance'
             )}
+          />
+        );
+      case 'panggilan-orang-tua':
+        return (
+          <PanggilanOrangTuaView
+            students={filteredStudents}
+            activeCounselor={activeCounselor}
           />
         );
       case 'pengaturan':

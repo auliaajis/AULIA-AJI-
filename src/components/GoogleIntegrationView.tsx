@@ -10,7 +10,12 @@ import {
   HelpCircle, 
   AlertTriangle,
   ArrowRight,
-  Sparkles
+  Sparkles,
+  LogIn,
+  LogOut,
+  User,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
 import { 
   getSavedScriptUrl, 
@@ -19,6 +24,17 @@ import {
   pushDataToGoogle, 
   pullDataFromGoogle 
 } from '../utils/googleSync';
+import {
+  initAuth,
+  googleSignIn,
+  logout,
+  getAccessToken
+} from '../utils/firebaseAuth';
+import {
+  getOrCreateSpreadsheet,
+  pushDataDirect,
+  pullDataDirect
+} from '../utils/googleSheetsDirect';
 
 interface GoogleIntegrationViewProps {
   onDataImported: (data: {
@@ -30,17 +46,228 @@ interface GoogleIntegrationViewProps {
 }
 
 export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrationViewProps) {
+  // Traditional Apps Script state
   const [scriptUrl, setScriptUrl] = useState('');
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle');
   const [statusMessage, setStatusMessage] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Load URL on mount
+  // Direct Google API OAuth state
+  const [user, setUser] = useState<any>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [spreadsheetId, setSpreadsheetId] = useState<string | null>(null);
+  const [spreadsheetUrl, setSpreadsheetUrl] = useState<string | null>(null);
+  const [directSyncStatus, setDirectSyncStatus] = useState<'idle' | 'connecting' | 'connected' | 'syncing' | 'success' | 'error'>('idle');
+  const [directSyncMessage, setDirectSyncMessage] = useState('');
+  const [syncHistory, setSyncHistory] = useState<{ type: 'push' | 'pull'; time: string; status: 'success' | 'failed' }[]>(() => {
+    const saved = localStorage.getItem('bk_google_direct_history');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // Load configuration on mount
   useEffect(() => {
     setScriptUrl(getSavedScriptUrl());
+    
+    // Load spreadsheet details if saved
+    const savedId = localStorage.getItem('bk_google_spreadsheet_id');
+    const savedUrl = localStorage.getItem('bk_google_spreadsheet_url');
+    if (savedId) setSpreadsheetId(savedId);
+    if (savedUrl) setSpreadsheetUrl(savedUrl);
+
+    // Unsubscribe listener for Firebase Auth
+    const unsubscribe = initAuth(
+      (currentUser, token) => {
+        setUser(currentUser);
+        setAccessToken(token);
+        // Automatically check/create spreadsheet once logged in
+        if (token) {
+          handleAutoSetupSpreadsheet(token);
+        }
+      },
+      () => {
+        setUser(null);
+        setAccessToken(null);
+        setDirectSyncStatus('idle');
+      }
+    );
+
+    return () => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
   }, []);
 
+  const handleAutoSetupSpreadsheet = async (token: string) => {
+    setDirectSyncStatus('connecting');
+    setDirectSyncMessage('Mencari atau membuat file basis data "Database BK Sekolah" di Google Drive Anda...');
+    
+    const result = await getOrCreateSpreadsheet(token);
+    if (result.success && result.spreadsheetId) {
+      setSpreadsheetId(result.spreadsheetId);
+      setSpreadsheetUrl(result.spreadsheetUrl || null);
+      localStorage.setItem('bk_google_spreadsheet_id', result.spreadsheetId);
+      if (result.spreadsheetUrl) {
+        localStorage.setItem('bk_google_spreadsheet_url', result.spreadsheetUrl);
+      }
+      setDirectSyncStatus('connected');
+      setDirectSyncMessage('Basis Data Terhubung langsung dengan Google Sheets!');
+    } else {
+      setDirectSyncStatus('error');
+      setDirectSyncMessage(result.message || 'Gagal menyambungkan basis data Google Sheets.');
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setIsLoggingIn(true);
+    try {
+      const result = await googleSignIn();
+      if (result) {
+        setUser(result.user);
+        setAccessToken(result.accessToken);
+        await handleAutoSetupSpreadsheet(result.accessToken);
+      }
+    } catch (error: any) {
+      alert(`Gagal Masuk Google: ${error.message || error}`);
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleGoogleLogout = async () => {
+    if (confirm('Apakah Anda yakin ingin mematikan sinkronisasi dan keluar dari akun Google?')) {
+      await logout();
+      setUser(null);
+      setAccessToken(null);
+      setSpreadsheetId(null);
+      setSpreadsheetUrl(null);
+      localStorage.removeItem('bk_google_spreadsheet_id');
+      localStorage.removeItem('bk_google_spreadsheet_url');
+      setDirectSyncStatus('idle');
+    }
+  };
+
+  const handleDirectExport = async () => {
+    const token = accessToken || await getAccessToken();
+    if (!token) {
+      alert('Sesi Google Anda kedaluwarsa. Silakan masuk kembali.');
+      handleGoogleLogin();
+      return;
+    }
+    if (!spreadsheetId) {
+      alert('ID Spreadsheet tidak ditemukan. Sistem akan mencoba menyetel ulang.');
+      await handleAutoSetupSpreadsheet(token);
+      return;
+    }
+
+    if (!confirm('Apakah Anda yakin ingin mengekspor seluruh data lokal aplikasi ini ke Google Spreadsheet? Semua data lama di lembar "Siswa", "Pelanggaran", "LayananBK", dan "Absensi" akan ditimpa.')) {
+      return;
+    }
+
+    setDirectSyncStatus('syncing');
+    setDirectSyncMessage('Sedang menyinkronkan dan mengekspor data ke Google Sheets...');
+
+    try {
+      const students = JSON.parse(localStorage.getItem('bk_students') || '[]');
+      const violations = JSON.parse(localStorage.getItem('bk_violations') || '[]');
+      const services = JSON.parse(localStorage.getItem('bk_services') || '[]');
+      const attendance = JSON.parse(localStorage.getItem('bk_attendance_history') || '[]');
+
+      const result = await pushDataDirect(token, spreadsheetId, {
+        students,
+        violations,
+        services,
+        attendance
+      });
+
+      if (result.success) {
+        setDirectSyncStatus('success');
+        setDirectSyncMessage(result.message);
+        
+        const newHistoryItem = {
+          type: 'push' as const,
+          time: new Date().toLocaleString('id-ID'),
+          status: 'success' as const
+        };
+        const updatedHistory = [newHistoryItem, ...syncHistory].slice(0, 10);
+        setSyncHistory(updatedHistory);
+        localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
+        alert('Ekspor Berhasil! Data di Google Sheets Anda kini sudah up-to-date.');
+      } else {
+        throw new Error(result.message);
+      }
+    } catch (err: any) {
+      setDirectSyncStatus('error');
+      setDirectSyncMessage(err.message || 'Terjadi kesalahan ekspor.');
+      const newHistoryItem = {
+        type: 'push' as const,
+        time: new Date().toLocaleString('id-ID'),
+        status: 'failed' as const
+      };
+      const updatedHistory = [newHistoryItem, ...syncHistory].slice(0, 10);
+      setSyncHistory(updatedHistory);
+      localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
+      alert(`Ekspor Gagal: ${err.message}`);
+    }
+  };
+
+  const handleDirectImport = async () => {
+    const token = accessToken || await getAccessToken();
+    if (!token) {
+      alert('Sesi Google Anda kedaluwarsa. Silakan masuk kembali.');
+      handleGoogleLogin();
+      return;
+    }
+    if (!spreadsheetId) {
+      alert('ID Spreadsheet tidak ditemukan. Sistem akan mencoba menyetel ulang.');
+      await handleAutoSetupSpreadsheet(token);
+      return;
+    }
+
+    if (!confirm('Peringatan Keras: Ini akan menimpa seluruh data lokal Siswa, Pelanggaran, Jurnal Layanan BK, dan Absensi di browser Anda dengan data yang ada di Google Spreadsheet. Lanjutkan?')) {
+      return;
+    }
+
+    setDirectSyncStatus('syncing');
+    setDirectSyncMessage('Sedang membaca dan mengunduh data terbaru dari Google Sheets...');
+
+    try {
+      const result = await pullDataDirect(token, spreadsheetId);
+      if (result.success && result.data) {
+        onDataImported(result.data);
+        setDirectSyncStatus('success');
+        setDirectSyncMessage('Database lokal berhasil disinkronkan dari Google Sheets!');
+
+        const newHistoryItem = {
+          type: 'pull' as const,
+          time: new Date().toLocaleString('id-ID'),
+          status: 'success' as const
+        };
+        const updatedHistory = [newHistoryItem, ...syncHistory].slice(0, 10);
+        setSyncHistory(updatedHistory);
+        localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
+        alert('Impor Berhasil! Seluruh database lokal browser Anda telah diperbarui dari Google Sheets.');
+      } else {
+        throw new Error(result.message);
+      }
+    } catch (err: any) {
+      setDirectSyncStatus('error');
+      setDirectSyncMessage(err.message || 'Terjadi kesalahan impor.');
+      const newHistoryItem = {
+        type: 'pull' as const,
+        time: new Date().toLocaleString('id-ID'),
+        status: 'failed' as const
+      };
+      const updatedHistory = [newHistoryItem, ...syncHistory].slice(0, 10);
+      setSyncHistory(updatedHistory);
+      localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
+      alert(`Impor Gagal: ${err.message}`);
+    }
+  };
+
+  // Traditional Apps Script Handlers (Fallback)
   const handleSaveUrl = () => {
     saveScriptUrl(scriptUrl);
     alert('URL Google Apps Script berhasil disimpan secara lokal!');
@@ -73,7 +300,7 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       return;
     }
 
-    if (!confirm('Apakah Anda yakin ingin mengekspor seluruh data lokal aplikasi ini ke Google Spreadsheet? Data lama di Spreadsheet Anda akan diperbarui.')) {
+    if (!confirm('Apakah Anda yakin ingin mengekspor seluruh data lokal aplikasi ini ke Google Spreadsheet via Apps Script?')) {
       return;
     }
 
@@ -95,7 +322,7 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       return;
     }
 
-    if (!confirm('Peringatan: Ini akan menimpa data siswa, pelanggaran, rekam layanan, dan absensi di browser Anda dengan data dari Google Spreadsheet. Lanjutkan?')) {
+    if (!confirm('Peringatan: Ini akan menimpa data siswa, pelanggaran, rekam layanan, dan absensi di browser Anda dengan data dari Google Spreadsheet via Apps Script. Lanjutkan?')) {
       return;
     }
 
@@ -104,9 +331,8 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
     setIsSyncing(false);
 
     if (result.success && result.data) {
-      // Pass data to parent to reload states
       onDataImported(result.data);
-      alert('Impor Berhasil! Seluruh database lokal Anda telah diperbarui dari Google Sheets.');
+      alert('Impor Berhasil! Seluruh database lokal Anda telah diperbarui.');
     } else {
       alert('Impor Gagal: ' + result.message);
     }
@@ -242,24 +468,256 @@ function writeSheetData(spreadsheet, name, data, headers) {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h2 className="text-2xl font-extrabold text-[#0b1c30] flex items-center gap-2">
-            <Database className="w-7 h-7 text-[#00685f]" />
-            <span>Integrasi Google Sheets & Apps Script</span>
+            <FileSpreadsheet className="w-7 h-7 text-[#00685f]" />
+            <span>Integrasi Google Sheets</span>
           </h2>
           <p className="text-sm text-[#3d4947]/70 font-semibold mt-0.5">
-            Gunakan Google Sheets Anda sebagai basis data awan untuk menyimpan, memulihkan, dan menyinkronkan seluruh data BK.
+            Cadangkan dan sinkronisasikan seluruh database BK (Siswa, Pelanggaran, Layanan, Absensi) dengan Google Spreadsheet secara aman.
           </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      {/* Main Container Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         
-        {/* Connection Setup Card */}
-        <div className="lg:col-span-2 space-y-6">
-          <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-6">
+        {/* RECOMMENDED DIRECT SYNC METHOD (COLUMN 1 & 2 SPAN) */}
+        <div className="lg:col-span-8 space-y-6">
+          
+          <div className="bg-white rounded-2xl p-6 border-2 border-[#00685f]/30 shadow-md space-y-6 relative overflow-hidden">
+            {/* Recommendation badge */}
+            <div className="absolute top-0 right-0 bg-[#00685f] text-white text-[10px] font-extrabold px-3 py-1 rounded-bl-xl tracking-wider uppercase flex items-center gap-1">
+              <Sparkles className="w-3 h-3 animate-pulse" />
+              <span>Rekomendasi Utama</span>
+            </div>
+
             <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2 pb-3 border-b border-[#bcc9c6]/20">
-              <CloudLightning className="w-5 h-5 text-[#00685f]" />
-              <span>Konfigurasi Endpoint Basis Data</span>
+              <Database className="w-5 h-5 text-[#00685f]" />
+              <span>Sinkronisasi Otomatis Google Sheets (OAuth 2.0)</span>
             </h3>
+
+            {/* Auth check render */}
+            {!user ? (
+              <div className="py-6 flex flex-col items-center justify-center text-center space-y-4">
+                <div className="p-4 bg-teal-50 rounded-full border border-teal-100">
+                  <FileSpreadsheet className="w-12 h-12 text-[#00685f]" />
+                </div>
+                <div className="max-w-md space-y-2">
+                  <h4 className="font-extrabold text-sm text-[#0b1c30]">Sambungkan Akun Google Anda</h4>
+                  <p className="text-xs text-gray-500 leading-relaxed font-medium">
+                    Hubungkan portal BK SMP Negeri 2 Susukan ini secara langsung dengan Google Drive Anda. Kami akan secara otomatis mengelola spreadsheet <strong className="text-gray-700">"Database BK Sekolah"</strong> secara langsung dan instan tanpa perlu repot mengatur kode skrip!
+                  </p>
+                </div>
+
+                {/* Google Sign In Button */}
+                <button
+                  type="button"
+                  onClick={handleGoogleLogin}
+                  disabled={isLoggingIn}
+                  className="mt-2 flex items-center gap-3 bg-white hover:bg-gray-50 border border-gray-300 rounded-xl px-6 py-3 shadow-sm transition-all duration-150 cursor-pointer text-[#3c4043] font-bold text-sm select-none disabled:opacity-50 active:scale-98"
+                >
+                  {isLoggingIn ? (
+                    <RefreshCw className="w-5 h-5 animate-spin text-gray-400" />
+                  ) : (
+                    <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-5 h-5 block">
+                      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                      <path fill="none" d="M0 0h48v48H0z"></path>
+                    </svg>
+                  )}
+                  <span>{isLoggingIn ? 'Menghubungkan...' : 'Masuk dengan Akun Google'}</span>
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                
+                {/* Active Connection Profile */}
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4.5 bg-gray-50 border border-gray-200 rounded-2xl">
+                  <div className="flex items-center gap-3">
+                    {user.photoURL ? (
+                      <img
+                        src={user.photoURL}
+                        alt={user.displayName || 'User'}
+                        className="w-11 h-11 rounded-full border border-gray-200"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <div className="w-11 h-11 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">
+                        <User className="w-6 h-6" />
+                      </div>
+                    )}
+                    <div>
+                      <h4 className="text-xs font-extrabold text-gray-500 uppercase tracking-wider">Terhubung Sebagai:</h4>
+                      <p className="font-bold text-[#0b1c30] text-sm leading-tight mt-0.5">{user.displayName || 'Akun Google Sekolah'}</p>
+                      <p className="text-xs text-gray-500 font-semibold">{user.email}</p>
+                    </div>
+                  </div>
+                  
+                  <button
+                    onClick={handleGoogleLogout}
+                    className="flex items-center gap-1 px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 hover:text-red-800 border border-red-100 rounded-xl text-xs font-bold transition-all cursor-pointer active:scale-95"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>Keluar Akun</span>
+                  </button>
+                </div>
+
+                {/* Status Notice Indicator */}
+                {directSyncStatus !== 'idle' && (
+                  <div className={`p-4 rounded-xl border flex items-start gap-3 animate-in slide-in-from-top-3 ${
+                    directSyncStatus === 'connecting' || directSyncStatus === 'syncing' 
+                      ? 'bg-blue-50/70 border-blue-200 text-blue-800' :
+                    directSyncStatus === 'connected' || directSyncStatus === 'success' 
+                      ? 'bg-[#e6fcf5] border-[#00685f]/20 text-[#00685f]' :
+                    'bg-red-50 border-red-200 text-red-800'
+                  }`}>
+                    {directSyncStatus === 'connecting' || directSyncStatus === 'syncing' ? (
+                      <RefreshCw className="w-5 h-5 animate-spin mt-0.5 text-blue-600" />
+                    ) : directSyncStatus === 'connected' || directSyncStatus === 'success' ? (
+                      <div className="p-1 bg-[#00685f]/10 rounded-full shrink-0">
+                        <CheckCircle2 className="w-4 h-4 text-[#00685f]" />
+                      </div>
+                    ) : (
+                      <div className="p-1 bg-red-100 rounded-full shrink-0">
+                        <AlertCircle className="w-4 h-4 text-red-700" />
+                      </div>
+                    )}
+                    <div className="space-y-0.5">
+                      <h4 className="text-xs font-extrabold uppercase tracking-wider">
+                        {directSyncStatus === 'connecting' ? 'Menghubungkan Drive...' :
+                         directSyncStatus === 'syncing' ? 'Sedang Sinkronisasi...' :
+                         directSyncStatus === 'connected' ? 'Basis Data Terkoneksi' :
+                         directSyncStatus === 'success' ? 'Sinkronisasi Berhasil' : 'Koneksi Gagal'}
+                      </h4>
+                      <p className="text-xs font-semibold leading-relaxed opacity-95">{directSyncMessage}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Active Spreadsheet Details */}
+                {spreadsheetId && (
+                  <div className="p-4 bg-emerald-50/40 border border-emerald-100 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-[#00685f] inline-block"></span>
+                        <h5 className="font-extrabold text-[#0b1c30] text-xs uppercase tracking-wider">File Spreadsheet Terbuka:</h5>
+                      </div>
+                      <p className="text-sm font-bold text-emerald-800">Database BK Sekolah</p>
+                      <p className="text-[10px] text-gray-400 font-mono">ID: {spreadsheetId.substring(0, 24)}...</p>
+                    </div>
+
+                    {spreadsheetUrl && (
+                      <a
+                        href={spreadsheetUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 px-4.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold shadow-sm transition-colors cursor-pointer"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Buka Spreadsheet di Drive</span>
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                {/* Action Controls */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4.5 pt-4 border-t border-[#bcc9c6]/20">
+                  {/* Export */}
+                  <div className="p-4 border border-[#bcc9c6]/30 bg-[#fbfdff] rounded-xl flex flex-col justify-between space-y-3">
+                    <div className="space-y-1">
+                      <span className="text-[9px] font-extrabold bg-[#00685f]/15 text-[#00685f] px-2.5 py-0.5 rounded-full uppercase tracking-wider">Cadangkan</span>
+                      <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">Ekspor Instan ke Google Sheets</h4>
+                      <p className="text-xs text-[#3d4947]/75 font-semibold leading-relaxed">
+                        Kirim data lokal browser saat ini (Siswa, Pelanggaran, Jurnal Layanan, Absensi) langsung ke sheet bersangkutan di awan.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleDirectExport}
+                      disabled={directSyncStatus === 'syncing' || !spreadsheetId}
+                      className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {directSyncStatus === 'syncing' ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Database className="w-4 h-4" />
+                      )}
+                      <span>Ekspor &amp; Cadangkan Data</span>
+                    </button>
+                  </div>
+
+                  {/* Import */}
+                  <div className="p-4 border border-[#bcc9c6]/30 bg-[#fbfdff] rounded-xl flex flex-col justify-between space-y-3">
+                    <div className="space-y-1">
+                      <span className="text-[9px] font-extrabold bg-purple-100 text-purple-700 px-2.5 py-0.5 rounded-full uppercase tracking-wider">Unduh</span>
+                      <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">Impor Instan dari Google Sheets</h4>
+                      <p className="text-xs text-[#3d4947]/75 font-semibold leading-relaxed">
+                        Tarik data awan Google Spreadsheet Anda saat ini untuk menggantikan seluruh data lokal browser secara keseluruhan.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleDirectImport}
+                      disabled={directSyncStatus === 'syncing' || !spreadsheetId}
+                      className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {directSyncStatus === 'syncing' ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-4 h-4" />
+                      )}
+                      <span>Impor &amp; Timpa Data Lokal</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Local direct sync logs */}
+                {syncHistory.length > 0 && (
+                  <div className="pt-4 border-t border-[#bcc9c6]/10">
+                    <h4 className="text-[10px] font-extrabold text-[#0b1c30] uppercase tracking-wider mb-2 flex items-center gap-1">
+                      <span>Log Aktivitas Sinkronisasi Langsung Terakhir</span>
+                    </h4>
+                    <div className="bg-[#f8f9ff] border border-gray-100 rounded-xl divide-y divide-gray-100 text-[11px] font-semibold">
+                      {syncHistory.map((item, idx) => (
+                        <div key={idx} className="flex justify-between items-center p-2.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`w-1.5 h-1.5 rounded-full ${item.type === 'push' ? 'bg-[#00685f]' : 'bg-purple-500'}`}></span>
+                            <span className="text-gray-700">
+                              {item.type === 'push' ? 'Ekspor Data (Push)' : 'Impor Data (Pull)'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-gray-500 font-medium">
+                            <span>{item.time}</span>
+                            <span className={`text-[9px] font-extrabold px-1.5 py-0.2 rounded border uppercase ${
+                              item.status === 'success' 
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-100' 
+                                : 'bg-red-50 text-red-700 border-red-100'
+                            }`}>
+                              {item.status === 'success' ? 'Sukses' : 'Gagal'}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+              </div>
+            )}
+          </div>
+
+          {/* ADVANCED METHOD: MANUAL APPS SCRIPT WEB APP */}
+          <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-6">
+            <div className="flex items-center justify-between border-b border-[#bcc9c6]/20 pb-3">
+              <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2">
+                <CloudLightning className="w-5 h-5 text-gray-500" />
+                <span>Metode Aplikasi Web Apps Script (Alternatif/Lanjutan)</span>
+              </h3>
+              <span className="text-[9px] font-extrabold bg-gray-100 text-gray-500 border border-gray-200 px-2 py-0.5 rounded">OPSIONAL</span>
+            </div>
+
+            <p className="text-xs text-gray-500 leading-relaxed font-semibold">
+              Anda juga bisa menyambungkan data via webhook deployment Google Apps Script (GAS) jika ingin mengizinkan API eksternal pihak ketiga memanggil basis data secara otonom.
+            </p>
 
             {/* URL Input Form */}
             <div className="space-y-3">
@@ -291,9 +749,6 @@ function writeSheetData(spreadsheet, name, data, headers) {
                   </button>
                 </div>
               </div>
-              <p className="text-[10px] text-gray-500 font-semibold">
-                * URL didapatkan setelah Anda mendeploy skrip Apps Script sebagai Aplikasi Web (Web App).
-              </p>
             </div>
 
             {/* Status Display Banner */}
@@ -306,11 +761,11 @@ function writeSheetData(spreadsheet, name, data, headers) {
                 {connectionStatus === 'testing' ? (
                   <RefreshCw className="w-5 h-5 animate-spin mt-0.5" />
                 ) : connectionStatus === 'success' ? (
-                  <div className="p-1 bg-[#00685f]/10 rounded-full">
+                  <div className="p-1 bg-[#00685f]/10 rounded-full shrink-0">
                     <Check className="w-4 h-4 text-[#00685f]" />
                   </div>
                 ) : (
-                  <div className="p-1 bg-red-100 rounded-full">
+                  <div className="p-1 bg-red-100 rounded-full shrink-0">
                     <AlertTriangle className="w-4 h-4 text-red-700" />
                   </div>
                 )}
@@ -325,136 +780,96 @@ function writeSheetData(spreadsheet, name, data, headers) {
             )}
 
             {/* Sync Trigger Panel */}
-            <div className="pt-6 border-t border-[#bcc9c6]/20">
-              <h4 className="text-xs font-extrabold text-[#0b1c30] uppercase tracking-wider mb-4">
-                Sinkronisasi Basis Data
-              </h4>
+            <div className="pt-4 border-t border-[#bcc9c6]/20">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                
                 {/* Push Box */}
                 <div className="p-4 bg-[#f8f9ff] border border-[#bcc9c6]/20 rounded-xl space-y-3 flex flex-col justify-between">
                   <div className="space-y-1">
-                    <span className="text-[10px] font-bold bg-[#00685f]/10 text-[#00685f] px-2 py-0.5 rounded-full uppercase">Kirim (Push)</span>
-                    <h5 className="font-bold text-[#0b1c30] text-sm mt-1">Ekspor ke Google Sheets</h5>
+                    <span className="text-[10px] font-bold bg-[#00685f]/10 text-[#00685f] px-2 py-0.5 rounded-full uppercase">Kirim via GAS</span>
+                    <h5 className="font-bold text-[#0b1c30] text-sm mt-1">Ekspor ke Spreadsheet</h5>
                     <p className="text-xs text-[#3d4947]/75 font-medium leading-relaxed">
-                      Kirim data lokal dari browser ini (siswa, pelanggaran, rekam layanan, absensi) ke spreadsheet awan Anda.
+                      Kirim data lokal browser ke Web App Apps Script Anda.
                     </p>
                   </div>
                   <button
                     onClick={handleExportData}
                     disabled={isSyncing}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
+                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-gray-800 hover:bg-gray-900 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
                   >
                     {isSyncing ? (
                       <RefreshCw className="w-4 h-4 animate-spin" />
                     ) : (
                       <Database className="w-4 h-4" />
                     )}
-                    <span>Kirim & Cadangkan Data</span>
+                    <span>Kirim via Apps Script</span>
                   </button>
                 </div>
 
                 {/* Pull Box */}
                 <div className="p-4 bg-[#f8f9ff] border border-[#bcc9c6]/20 rounded-xl space-y-3 flex flex-col justify-between">
                   <div className="space-y-1">
-                    <span className="text-[10px] font-bold bg-[#6b38d4]/10 text-[#6b38d4] px-2 py-0.5 rounded-full uppercase">Tarik (Pull)</span>
-                    <h5 className="font-bold text-[#0b1c30] text-sm mt-1">Impor dari Google Sheets</h5>
+                    <span className="text-[10px] font-bold bg-purple-50 text-purple-600 px-2 py-0.5 rounded-full uppercase">Tarik via GAS</span>
+                    <h5 className="font-bold text-[#0b1c30] text-sm mt-1">Impor dari Spreadsheet</h5>
                     <p className="text-xs text-[#3d4947]/75 font-medium leading-relaxed">
-                      Tarik data terbaru dari Google Sheets Anda untuk menggantikan basis data lokal browser ini secara keseluruhan.
+                      Tarik data terbaru dari Spreadsheet via Web App Apps Script.
                     </p>
                   </div>
                   <button
                     onClick={handleImportData}
                     disabled={isSyncing}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-[#6b38d4] hover:bg-[#6b38d4]/90 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
+                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-purple-500 hover:bg-purple-600 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
                   >
                     {isSyncing ? (
                       <RefreshCw className="w-4 h-4 animate-spin" />
                     ) : (
                       <RefreshCw className="w-4 h-4" />
                     )}
-                    <span>Tarik & Sinkronisasi</span>
+                    <span>Tarik via Apps Script</span>
                   </button>
                 </div>
-
               </div>
             </div>
           </div>
+          
+        </div>
 
+        {/* INSTRUCTIONS COLUMN (SPAN 4) */}
+        <div className="lg:col-span-4 space-y-6">
           {/* Guide steps */}
           <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-6">
             <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2 pb-3 border-b border-[#bcc9c6]/20">
               <HelpCircle className="w-5 h-5 text-[#00685f]" />
-              <span>Langkah Panduan Pemasangan</span>
+              <span>Panduan &amp; Informasi</span>
             </h3>
 
-            <div className="relative border-l border-gray-200 ml-3.5 space-y-6 text-sm text-[#3d4947] font-semibold">
-              <div className="relative pl-6">
-                <span className="absolute -left-3.5 top-0 w-7 h-7 flex items-center justify-center rounded-full bg-[#00685f] text-white text-xs font-extrabold">
-                  1
-                </span>
-                <h4 className="font-extrabold text-[#0b1c30] text-sm">Buat Google Spreadsheet</h4>
-                <p className="text-xs mt-1 leading-relaxed text-[#3d4947]/80">
-                  Buat sebuah spreadsheet kosong baru di Google Drive Anda. Beri nama bebas, misal: <strong className="text-[#0b1c30]">Database BK Sekolah</strong>.
+            <div className="space-y-5 text-xs text-[#3d4947] font-semibold leading-relaxed">
+              <div className="p-3 bg-teal-50 border border-teal-100 rounded-xl space-y-1.5">
+                <h4 className="font-extrabold text-[#00685f] text-xs flex items-center gap-1">
+                  <Sparkles className="w-4 h-4 shrink-0" />
+                  <span>Koneksi Otomatis (Direkomendasikan)</span>
+                </h4>
+                <p className="text-[#3d4947]/90 text-[11px]">
+                  Cukup masuk menggunakan akun Google Anda. Sistem akan mencari file bernama <strong>"Database BK Sekolah"</strong> di Drive Anda atau membuatnya secara otomatis jika belum ada.
+                </p>
+                <p className="text-[#3d4947]/90 text-[11px] font-bold">
+                  Siswa, Pelanggaran, Jurnal Layanan BK, dan Absensi akan langsung diorganisasikan ke dalam tab-tab spreadsheet bersangkutan secara otomatis!
                 </p>
               </div>
 
-              <div className="relative pl-6">
-                <span className="absolute -left-3.5 top-0 w-7 h-7 flex items-center justify-center rounded-full bg-[#00685f] text-white text-xs font-extrabold">
-                  2
-                </span>
-                <h4 className="font-extrabold text-[#0b1c30] text-sm">Buka Google Apps Script</h4>
-                <p className="text-xs mt-1 leading-relaxed text-[#3d4947]/80">
-                  Di dalam spreadsheet tersebut, klik menu <strong className="text-[#0b1c30]">Ekstensi</strong> pada toolbar atas, lalu pilih <strong className="text-[#0b1c30]">Apps Script</strong>. Halaman editor kode Apps Script akan terbuka.
-                </p>
-              </div>
-
-              <div className="relative pl-6">
-                <span className="absolute -left-3.5 top-0 w-7 h-7 flex items-center justify-center rounded-full bg-[#00685f] text-white text-xs font-extrabold">
-                  3
-                </span>
-                <h4 className="font-extrabold text-[#0b1c30] text-sm">Salin dan Tempelkan Kode GAS</h4>
-                <p className="text-xs mt-1 leading-relaxed text-[#3d4947]/80">
-                  Hapus seluruh kode default bawaan (<code className="font-mono">myFunction</code>), lalu salin seluruh kode dari kotak <strong className="text-[#00685f]">Kode Apps Script</strong> di panel samping kanan ini, dan tempelkan ke dalam editor Apps Script. Jangan lupa klik ikon Simpan (disket).
-                </p>
-              </div>
-
-              <div className="relative pl-6">
-                <span className="absolute -left-3.5 top-0 w-7 h-7 flex items-center justify-center rounded-full bg-[#00685f] text-white text-xs font-extrabold">
-                  4
-                </span>
-                <h4 className="font-extrabold text-[#0b1c30] text-sm">Terapkan Sebagai Aplikasi Web (Deploy)</h4>
-                <p className="text-xs mt-1 leading-relaxed text-[#3d4947]/80">
-                  Klik tombol <strong className="text-[#0b1c30]">Terapkan</strong> (Deploy) &gt; <strong className="text-[#0b1c30]">Terapkan Baru</strong> (New Deployment). Ubah jenis penerapan dengan mengklik roda gigi dan pilih <strong className="text-[#0b1c30]">Aplikasi Web</strong> (Web App).
-                </p>
-              </div>
-
-              <div className="relative pl-6">
-                <span className="absolute -left-3.5 top-0 w-7 h-7 flex items-center justify-center rounded-full bg-[#00685f] text-white text-xs font-extrabold">
-                  5
-                </span>
-                <h4 className="font-extrabold text-[#0b1c30] text-sm">Setel Akses Aplikasi Web</h4>
-                <p className="text-xs mt-1 leading-relaxed text-[#3d4947]/80">
-                  Isi deskripsi penerapan bebas. Ubah pengaturan <strong className="text-[#ba1a1a]">"Siapa yang memiliki akses" (Who has access)</strong> menjadi <strong className="text-[#ba1a1a]">"Siapa saja" (Anyone)</strong>. Ini wajib agar aplikasi web portal BK dapat berkomunikasi secara langsung tanpa kendala otentikasi REST API.
-                </p>
-              </div>
-
-              <div className="relative pl-6">
-                <span className="absolute -left-3.5 top-0 w-7 h-7 flex items-center justify-center rounded-full bg-[#00685f] text-white text-xs font-extrabold">
-                  6
-                </span>
-                <h4 className="font-extrabold text-[#0b1c30] text-sm">Otorisasi & Dapatkan URL</h4>
-                <p className="text-xs mt-1 leading-relaxed text-[#3d4947]/80">
-                  Klik <strong className="text-[#00685f]">Deploy</strong>. Berikan izin akses (Authorize access) ke akun Google Anda apabila diminta. Setelah proses selesai, salin <strong className="text-[#00685f]">URL Aplikasi Web</strong> yang ditampilkan, tempelkan pada kolom URL di atas halaman ini, lalu klik <strong className="text-[#0b1c30]">Simpan URL</strong>!
+              <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl space-y-1.5">
+                <h4 className="font-extrabold text-amber-800 text-xs flex items-center gap-1">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>Aturan Keamanan Data</span>
+                </h4>
+                <p className="text-gray-600 text-[11px]">
+                  Proses ekspor dan impor bersifat <strong>menimpa data lama</strong>. Pastikan Anda melakukan ekspor terlebih dahulu sebelum memuat ulang aplikasi atau menyinkronkan data antar-perangkat guna mencegah hilangnya pembinaan kesiswaan Anda.
                 </p>
               </div>
             </div>
           </div>
-        </div>
 
-        {/* Script Display Code Container Column */}
-        <div className="space-y-6">
-          <div className="bg-[#1e293b] rounded-2xl border border-slate-700 shadow-xl overflow-hidden text-slate-100 flex flex-col justify-between h-full">
+          {/* Script Display Code Container Column */}
+          <div className="bg-[#1e293b] rounded-2xl border border-slate-700 shadow-xl overflow-hidden text-slate-100 flex flex-col justify-between">
             <div>
               <div className="px-5 py-4 border-b border-slate-700 bg-slate-800 flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -482,21 +897,18 @@ function writeSheetData(spreadsheet, name, data, headers) {
                 </button>
               </div>
               
-              <div className="p-5 font-mono text-[10.5px] leading-relaxed overflow-y-auto max-h-[640px] text-slate-300">
-                <p className="text-slate-500 font-semibold mb-3">
-                  {"// 1. Salin seluruh kode di bawah ini\n// 2. Tempelkan ke Apps Script Google Spreadsheet Anda"}
+              <div className="p-4 font-mono text-[9px] leading-relaxed overflow-y-auto max-h-[250px] text-slate-300">
+                <p className="text-slate-500 font-semibold mb-2">
+                  {"// Kode Apps Script opsional\n// untuk metode Web App Lanjutan"}
                 </p>
-                <pre className="whitespace-pre overflow-x-auto select-all selection:bg-slate-700">
+                <pre className="whitespace-pre overflow-x-auto select-all">
                   {googleAppsScriptCode}
                 </pre>
               </div>
             </div>
 
-            <div className="p-4 bg-slate-800 border-t border-slate-700 text-xs font-semibold text-slate-400 leading-normal space-y-2">
-              <div className="flex gap-2 text-indigo-400 items-start">
-                <Sparkles className="w-4 h-4 mt-0.5 shrink-0" />
-                <p>Apps Script ini otomatis mendeteksi dan membuat tabel <strong>Siswa</strong>, <strong>Pelanggaran</strong>, <strong>LayananBK</strong>, dan <strong>Absensi</strong> secara otomatis.</p>
-              </div>
+            <div className="p-3 bg-slate-800 border-t border-slate-700 text-[10px] font-semibold text-slate-400 leading-normal">
+              <p>Apps Script di atas hanya digunakan jika Anda mengaktifkan opsi alternatif Web App.</p>
             </div>
           </div>
         </div>

@@ -110,3 +110,21 @@ export interface BKJournalEntry {
   createdAt: string;
 }
 
+export interface ParentSummon {
+  id: string;
+  letterNumber: string;
+  date: string; // YYYY-MM-DD (tanggal surat dibuat)
+  studentId: string;
+  studentName: string;
+  studentClass: string;
+  studentNis: string;
+  parentName: string;
+  summonDate: string; // YYYY-MM-DD (tanggal kehadiran orang tua)
+  summonTime: string; // HH:MM
+  summonPlace: string;
+  agenda: string;
+  counselorId: string;
+  status: 'Terkirim' | 'Hadir' | 'Batal' | 'Penjadwalan Ulang';
+  createdAt: string;
+}
+

@@ -18,7 +18,8 @@ import {
   UserCheck,
   Upload,
   FileSpreadsheet,
-  Download
+  Download,
+  Mail
 } from 'lucide-react';
 import { downloadViolationPDF, downloadServicePDF, downloadStudentRecapPDF } from '../utils/pdfGenerator';
 
@@ -371,6 +372,194 @@ export default function DataSiswaView({
                 <p className="text-[10px] text-gray-500 mt-1 font-medium">
                   Bimbingan &amp; Konseling
                 </p>
+              </div>
+            </div>
+
+            {/* Timeline Alur Eskalasi & Notifikasi Wali Kelas */}
+            <div className="mb-6 p-4 bg-gray-50 rounded-2xl border border-gray-200/80 space-y-4">
+              <div className="flex items-center justify-between border-b border-gray-200/60 pb-2.5">
+                <h4 className="text-xs font-extrabold text-[#0b1c30] uppercase tracking-wider flex items-center gap-1.5">
+                  <Mail className="w-4 h-4 text-[#00685f]" />
+                  <span>Timeline &amp; Alur Eskalasi Penanganan</span>
+                </h4>
+                <span className={`text-[10px] font-extrabold px-2.5 py-0.5 rounded-full border ${
+                  showDossierModal.violationPoints <= 20 
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-100' 
+                    : showDossierModal.violationPoints <= 50 
+                      ? 'bg-amber-50 text-amber-700 border-amber-100'
+                      : showDossierModal.violationPoints <= 75 
+                        ? 'bg-purple-50 text-purple-700 border-purple-100'
+                        : 'bg-red-50 text-red-700 border-red-100'
+                }`}>
+                  {showDossierModal.violationPoints <= 20 ? 'Pembinaan Wali Kelas' :
+                   showDossierModal.violationPoints <= 50 ? 'Eskalasi Guru BK' :
+                   showDossierModal.violationPoints <= 75 ? 'Sidang Dewan Guru' :
+                   'Diserahkan Kepala Sekolah'}
+                </span>
+              </div>
+
+              {/* Vertical Stepper Timeline */}
+              <div className="space-y-4 relative pl-1.5">
+                {/* Step 1: Wali Kelas */}
+                <div className="flex gap-3">
+                  <div className="flex flex-col items-center flex-shrink-0">
+                    <div className={`w-5.5 h-5.5 rounded-full flex items-center justify-center text-[10px] font-extrabold ${
+                      showDossierModal.violationPoints >= 0 ? 'bg-emerald-600 text-white shadow-sm' : 'bg-gray-200 text-gray-400'
+                    }`}>
+                      1
+                    </div>
+                    <div className="w-0.5 h-10 bg-gray-200"></div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-extrabold text-gray-800 flex justify-between items-center">
+                      <span>Tahap I: Wali Kelas (0 - 20 Poin)</span>
+                      {showDossierModal.violationPoints > 20 ? (
+                        <span className="text-[10px] font-bold text-emerald-600">Terlewati</span>
+                      ) : (
+                        <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-100">Aktif</span>
+                      )}
+                    </p>
+                    <p className="text-[10px] text-gray-500 font-semibold leading-relaxed mt-0.5">
+                      Cukup diselesaikan oleh Wali Kelas melalui pendekatan persuasif, bimbingan mandiri, dan komitmen lisan.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Step 2: Guru BK & Wali Kelas */}
+                <div className="flex gap-3">
+                  <div className="flex flex-col items-center flex-shrink-0">
+                    <div className={`w-5.5 h-5.5 rounded-full flex items-center justify-center text-[10px] font-extrabold ${
+                      showDossierModal.violationPoints > 20 ? 'bg-amber-500 text-white shadow-sm' : 'bg-gray-200 text-gray-400'
+                    }`}>
+                      2
+                    </div>
+                    <div className="w-0.5 h-10 bg-gray-200"></div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-extrabold text-gray-800 flex justify-between items-center">
+                      <span>Tahap II: Kolaborasi Wali Kelas &amp; Guru BK (21 - 50 Poin)</span>
+                      {showDossierModal.violationPoints > 50 ? (
+                        <span className="text-[10px] font-bold text-emerald-600">Terlewati</span>
+                      ) : showDossierModal.violationPoints > 20 ? (
+                        <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-1.5 py-0.2 rounded border border-amber-100">Aktif</span>
+                      ) : (
+                        <span className="text-[10px] font-bold text-gray-400">Belum Aktif</span>
+                      )}
+                    </p>
+                    <p className="text-[10px] text-gray-500 font-semibold leading-relaxed mt-0.5">
+                      Guru BK turun tangan bersama Wali Kelas. Dilakukan pemanggilan Orang Tua / Wali ke sekolah (Panggilan I).
+                    </p>
+                  </div>
+                </div>
+
+                {/* Step 3: Dewan Guru */}
+                <div className="flex gap-3">
+                  <div className="flex flex-col items-center flex-shrink-0">
+                    <div className={`w-5.5 h-5.5 rounded-full flex items-center justify-center text-[10px] font-extrabold ${
+                      showDossierModal.violationPoints > 50 ? 'bg-purple-600 text-white shadow-sm' : 'bg-gray-200 text-gray-400'
+                    }`}>
+                      3
+                    </div>
+                    <div className="w-0.5 h-10 bg-gray-200"></div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-extrabold text-gray-800 flex justify-between items-center">
+                      <span>Tahap III: Dewan Guru &amp; Sidang Kasus (51 - 75 Poin)</span>
+                      {showDossierModal.violationPoints > 75 ? (
+                        <span className="text-[10px] font-bold text-emerald-600">Terlewati</span>
+                      ) : showDossierModal.violationPoints > 50 ? (
+                        <span className="text-[10px] font-bold text-purple-600 bg-purple-50 px-1.5 py-0.2 rounded border border-purple-100">Aktif</span>
+                      ) : (
+                        <span className="text-[10px] font-bold text-gray-400">Belum Aktif</span>
+                      )}
+                    </p>
+                    <p className="text-[10px] text-gray-500 font-semibold leading-relaxed mt-0.5">
+                      Sidang kasus khusus bersama Wali Kelas, Guru BK, Dewan Guru, dan Komite Sekolah. Orang tua dipanggil keras (Panggilan II).
+                    </p>
+                  </div>
+                </div>
+
+                {/* Step 4: Kepala Sekolah */}
+                <div className="flex gap-3">
+                  <div className="flex flex-col items-center flex-shrink-0">
+                    <div className={`w-5.5 h-5.5 rounded-full flex items-center justify-center text-[10px] font-extrabold ${
+                      showDossierModal.violationPoints > 75 ? 'bg-red-600 text-white shadow-sm' : 'bg-gray-200 text-gray-400'
+                    }`}>
+                      4
+                    </div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-extrabold text-gray-800 flex justify-between items-center">
+                      <span>Tahap IV: Kepala Sekolah (&gt; 75 Poin)</span>
+                      {showDossierModal.violationPoints > 75 ? (
+                        <span className="text-[10px] font-bold text-red-600 bg-red-50 px-1.5 py-0.2 rounded border border-red-100">Kritis (Tindakan Tegas)</span>
+                      ) : (
+                        <span className="text-[10px] font-bold text-gray-400">Belum Aktif</span>
+                      )}
+                    </p>
+                    <p className="text-[10px] text-gray-500 font-semibold leading-relaxed mt-0.5">
+                      Keputusan sanksi tertinggi atau pengembalian siswa kepada Orang Tua / Wali Murid disahkan langsung oleh Kepala Sekolah.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Notifikasi Email Logs */}
+              <div className="bg-white p-3 rounded-xl border border-gray-200 space-y-2 text-xs font-semibold">
+                <div className="flex items-center gap-1.5 text-gray-800 font-bold border-b border-gray-100 pb-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
+                  <span>Notifikasi Email Sistem Otomatis</span>
+                </div>
+
+                <div className="space-y-2 text-[10px] leading-relaxed text-gray-600">
+                  {showDossierModal.violationPoints >= 20 ? (
+                    <div className="p-2 bg-yellow-50 rounded border border-yellow-100 space-y-0.5">
+                      <div className="flex items-center justify-between text-yellow-800 font-bold">
+                        <span>📧 EMAIL DISPATCHED</span>
+                        <span>TAHAP I</span>
+                      </div>
+                      <p className="text-gray-700">Notifikasi Peringatan Terkirim Ke:</p>
+                      <p className="font-mono text-gray-800 font-bold bg-white/70 px-1.5 py-0.5 rounded border border-yellow-200/40 inline-block">
+                        wali.kelas.{showDossierModal.class.toLowerCase().replace(/kelas\s*/g, '').replace(/\s+/g, '')}@smpn2susukan.sch.id
+                      </p>
+                      <p className="text-gray-400 text-[9px] font-medium italic mt-1">Siswa telah menyentuh akumulasi &gt;= 20 poin. Wali Kelas berkewajiban memulai pembinaan tingkat kelas.</p>
+                    </div>
+                  ) : null}
+
+                  {showDossierModal.violationPoints >= 50 ? (
+                    <div className="p-2 bg-orange-50 rounded border border-orange-100 space-y-0.5">
+                      <div className="flex items-center justify-between text-orange-800 font-bold">
+                        <span>📧 EMAIL DISPATCHED</span>
+                        <span>TAHAP II (SIAGA)</span>
+                      </div>
+                      <p className="text-gray-700">Notifikasi Sidang Konseling Terkirim Ke:</p>
+                      <p className="font-mono text-gray-800 font-bold bg-white/70 px-1.5 py-0.5 rounded border border-orange-200/40 inline-block">
+                        wali.kelas.{showDossierModal.class.toLowerCase().replace(/kelas\s*/g, '').replace(/\s+/g, '')}@smpn2susukan.sch.id
+                      </p>
+                      <p className="text-gray-400 text-[9px] font-medium italic mt-1">Siswa telah menyentuh akumulasi &gt;= 50 poin. Guru BK &amp; Wali kelas wajib menjadwalkan Panggilan Orang Tua I.</p>
+                    </div>
+                  ) : null}
+
+                  {showDossierModal.violationPoints >= 75 ? (
+                    <div className="p-2 bg-red-50 rounded border border-red-100 space-y-0.5">
+                      <div className="flex items-center justify-between text-red-800 font-bold">
+                        <span>📧 EMAIL DISPATCHED</span>
+                        <span>TAHAP III (KRITIS)</span>
+                      </div>
+                      <p className="text-gray-700">Notifikasi Sidang Dewan Guru Terkirim Ke:</p>
+                      <p className="font-mono text-gray-800 font-bold bg-white/70 px-1.5 py-0.5 rounded border border-red-200/40 inline-block">
+                        wali.kelas.{showDossierModal.class.toLowerCase().replace(/kelas\s*/g, '').replace(/\s+/g, '')}@smpn2susukan.sch.id
+                      </p>
+                      <p className="text-gray-400 text-[9px] font-medium italic mt-1">Siswa telah menyentuh akumulasi &gt;= 75 poin. Penanganan resmi beralih ke Sidang Dewan Guru &amp; Kepala Sekolah.</p>
+                    </div>
+                  ) : null}
+
+                  {showDossierModal.violationPoints < 20 ? (
+                    <div className="text-center py-4 bg-gray-100/50 rounded-xl text-gray-400 italic">
+                      Akumulasi poin masih di bawah batas peringatan otomatis (20 Poin). Belum ada email notifikasi terkirim.
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </div>
 

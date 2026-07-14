@@ -137,10 +137,30 @@ export function drawLetterhead(doc: jsPDF, accentColor: number[]) {
   doc.line(15, 12, 195, 12);
 
   // Draw Kabupaten Semarang logo on the left (X=26, Y=24, R=9)
-  drawKabSemarangLogo(doc, 26, 24, 9);
+  const customKabupatenLogo = typeof localStorage !== 'undefined' ? localStorage.getItem('bk_custom_kabupaten_logo') : null;
+  if (customKabupatenLogo) {
+    try {
+      // Draw at bounding box: X = 26 - 9 = 17, Y = 24 - 9 = 15, size 18x18
+      doc.addImage(customKabupatenLogo, 'JPEG', 17, 15, 18, 18);
+    } catch (e) {
+      drawKabSemarangLogo(doc, 26, 24, 9);
+    }
+  } else {
+    drawKabSemarangLogo(doc, 26, 24, 9);
+  }
 
   // Draw School logo on the right (X=184, Y=24, R=9)
-  drawSchoolLogo(doc, 184, 24, 9);
+  const customSchoolLogo = typeof localStorage !== 'undefined' ? localStorage.getItem('bk_custom_school_logo') : null;
+  if (customSchoolLogo) {
+    try {
+      // Draw at bounding box: X = 184 - 9 = 175, Y = 24 - 9 = 15, size 18x18
+      doc.addImage(customSchoolLogo, 'JPEG', 175, 15, 18, 18);
+    } catch (e) {
+      drawSchoolLogo(doc, 184, 24, 9);
+    }
+  } else {
+    drawSchoolLogo(doc, 184, 24, 9);
+  }
 
   // School name and title (centered perfectly between the two logos at X=105)
   doc.setFont('Helvetica', 'bold');
@@ -1482,6 +1502,120 @@ export function downloadJournalRangePDF(
 
   // Save PDF file
   doc.save(`Rekap_Jurnal_Harian_BK_${startDate}_to_${endDate}_${counselor.name.replace(/\s+/g, '_')}.pdf`);
+}
+
+/**
+ * Generates an official Parent Summon Letter (Surat Panggilan Orang Tua) PDF.
+ */
+export function downloadParentSummonPDF(summon: any, counselor: any) {
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'mm',
+    format: 'a4',
+  });
+
+  const primaryColor = [11, 28, 48]; // #0b1c30
+  const tealColor = [0, 104, 95]; // #00685f
+
+  // 1. Draw Kop Surat / Letterhead
+  drawLetterhead(doc, tealColor);
+
+  let currentY = 43;
+
+  // 2. Place Letter Date (Tanggal Surat) on the right, aligned with meta info on the left
+  const schoolConfig = getSchoolConfig();
+  const rawAddressParts = schoolConfig.schoolAddress.split(',');
+  const city = rawAddressParts.find(p => p.trim().startsWith('Kab.') || p.trim().startsWith('Kec.') || p.trim().includes('Semarang')) || 'Semarang';
+  const cleanCity = city.replace('Kab.', '').replace('Kec.', '').trim();
+
+  doc.setFont('Helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+  doc.text(`${cleanCity}, ${formatIndonesianDate(summon.date)}`, 195, currentY, { align: 'right' });
+
+  // 3. Meta info on the left: Nomor, Lampiran, Hal
+  doc.text(`Nomor    : ${summon.letterNumber}`, 15, currentY);
+  doc.text('Lampiran : -', 15, currentY + 5);
+  doc.setFont('Helvetica', 'bold');
+  doc.text(`Perihal    : Panggilan Orang Tua / Wali Murid`, 15, currentY + 10);
+
+  currentY += 20;
+
+  // 4. Address to recipient (Kepada Yth. Bapak/Ibu Orang Tua/Wali...)
+  doc.setFont('Helvetica', 'normal');
+  doc.text('Kepada Yth.', 15, currentY);
+  doc.setFont('Helvetica', 'bold');
+  doc.text(`Bapak / Ibu Orang Tua / Wali dari ${summon.studentName}`, 15, currentY + 5);
+  doc.setFont('Helvetica', 'normal');
+  doc.text(`Siswa Kelas ${summon.studentClass}`, 15, currentY + 10);
+  doc.text('di tempat', 15, currentY + 15);
+
+  currentY += 27;
+
+  // 5. Opening Salutation
+  doc.text('Dengan hormat,', 15, currentY);
+  
+  // 6. Body Paragraph 1
+  currentY += 7;
+  const bodyText1 = `Sehubungan dengan diperlukannya koordinasi dan konsultasi bersama antara pihak sekolah dengan orang tua/wali murid guna mendukung perkembangan belajar, kedisiplinan, serta bimbingan putra/putri Bapak/Ibu, maka kami mengharapkan kehadiran Bapak/Ibu pada:`;
+  const splitBodyText1 = doc.splitTextToSize(bodyText1, 180);
+  doc.text(splitBodyText1, 15, currentY);
+
+  currentY += splitBodyText1.length * 5 + 4;
+
+  // 7. Meeting Schedule Details in clean indents
+  doc.setFont('Helvetica', 'bold');
+  doc.text('Hari, Tanggal', 25, currentY);
+  doc.text('Waktu', 25, currentY + 6);
+  doc.text('Tempat', 25, currentY + 12);
+  doc.text('Acara', 25, currentY + 18);
+
+  doc.setFont('Helvetica', 'normal');
+  doc.text(`:  ${formatIndonesianDate(summon.summonDate)}`, 60, currentY);
+  doc.text(`:  ${summon.summonTime} WIB s.d. Selesai`, 60, currentY + 6);
+  doc.text(`:  ${summon.summonPlace}`, 60, currentY + 12);
+  doc.setFont('Helvetica', 'bold');
+  doc.text(`:  ${summon.agenda}`, 60, currentY + 18);
+
+  currentY += 26;
+
+  // 8. Body Paragraph 2
+  doc.setFont('Helvetica', 'normal');
+  const bodyText2 = `Mengingat pentingnya koordinasi bimbingan ini demi kebaikan dan kelancaran proses pendidikan putra/putri Bapak/Ibu di sekolah, kami sangat mengharapkan kehadiran Bapak/Ibu tepat pada waktu yang telah ditentukan.`;
+  const splitBodyText2 = doc.splitTextToSize(bodyText2, 180);
+  doc.text(splitBodyText2, 15, currentY);
+
+  currentY += splitBodyText2.length * 5 + 3;
+
+  // 9. Closing Salutation
+  const closingText = `Demikian surat panggilan ini kami sampaikan, atas perhatian, kehadiran, dan kerja sama Bapak/Ibu, kami ucapkan terima kasih.`;
+  const splitClosingText = doc.splitTextToSize(closingText, 180);
+  doc.text(splitClosingText, 15, currentY);
+
+  currentY += splitClosingText.length * 5 + 15;
+
+  // 10. Signatures
+  doc.text('Mengetahui,', 20, currentY);
+  doc.text('Kepala Sekolah,', 20, currentY + 5);
+  doc.setFont('Helvetica', 'bold');
+  doc.text(schoolConfig.principalName, 20, currentY + 28);
+  doc.setFont('Helvetica', 'normal');
+  doc.text(`NIP. ${schoolConfig.principalNip}`, 20, currentY + 33);
+
+  doc.text('Guru Bimbingan & Konseling,', 130, currentY + 5);
+  doc.setFont('Helvetica', 'bold');
+  doc.text(counselor.name, 130, currentY + 28);
+  doc.setFont('Helvetica', 'normal');
+  doc.text(counselor.nip && counselor.nip !== '-' ? `NIP. ${counselor.nip}` : 'NIP. -', 130, currentY + 33);
+
+  // Footer metadata
+  doc.setFont('Helvetica', 'italic');
+  doc.setFontSize(7.5);
+  doc.setTextColor(120, 130, 130);
+  doc.text(`Surat Resmi ini dicetak secara digital melalui Portal BK ${schoolConfig.schoolName} pada ${new Date().toLocaleDateString('id-ID')} ${new Date().toLocaleTimeString('id-ID')}`, 15, 282);
+
+  // Save PDF
+  doc.save(`Surat_Panggilan_Orang_Tua_${summon.letterNumber.replace(/\//g, '_')}_${summon.studentName.replace(/\s+/g, '_')}.pdf`);
 }
 
 // Utility to format Date into Indonesian (e.g., "Senin, 13 Juli 2026")

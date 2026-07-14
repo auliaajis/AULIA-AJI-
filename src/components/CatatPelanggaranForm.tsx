@@ -10,9 +10,91 @@ import {
   ShieldAlert,
   Info,
   Download,
-  Filter
+  Filter,
+  Mail,
+  Send,
+  CheckCircle
 } from 'lucide-react';
 import { downloadViolationPDF } from '../utils/pdfGenerator';
+
+interface ViolationOption {
+  id: string;
+  label: string;
+  points: number;
+}
+
+interface ViolationCategory {
+  id: string;
+  name: string;
+  options: ViolationOption[];
+}
+
+const VIOLATION_CATEGORIES: ViolationCategory[] = [
+  {
+    id: 'kedisiplinan',
+    name: 'Kedisiplinan & Ketertiban',
+    options: [
+      { id: 'k1', label: 'Terlambat masuk sekolah', points: 5 },
+      { id: 'k2', label: 'Membolos pelajaran / meninggalkan kelas tanpa izin', points: 15 },
+      { id: 'k3', label: 'Membolos sekolah / tidak masuk tanpa keterangan (alpa)', points: 20 },
+      { id: 'k4', label: 'Keluar lingkungan sekolah saat jam istirahat / pelajaran tanpa izin', points: 10 },
+      { id: 'k5', label: 'Membawa gawai / smartphone non-edukasi tanpa izin guru', points: 15 },
+      { id: 'k6', label: 'Tidak mengikuti upacara bendera hari Senin / kegiatan wajib', points: 10 },
+      { id: 'k7', label: 'Membawa barang yang mengganggu ketertiban (mainan, kartu, dll)', points: 10 },
+    ]
+  },
+  {
+    id: 'kerapian',
+    name: 'Kerapian & Atribut Seragam',
+    options: [
+      { id: 'a1', label: 'Seragam tidak lengkap / tidak sesuai hari / atribut tidak ada', points: 5 },
+      { id: 'a2', label: 'Pakaian dikeluarkan / tidak rapi / tidak memakai ikat pinggang hitam', points: 5 },
+      { id: 'a3', label: 'Rambut gondrong / dicat / potongan tidak rapi (siswa putra)', points: 10 },
+      { id: 'a4', label: 'Memakai perhiasan berlebihan / aksesoris tidak pantas ke sekolah', points: 5 },
+      { id: 'a5', label: 'Kuku panjang / dicat warna-warni', points: 5 },
+      { id: 'a6', label: 'Menggunakan sepatu atau kaos kaki tidak sesuai ketentuan', points: 5 },
+      { id: 'a7', label: 'Menggunakan make-up / kosmetik berlebihan', points: 5 },
+    ]
+  },
+  {
+    id: 'perilaku',
+    name: 'Perilaku & Etika / Karakter',
+    options: [
+      { id: 'p1', label: 'Tidak sopan / menentang / berkata kasar kepada Guru atau Staf sekolah', points: 25 },
+      { id: 'p2', label: 'Membuat kegaduhan / mengganggu jalannya proses pembelajaran', points: 10 },
+      { id: 'p3', label: 'Merusak fasilitas / sarana prasarana sekolah secara sengaja', points: 30 },
+      { id: 'p4', label: 'Melakukan perundungan verbal (bullying), ejekan SARA, atau intimidasi', points: 25 },
+      { id: 'p5', label: 'Berpacaran berlebihan atau berdua-duaan di tempat sepi lingkungan sekolah', points: 20 },
+      { id: 'p6', label: 'Mencoret-coret meja, dinding, kursi, atau buku perpustakaan (vandalism)', points: 10 },
+      { id: 'p7', label: 'Membawa / mengonsumsi rokok elektrik (vape) / rokok biasa di luar sekolah memakai seragam', points: 30 },
+    ]
+  },
+  {
+    id: 'akademik',
+    name: 'Akademik & Integritas',
+    options: [
+      { id: 'ak1', label: 'Menyontek saat ujian harian, tengah semester, atau akhir semester', points: 25 },
+      { id: 'ak2', label: 'Melakukan plagiasi / menyalin tugas atau PR teman', points: 10 },
+      { id: 'ak3', label: 'Tidak mengerjakan tugas / pekerjaan rumah (PR) berulang kali', points: 10 },
+      { id: 'ak4', label: 'Memalsukan tanda tangan orang tua, wali kelas, atau guru mata pelajaran', points: 30 },
+      { id: 'ak5', label: 'Mengubah nilai rapor / lembar jawaban secara ilegal', points: 50 },
+    ]
+  },
+  {
+    id: 'berat',
+    name: 'Pelanggaran Berat & Hukum',
+    options: [
+      { id: 'b1', label: 'Melakukan perundungan fisik (physical bullying) atau kekerasan', points: 50 },
+      { id: 'b2', label: 'Melakukan pemalakan / pemerasan uang atau barang kepada teman', points: 40 },
+      { id: 'b3', label: 'Membawa, menyimpan, atau menghisap rokok di lingkungan sekolah', points: 50 },
+      { id: 'b4', label: 'Membawa, menyimpan, atau menyebarkan konten pornografi', points: 75 },
+      { id: 'b5', label: 'Membawa senjata tajam, senjata api, atau barang berbahaya lainnya', points: 100 },
+      { id: 'b6', label: 'Terlibat pencurian barang milik sekolah, guru, karyawan, atau sesama siswa', points: 75 },
+      { id: 'b7', label: 'Membawa, mengonsumsi, atau mengedarkan narkoba, miras, atau obat terlarang', points: 100 },
+      { id: 'b8', label: 'Terlibat perkelahian massal (tawuran) antar kelas atau antar sekolah', points: 100 },
+    ]
+  }
+];
 
 interface CatatPelanggaranFormProps {
   students: Student[];
@@ -52,7 +134,9 @@ export default function CatatPelanggaranForm({
   const [showDropdown, setShowDropdown] = useState(false);
 
   // Form states
-  const [violationCategory, setViolationCategory] = useState<'' | 'Kedisiplinan' | 'Perilaku' | 'Akademik'>('');
+  const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [selectedOptionId, setSelectedOptionId] = useState<string>('');
+  const [customViolationLabel, setCustomViolationLabel] = useState<string>('');
   const [pointsAdded, setPointsAdded] = useState(0);
   const [incidentDate, setIncidentDate] = useState('');
   const [incidentTime, setIncidentTime] = useState('');
@@ -60,6 +144,31 @@ export default function CatatPelanggaranForm({
   const [notes, setNotes] = useState('');
   const [handledBy, setHandledBy] = useState<'Belum Ditangani' | 'Wali Kelas' | 'Guru BK' | 'Wali Kelas & Guru BK'>('Belum Ditangani');
   const [handlingProgress, setHandlingProgress] = useState('');
+  const [showEmailModal, setShowEmailModal] = useState(false);
+  const [emailData, setEmailData] = useState<{
+    to: string;
+    subject: string;
+    body: string;
+    triggerPoints: number;
+    severity: 'TAHAP I' | 'TAHAP II (SIAGA)' | 'TAHAP III (KRITIS)';
+  } | null>(null);
+
+  // Derived violation category string matching existing fields
+  const violationCategory = useMemo(() => {
+    const categoryObj = VIOLATION_CATEGORIES.find(c => c.id === selectedCategory);
+    const optionObj = categoryObj?.options.find(o => o.id === selectedOptionId);
+    
+    if (categoryObj) {
+      if (selectedOptionId === 'other') {
+        return `${categoryObj.name}: ${customViolationLabel.trim() || 'Pelanggaran Lainnya'}`;
+      } else if (optionObj) {
+        return `${categoryObj.name}: ${optionObj.label}`;
+      } else {
+        return categoryObj.name;
+      }
+    }
+    return '';
+  }, [selectedCategory, selectedOptionId, customViolationLabel]);
 
   // Auto Ticket ID generation
   const ticketId = useMemo(() => {
@@ -79,13 +188,32 @@ export default function CatatPelanggaranForm({
     }
   }, [preSelectedStudentId, students]);
 
-  // Handle selected violation category points
+  // Handle selected violation category points dynamically based on detailed selections
   useEffect(() => {
-    if (violationCategory === 'Kedisiplinan') setPointsAdded(15);
-    else if (violationCategory === 'Perilaku') setPointsAdded(50);
-    else if (violationCategory === 'Akademik') setPointsAdded(25);
-    else setPointsAdded(0);
-  }, [violationCategory]);
+    if (!selectedCategory) {
+      setPointsAdded(0);
+      setSelectedOptionId('');
+      setCustomViolationLabel('');
+      return;
+    }
+    
+    const categoryObj = VIOLATION_CATEGORIES.find(c => c.id === selectedCategory);
+    if (!categoryObj) return;
+
+    if (selectedOptionId === 'other') {
+      // Set a default pointsAdded value if currently 0
+      if (pointsAdded <= 0) {
+        setPointsAdded(5);
+      }
+    } else {
+      const optionObj = categoryObj.options.find(o => o.id === selectedOptionId);
+      if (optionObj) {
+        setPointsAdded(optionObj.points);
+      } else {
+        setPointsAdded(0);
+      }
+    }
+  }, [selectedCategory, selectedOptionId]);
 
   // Set default current date and time
   useEffect(() => {
@@ -118,17 +246,8 @@ export default function CatatPelanggaranForm({
   const projectedPoints = currentPoints + pointsAdded;
   const isEscalating = projectedPoints >= 75;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedStudent) {
-      alert('Pilih siswa terlebih dahulu!');
-      return;
-    }
-    if (!violationCategory) {
-      alert('Pilih jenis kategori pelanggaran!');
-      return;
-    }
-
+  const handleConfirmEmailAndSave = () => {
+    if (!selectedStudent) return;
     onSaveViolation({
       studentId: selectedStudent.id,
       studentName: selectedStudent.name,
@@ -143,8 +262,86 @@ export default function CatatPelanggaranForm({
       handledBy,
       handlingProgress: handledBy !== 'Belum Ditangani' ? handlingProgress : '',
     });
+    setShowEmailModal(false);
+  };
 
-    alert('Laporan Pelanggaran Siswa berhasil dicatat dan diverifikasi.');
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedStudent) {
+      alert('Pilih siswa terlebih dahulu!');
+      return;
+    }
+    if (!violationCategory) {
+      alert('Pilih jenis kategori pelanggaran!');
+      return;
+    }
+
+    const classCode = selectedStudent.class.toLowerCase().replace(/kelas\s*/g, '').replace(/\s+/g, '');
+    const waliEmail = `wali.kelas.${classCode}@smpn2susukan.sch.id`;
+
+    if (projectedPoints >= 20) {
+      // Trigger automatic email notice to Homeroom Teacher (Wali Kelas)
+      let severityLevel: 'TAHAP I' | 'TAHAP II (SIAGA)' | 'TAHAP III (KRITIS)' = 'TAHAP I';
+      let actionRecommendation = '';
+      
+      if (projectedPoints >= 75) {
+        severityLevel = 'TAHAP III (KRITIS)';
+        actionRecommendation = 'Berdasarkan Peraturan Tata Tertib Sekolah, siswa ini telah melebihi batas 75 poin. Kasus WAJIB beralih dari Guru BK ke Sidang Dewan Guru, dewan kehormatan sekolah, serta koordinasi langsung dengan Kepala Sekolah untuk tindak lanjut skorsing berat / penyerahan kembali ke orang tua.';
+      } else if (projectedPoints >= 50) {
+        severityLevel = 'TAHAP II (SIAGA)';
+        actionRecommendation = 'Siswa telah menyentuh batas 50 poin pelanggaran. Guru BK dan Wali Kelas wajib segera mengagendakan Panggilan Orang Tua ke-I ke sekolah guna penandatanganan kontrak perilaku tertulis bermeterai.';
+      } else {
+        severityLevel = 'TAHAP I';
+        actionRecommendation = 'Siswa menyentuh akumulasi >= 20 poin. Sebagai Wali Kelas, mohon jadwalkan pembinaan persuasif langsung tingkat kelas, diskusi internal bersama siswa, serta catat dalam jurnal wali kelas.';
+      }
+
+      setEmailData({
+        to: waliEmail,
+        subject: `[ALERTI BK] Akumulasi Poin Pelanggaran Tinggi: ${selectedStudent.name} (${selectedStudent.class}) mencapai ${projectedPoints} Poin`,
+        body: `Yth. Bapak/Ibu Wali Kelas ${selectedStudent.class},
+
+Melalui surat elektronik sistem BK otomatis ini, kami memberitahukan bahwa salah satu siswa bimbingan Anda di kelas:
+
+- Nama: ${selectedStudent.name}
+- NISN: ${selectedStudent.nis}
+- Kelas: ${selectedStudent.class}
+
+Telah dilaporkan melakukan pelanggaran kedisiplinan terbaru:
+"${violationCategory}" (+${pointsAdded} Poin) pada ${incidentDate} pukul ${incidentTime} WIB.
+
+Dengan demikian, akumulasi poin pelanggaran siswa kini telah menyentuh: ${projectedPoints} POIN (Ambang batas eskalasi: ${severityLevel}).
+
+REKOMENDASI TINDAKAN:
+${actionRecommendation}
+
+Mohon segera berkoordinasi dengan Guru BK pengampu untuk menyelaraskan pembinaan siswa yang bersangkutan.
+
+Hormat kami,
+Unit Administrasi BK & Layanan Kesiswaan
+SMP Negeri 2 Susukan`,
+        triggerPoints: projectedPoints,
+        severity: severityLevel,
+      });
+
+      setShowEmailModal(true);
+    } else {
+      // Small accumulation: solved inside class by Wali Kelas, no automatic email dialog required
+      onSaveViolation({
+        studentId: selectedStudent.id,
+        studentName: selectedStudent.name,
+        studentClass: selectedStudent.class,
+        category: violationCategory,
+        pointsAdded,
+        date: incidentDate,
+        time: incidentTime,
+        location: incidentLocation || 'Lokal Sekolah',
+        reportedBy: activeCounselor.name,
+        notes,
+        handledBy: handledBy === 'Belum Ditangani' ? 'Wali Kelas' : handledBy, // Auto mark as resolved by Homeroom Teacher as points are low
+        handlingProgress: handledBy === 'Belum Ditangani' ? 'Teguran persuasif & pembinaan tingkat kelas oleh Wali Kelas.' : handlingProgress,
+      });
+      alert(`Laporan berhasil disimpan. Karena akumulasi masih rendah (${projectedPoints} Poin), kasus cukup diselesaikan oleh Wali Kelas.`);
+    }
   };
 
   return (
@@ -414,32 +611,87 @@ export default function CatatPelanggaranForm({
                   )}
                 </div>
 
-                {/* Violation Category dropdown list */}
+                {/* 1. Kategori Pelanggaran (Main Category Selection) */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-bold text-[#0b1c30] flex items-center gap-1.5">
                     <AlertTriangle className="w-4 h-4 text-[#ba1a1a]" />
-                    <span>Jenis Kategori Pelanggaran</span>
+                    <span>Kategori Utama Pelanggaran</span>
                   </label>
                   <select
-                    value={violationCategory}
-                    onChange={(e) =>
-                      setViolationCategory(e.target.value as '' | 'Kedisiplinan' | 'Perilaku' | 'Akademik')
-                    }
+                    value={selectedCategory}
+                    onChange={(e) => {
+                      setSelectedCategory(e.target.value);
+                      setSelectedOptionId('');
+                      setCustomViolationLabel('');
+                    }}
                     required
                     className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-4 py-3 text-sm text-[#0b1c30] cursor-pointer focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 shadow-sm"
                   >
-                    <option value="">Pilih Kategori...</option>
-                    <option value="Kedisiplinan">
-                      Kedisiplinan (Terlambat, Atribut, dll) — 15 Poin
-                    </option>
-                    <option value="Perilaku">
-                      Perilaku (Perkelahian, Bullying, dll) — 50 Poin
-                    </option>
-                    <option value="Akademik">
-                      Akademik (Menyontek, Tugas Palsu, dll) — 25 Poin
-                    </option>
+                    <option value="">Pilih Kategori Utama...</option>
+                    {VIOLATION_CATEGORIES.map((cat) => (
+                      <option key={cat.id} value={cat.id}>
+                        {cat.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
+
+                {/* 2. Pilihan Pelanggaran Spesifik (Specific Violation Options) */}
+                {selectedCategory && (
+                  <div className="space-y-1.5 animate-in slide-in-from-top-2 duration-200">
+                    <label className="text-xs font-bold text-[#0b1c30] flex items-center gap-1.5">
+                      <ChevronRight className="w-4.5 h-4.5 text-[#00685f]" />
+                      <span>Bentuk / Pilihan Pelanggaran Spesifik</span>
+                    </label>
+                    <select
+                      value={selectedOptionId}
+                      onChange={(e) => setSelectedOptionId(e.target.value)}
+                      required
+                      className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-4 py-3 text-sm text-[#0b1c30] cursor-pointer focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 shadow-sm"
+                    >
+                      <option value="">Pilih Bentuk Pelanggaran...</option>
+                      {VIOLATION_CATEGORIES.find(c => c.id === selectedCategory)?.options.map((opt) => (
+                        <option key={opt.id} value={opt.id}>
+                          {opt.label} ({opt.points} Poin)
+                        </option>
+                      ))}
+                      <option value="other">Pelanggaran Lainnya (Tulis Manual &amp; Tentukan Poin)</option>
+                    </select>
+                  </div>
+                )}
+
+                {/* 3. Custom / Manual inputs for Custom Violation and Points */}
+                {selectedCategory && selectedOptionId === 'other' && (
+                  <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-3 gap-6 p-4 bg-orange-50/50 rounded-2xl border border-orange-200/60 animate-in slide-in-from-top-2 duration-300">
+                    <div className="md:col-span-2 space-y-1.5">
+                      <label className="text-xs font-bold text-orange-800">
+                        Nama / Deskripsi Pelanggaran Kustom
+                      </label>
+                      <input
+                        type="text"
+                        value={customViolationLabel}
+                        onChange={(e) => setCustomViolationLabel(e.target.value)}
+                        placeholder="Contoh: Menggambar graffiti tidak senonoh di perpustakaan..."
+                        required
+                        className="w-full bg-white border border-orange-300/65 rounded-xl px-4 py-2.5 text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-orange-500 shadow-xs"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-orange-800">
+                        Bobot Poin Pelanggaran
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="100"
+                        value={pointsAdded}
+                        onChange={(e) => setPointsAdded(Math.max(1, parseInt(e.target.value) || 0))}
+                        required
+                        className="w-full bg-white border border-orange-300/65 rounded-xl px-4 py-2.5 text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-orange-500 shadow-xs"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Real-time reactive projected points display block */}
@@ -630,6 +882,98 @@ export default function CatatPelanggaranForm({
             </div>
           </div>
         </>
+      )}
+
+      {/* AUTOMATED EMAIL NOTIFICATION SIMULATOR MODAL */}
+      {showEmailModal && emailData && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col animate-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-[#00685f] to-[#004e47] px-6 py-4.5 text-white flex items-center justify-between shadow-sm">
+              <div className="flex items-center gap-2.5">
+                <Mail className="w-5 h-5 text-teal-200 animate-pulse" />
+                <div>
+                  <h3 className="text-sm font-extrabold tracking-tight uppercase">
+                    Notifikasi Email BK Otomatis Terpicu!
+                  </h3>
+                  <p className="text-[10px] text-teal-100 font-semibold opacity-90">
+                    Batas Poin Akumulasi Tinggi Terlampaui ({emailData.triggerPoints} Poin)
+                  </p>
+                </div>
+              </div>
+              <span className={`text-[10px] font-extrabold px-2.5 py-0.5 rounded-full border ${
+                emailData.severity === 'TAHAP III (KRITIS)' 
+                  ? 'bg-red-500/20 text-red-100 border-red-400' 
+                  : emailData.severity === 'TAHAP II (SIAGA)' 
+                    ? 'bg-amber-500/20 text-amber-100 border-amber-400'
+                    : 'bg-teal-500/20 text-teal-100 border-teal-400'
+              }`}>
+                {emailData.severity}
+              </span>
+            </div>
+
+            {/* Email Client Layout Container */}
+            <div className="p-6 space-y-4 bg-[#f8f9ff]">
+              <div className="bg-white rounded-xl border border-gray-200/80 p-4 shadow-xs space-y-3">
+                {/* Meta Fields */}
+                <div className="grid grid-cols-1 gap-2 text-xs border-b border-gray-100 pb-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-1">
+                    <span className="font-bold text-gray-500 w-16">Dari:</span>
+                    <span className="font-mono text-gray-800 bg-gray-100 px-2 py-0.5 rounded border border-gray-200/60 text-[11px] inline-block font-semibold">
+                      bk.smpn2susukan@sch.id <span className="text-gray-400">&lt;Sistem BK Otomatis&gt;</span>
+                    </span>
+                  </div>
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-1">
+                    <span className="font-bold text-gray-500 w-16">Kepada:</span>
+                    <span className="font-mono text-[#00685f] bg-teal-50 px-2 py-0.5 rounded border border-teal-100 text-[11px] inline-block font-extrabold">
+                      {emailData.to} <span className="text-teal-600/70">&lt;Wali Kelas Siswa&gt;</span>
+                    </span>
+                  </div>
+                  <div className="flex flex-col sm:flex-row sm:items-start gap-1 pt-1">
+                    <span className="font-bold text-gray-500 w-16 flex-shrink-0">Subjek:</span>
+                    <span className="font-extrabold text-gray-900 leading-snug">
+                      {emailData.subject}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Email Body text content container */}
+                <div className="space-y-1 bg-gray-50 rounded-lg p-3.5 border border-gray-100">
+                  <pre className="font-sans text-xs text-gray-700 whitespace-pre-wrap leading-relaxed select-text">
+                    {emailData.body}
+                  </pre>
+                </div>
+              </div>
+
+              {/* Status Notice Indicator */}
+              <div className="p-3.5 bg-blue-50/70 border border-blue-200/50 rounded-xl flex gap-2.5 items-start">
+                <Info className="w-4.5 h-4.5 text-blue-600 flex-shrink-0 mt-0.5" />
+                <p className="text-[10px] text-blue-800 font-semibold leading-relaxed">
+                  <strong>Informasi Log:</strong> Berdasarkan peraturan kesiswaan, akumulasi poin siswa yang tinggi ({emailData.triggerPoints} Poin) secara otomatis memicu pengiriman surat pemberitahuan kesiswaan ini ke Wali Kelas untuk memastikan kolaborasi penanganan berkelanjutan.
+                </p>
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex gap-3.5 justify-end">
+              <button
+                type="button"
+                onClick={() => setShowEmailModal(false)}
+                className="px-4.5 py-2.5 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-xs font-bold rounded-xl transition-all cursor-pointer"
+              >
+                Batal / Perbaiki Data
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmEmailAndSave}
+                className="px-6 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-bold rounded-xl shadow-md transition-all active:scale-97 flex items-center gap-2 cursor-pointer"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>Kirim Notifikasi &amp; Simpan Pelanggaran</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
