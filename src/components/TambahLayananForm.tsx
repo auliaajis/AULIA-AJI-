@@ -1,9 +1,14 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Student, CounselingService } from '../types';
+import { Student, CounselingService, BKServiceType } from '../types';
 import {
   User,
   Users,
-  Home,
+  Compass,
+  Briefcase,
+  BookOpen,
+  MessageSquare,
+  HelpCircle,
+  HeartHandshake,
   Info,
   X,
   Calendar,
@@ -30,7 +35,7 @@ export default function TambahLayananForm({
   onCancel,
 }: TambahLayananFormProps) {
   // Service configuration state
-  const [serviceType, setServiceType] = useState<'Konseling Individu' | 'Konseling Kelompok' | 'Home Visit' | 'Layanan Informasi'>('Konseling Individu');
+  const [serviceType, setServiceType] = useState<BKServiceType>('Layanan Orientasi');
   const [selectedParticipants, setSelectedParticipants] = useState<Student[]>([]);
 
   // Participants helper popover state
@@ -194,116 +199,47 @@ export default function TambahLayananForm({
           <section className="bg-white rounded-2xl p-6 shadow-sm border border-[#bcc9c6]/30">
             <h3 className="font-extrabold text-sm uppercase tracking-wider text-[#0b1c30] mb-4 flex items-center gap-2">
               <span className="w-1.5 h-3.5 bg-[#00685f] rounded-full"></span>
-              Jenis Layanan
+              Jenis Layanan Bimbingan Konseling (BK)
             </h3>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              {/* Card option 1 */}
-              <label className="cursor-pointer group">
-                <input
-                  type="radio"
-                  name="service_type"
-                  checked={serviceType === 'Konseling Individu'}
-                  onChange={() => setServiceType('Konseling Individu')}
-                  className="sr-only"
-                />
-                <div
-                  className={`flex flex-col items-center justify-center p-4 border rounded-xl transition-all h-28 text-center group-hover:bg-[#f4fffc]/40 ${
-                    serviceType === 'Konseling Individu'
-                      ? 'border-[#00685f] bg-[#f4fffc] ring-2 ring-[#00685f]/20 shadow-sm'
-                      : 'border-[#bcc9c6]/40 bg-white'
-                  }`}
-                >
-                  <User
-                    className={`w-7 h-7 mb-2 ${
-                      serviceType === 'Konseling Individu' ? 'text-[#00685f]' : 'text-gray-400'
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {[
+                { type: 'Layanan Orientasi', label: 'Orientasi', icon: Compass, desc: 'Pengenalan lingkungan sekolah' },
+                { type: 'Layanan Informasi', label: 'Informasi', icon: Info, desc: 'Pemahaman akademik/karir' },
+                { type: 'Layanan Penempatan dan Penyaluran', label: 'Penempatan & Penyaluran', icon: Briefcase, desc: 'Penyaluran bakat/minat siswa' },
+                { type: 'Layanan Penguasaan Konten', label: 'Penguasaan Konten', icon: BookOpen, desc: 'Kemampuan belajar siswa' },
+                { type: 'Layanan Konseling Perorangan (Individual)', label: 'Konseling Perorangan', icon: User, desc: 'Sesi penyelesaian masalah individu' },
+                { type: 'Layanan Bimbingan Kelompok', label: 'Bimbingan Kelompok', icon: Users, desc: 'Bimbingan kelompok topik umum' },
+                { type: 'Layanan Konseling Kelompok', label: 'Konseling Kelompok', icon: MessageSquare, desc: 'Sesi solusi masalah kelompok' },
+                { type: 'Layanan Konsultasi', label: 'Konsultasi', icon: HelpCircle, desc: 'Penyelesaian kendala siswa' },
+                { type: 'Layanan Mediasi', label: 'Mediasi', icon: HeartHandshake, desc: 'Penyelesaian konflik siswa' }
+              ].map((item) => {
+                const IconComponent = item.icon;
+                const isSelected = serviceType === item.type;
+                return (
+                  <button
+                    key={item.type}
+                    type="button"
+                    onClick={() => setServiceType(item.type as BKServiceType)}
+                    className={`flex flex-col items-center justify-center p-3 border rounded-xl transition-all h-28 text-center hover:bg-[#f4fffc]/40 cursor-pointer ${
+                      isSelected
+                        ? 'border-[#00685f] bg-[#f4fffc] ring-2 ring-[#00685f]/25 shadow-sm'
+                        : 'border-[#bcc9c6]/30 bg-white'
                     }`}
-                  />
-                  <span className="text-xs font-extrabold text-[#0b1c30]">
-                    Konseling Individu
-                  </span>
-                </div>
-              </label>
-
-              {/* Card option 2 */}
-              <label className="cursor-pointer group">
-                <input
-                  type="radio"
-                  name="service_type"
-                  checked={serviceType === 'Konseling Kelompok'}
-                  onChange={() => setServiceType('Konseling Kelompok')}
-                  className="sr-only"
-                />
-                <div
-                  className={`flex flex-col items-center justify-center p-4 border rounded-xl transition-all h-28 text-center group-hover:bg-[#f4fffc]/40 ${
-                    serviceType === 'Konseling Kelompok'
-                      ? 'border-[#00685f] bg-[#f4fffc] ring-2 ring-[#00685f]/20 shadow-sm'
-                      : 'border-[#bcc9c6]/40 bg-white'
-                  }`}
-                >
-                  <Users
-                    className={`w-7 h-7 mb-2 ${
-                      serviceType === 'Konseling Kelompok' ? 'text-[#00685f]' : 'text-gray-400'
-                    }`}
-                  />
-                  <span className="text-xs font-extrabold text-[#0b1c30]">
-                    Konseling Kelompok
-                  </span>
-                </div>
-              </label>
-
-              {/* Card option 3 */}
-              <label className="cursor-pointer group">
-                <input
-                  type="radio"
-                  name="service_type"
-                  checked={serviceType === 'Home Visit'}
-                  onChange={() => setServiceType('Home Visit')}
-                  className="sr-only"
-                />
-                <div
-                  className={`flex flex-col items-center justify-center p-4 border rounded-xl transition-all h-28 text-center group-hover:bg-[#f4fffc]/40 ${
-                    serviceType === 'Home Visit'
-                      ? 'border-[#00685f] bg-[#f4fffc] ring-2 ring-[#00685f]/20 shadow-sm'
-                      : 'border-[#bcc9c6]/40 bg-white'
-                  }`}
-                >
-                  <Home
-                    className={`w-7 h-7 mb-2 ${
-                      serviceType === 'Home Visit' ? 'text-[#00685f]' : 'text-gray-400'
-                    }`}
-                  />
-                  <span className="text-xs font-extrabold text-[#0b1c30]">
-                    Home Visit
-                  </span>
-                </div>
-              </label>
-
-              {/* Card option 4 */}
-              <label className="cursor-pointer group">
-                <input
-                  type="radio"
-                  name="service_type"
-                  checked={serviceType === 'Layanan Informasi'}
-                  onChange={() => setServiceType('Layanan Informasi')}
-                  className="sr-only"
-                />
-                <div
-                  className={`flex flex-col items-center justify-center p-4 border rounded-xl transition-all h-28 text-center group-hover:bg-[#f4fffc]/40 ${
-                    serviceType === 'Layanan Informasi'
-                      ? 'border-[#00685f] bg-[#f4fffc] ring-2 ring-[#00685f]/20 shadow-sm'
-                      : 'border-[#bcc9c6]/40 bg-white'
-                  }`}
-                >
-                  <Info
-                    className={`w-7 h-7 mb-2 ${
-                      serviceType === 'Layanan Informasi' ? 'text-[#00685f]' : 'text-gray-400'
-                    }`}
-                  />
-                  <span className="text-xs font-extrabold text-[#0b1c30]">
-                    Layanan Informasi
-                  </span>
-                </div>
-              </label>
+                  >
+                    <IconComponent
+                      className={`w-6 h-6 mb-1.5 transition-transform ${
+                        isSelected ? 'text-[#00685f] scale-110' : 'text-gray-400'
+                      }`}
+                    />
+                    <span className="text-xs font-bold text-[#0b1c30] leading-snug line-clamp-2">
+                      {item.label}
+                    </span>
+                    <span className="text-[9px] text-[#3d4947]/70 font-semibold leading-tight line-clamp-1 mt-0.5">
+                      {item.desc}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </section>
 

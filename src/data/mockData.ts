@@ -176,7 +176,9 @@ export const initialViolations: ViolationRecord[] = [
     time: '08:30',
     location: 'Kantin',
     reportedBy: 'Ibu Rahayu, S.Pd',
-    notes: 'Siswa terlibat perkelahian ringan dengan siswa kelas lain setelah jam istirahat.'
+    notes: 'Siswa terlibat perkelahian ringan dengan siswa kelas lain setelah jam istirahat.',
+    handledBy: 'Wali Kelas',
+    handlingProgress: 'Teguran lisan oleh wali kelas dan pemanggilan siswa terkait untuk rekonsiliasi damai.'
   },
   {
     id: 'v2',
@@ -190,7 +192,9 @@ export const initialViolations: ViolationRecord[] = [
     time: '08:30',
     location: 'Halaman Belakang',
     reportedBy: 'Aulia Aji Sasongko, S.Pd.',
-    notes: 'Melanggar aturan sekolah dengan membolos di jam pelajaran ke-3.'
+    notes: 'Melanggar aturan sekolah dengan membolos di jam pelajaran ke-3.',
+    handledBy: 'Guru BK',
+    handlingProgress: 'Siswa dipanggil ke ruang bimbingan konseling dan diberikan konseling individu motivasi belajar.'
   },
   {
     id: 'v3',
@@ -204,14 +208,16 @@ export const initialViolations: ViolationRecord[] = [
     time: '11:15',
     location: 'Luar Sekolah',
     reportedBy: 'Ibu Sarah, M.Psi',
-    notes: 'Ketahuan merokok di luar sekolah saat masih menggunakan seragam lengkap.'
+    notes: 'Ketahuan merokok di luar sekolah saat masih menggunakan seragam lengkap.',
+    handledBy: 'Wali Kelas & Guru BK',
+    handlingProgress: 'Pertemuan segi tiga antara siswa, wali kelas, dan guru BK. Surat peringatan keras pertama telah diterbitkan.'
   }
 ];
 
 export const initialServices: CounselingService[] = [
   {
     id: 'srv1',
-    serviceType: 'Konseling Individu',
+    serviceType: 'Layanan Konseling Perorangan (Individual)',
     students: [
       { id: 's7', name: 'Rangga Wijaya', class: 'Kelas 9B', nis: '21221063' }
     ],
@@ -227,7 +233,7 @@ export const initialServices: CounselingService[] = [
   },
   {
     id: 'srv2',
-    serviceType: 'Home Visit',
+    serviceType: 'Layanan Konseling Perorangan (Individual)',
     students: [
       { id: 's9', name: 'Lina Marlina', class: 'Kelas 7A', nis: '21221094' }
     ],
@@ -245,13 +251,13 @@ export const initialServices: CounselingService[] = [
   },
   {
     id: 'srv3',
-    serviceType: 'Konseling Individu',
+    serviceType: 'Layanan Konseling Kelompok',
     students: [
       { id: 's4', name: 'Aditya Pratama', class: 'Kelas 8A', nis: '21221015' },
       { id: 's10', name: 'Siti Nurhaliza', class: 'XI - MIPA 1', nis: '21221040' }
     ],
     problem: 'Konsultasi minat bakat penjurusan',
-    description: 'Sesi konsultasi kelompok kecil mengenai pilihan karir lanjutan dan keselarasan dengan mata pelajaran pilihan.',
+    description: 'Sesi bimbingan kelompok kecil mengenai pilihan karir lanjutan dan keselarasan dengan mata pelajaran pilihan.',
     output: 'Siswa mendapatkan pandangan yang lebih terarah mengenai program studi perguruan tinggi yang cocok.',
     followUp: 'Pemberian brosur pendaftaran tes minat bakat mandiri.',
     status: 'Terjadwal',

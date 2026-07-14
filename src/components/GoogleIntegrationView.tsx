@@ -205,7 +205,7 @@ function getSheetData(spreadsheet, name) {
 
 function saveAllData(spreadsheet, data) {
   writeSheetData(spreadsheet, "Siswa", data.students, ["id", "nis", "name", "class", "gender", "violationPoints", "bkServicesCount"]);
-  writeSheetData(spreadsheet, "Pelanggaran", data.violations, ["id", "ticketId", "studentId", "studentName", "studentClass", "category", "pointsAdded", "date", "time", "location", "notes", "counselorName"]);
+  writeSheetData(spreadsheet, "Pelanggaran", data.violations, ["id", "ticketId", "studentId", "studentName", "studentClass", "category", "pointsAdded", "date", "time", "location", "notes", "reportedBy", "handledBy", "handlingProgress"]);
   writeSheetData(spreadsheet, "LayananBK", data.services, ["id", "serviceType", "problem", "description", "date", "startTime", "endTime", "status", "students", "notes"]);
   writeSheetData(spreadsheet, "Absensi", data.attendance, ["id", "date", "class", "studentId", "studentName", "status", "notes", "submittedBy"]);
 }

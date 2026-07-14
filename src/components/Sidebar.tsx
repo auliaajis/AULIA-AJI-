@@ -1,4 +1,4 @@
-import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut, X, Settings, Calendar, Database } from 'lucide-react';
+import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut, X, Settings, Calendar, Database, ClipboardList } from 'lucide-react';
 import SchoolLogo from './SchoolLogo';
 import { Counselor } from '../types';
 
@@ -139,6 +139,18 @@ export default function Sidebar({
         >
           <HeartHandshake className="w-4.5 h-4.5" />
           <span>Layanan BK</span>
+        </button>
+
+        <button
+          onClick={() => onNavigate('jurnal-harian')}
+          className={`flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 ${
+            currentView === 'jurnal-harian'
+              ? 'bg-[#008378] text-[#f4fffc] shadow-sm'
+              : 'text-[#3d4947] hover:bg-[#d3e4fe]/40'
+          }`}
+        >
+          <ClipboardList className="w-4.5 h-4.5" />
+          <span>Jurnal Harian</span>
         </button>
 
         <button

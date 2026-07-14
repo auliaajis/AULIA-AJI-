@@ -7,6 +7,8 @@ interface SchoolConfig {
   schoolAddress: string;
   principalName: string;
   principalNip: string;
+  governmentName: string;
+  departmentName: string;
 }
 
 export default function PengaturanView() {
@@ -15,6 +17,8 @@ export default function PengaturanView() {
     schoolAddress: 'Desa Koripan, Kec. Susukan, Kab. Semarang, Jawa Tengah 50777',
     principalName: 'Agus Setiawan, S.Pd. Fis',
     principalNip: '19680831 199103 1 007',
+    governmentName: 'PEMERINTAH KABUPATEN SEMARANG',
+    departmentName: 'DINAS PENDIDIKAN, KEBUDAYAAN, KEPEMUDAAN DAN OLAHRAGA',
   });
 
   const [savedSuccess, setSavedSuccess] = useState(false);
@@ -22,12 +26,25 @@ export default function PengaturanView() {
   // Load existing config
   useEffect(() => {
     const saved = localStorage.getItem('bk_school_config');
+    const defaults = {
+      schoolName: 'SMP N 2 Susukan',
+      schoolAddress: 'Jl. Kyai Hasan Anwar No. 16, Susukan, Kec. Susukan, Kab. Semarang, Jawa Tengah 50777',
+      principalName: 'Drs. H. Suhardi, M.Pd.',
+      principalNip: '19680320 199403 1 005',
+      governmentName: 'PEMERINTAH KABUPATEN SEMARANG',
+      departmentName: 'DINAS PENDIDIKAN, KEBUDAYAAN, KEPEMUDAAN DAN OLAHRAGA'
+    };
     if (saved) {
       try {
-        setConfig(JSON.parse(saved));
+        setConfig({
+          ...defaults,
+          ...JSON.parse(saved)
+        });
       } catch (e) {
         // error parsing, keep defaults
       }
+    } else {
+      setConfig(defaults);
     }
   }, []);
 
@@ -51,6 +68,8 @@ export default function PengaturanView() {
         schoolAddress: 'Jl. Kyai Hasan Anwar No. 16, Susukan, Kec. Susukan, Kab. Semarang, Jawa Tengah 50777',
         principalName: 'Drs. H. Suhardi, M.Pd.',
         principalNip: '19680320 199403 1 005',
+        governmentName: 'PEMERINTAH KABUPATEN SEMARANG',
+        departmentName: 'DINAS PENDIDIKAN, KEBUDAYAAN, KEPEMUDAAN DAN OLAHRAGA'
       };
       setConfig(defaultConfig);
       localStorage.setItem('bk_school_config', JSON.stringify(defaultConfig));
@@ -104,10 +123,50 @@ export default function PengaturanView() {
         <div className="lg:col-span-2 bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm">
           <form onSubmit={handleSave} className="space-y-5">
             <div className="space-y-4">
+              {/* Government Name Input */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                  Instansi Pemerintah / Pemerintah Daerah (Kop Baris 1)
+                </label>
+                <div className="relative">
+                  <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
+                    <Building className="w-4 h-4" />
+                  </span>
+                  <input
+                    type="text"
+                    required
+                    value={config.governmentName}
+                    onChange={(e) => setConfig({ ...config, governmentName: e.target.value })}
+                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-semibold"
+                    placeholder="Contoh: PEMERINTAH KABUPATEN SEMARANG"
+                  />
+                </div>
+              </div>
+
+              {/* Department Name Input */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                  Dinas Terkait (Kop Baris 2)
+                </label>
+                <div className="relative">
+                  <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
+                    <Building className="w-4 h-4" />
+                  </span>
+                  <input
+                    type="text"
+                    required
+                    value={config.departmentName}
+                    onChange={(e) => setConfig({ ...config, departmentName: e.target.value })}
+                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-semibold"
+                    placeholder="Contoh: DINAS PENDIDIKAN, KEBUDAYAAN, KEPEMUDAAN DAN OLAHRAGA"
+                  />
+                </div>
+              </div>
+
               {/* School Name Input */}
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
-                  Nama Sekolah
+                  Nama Sekolah (Kop Baris 3)
                 </label>
                 <div className="relative">
                   <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
@@ -118,7 +177,7 @@ export default function PengaturanView() {
                     required
                     value={config.schoolName}
                     onChange={(e) => setConfig({ ...config, schoolName: e.target.value })}
-                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all"
+                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-bold"
                     placeholder="Contoh: SMP N 2 Susukan"
                   />
                 </div>

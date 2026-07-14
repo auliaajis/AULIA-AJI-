@@ -29,11 +29,24 @@ export interface ViolationRecord {
   location: string;
   reportedBy: string;
   notes: string;
+  handledBy?: 'Belum Ditangani' | 'Wali Kelas' | 'Guru BK' | 'Wali Kelas & Guru BK';
+  handlingProgress?: string; // Penanganan sejauh apa
 }
+
+export type BKServiceType =
+  | 'Layanan Orientasi'
+  | 'Layanan Informasi'
+  | 'Layanan Penempatan dan Penyaluran'
+  | 'Layanan Penguasaan Konten'
+  | 'Layanan Konseling Perorangan (Individual)'
+  | 'Layanan Bimbingan Kelompok'
+  | 'Layanan Konseling Kelompok'
+  | 'Layanan Konsultasi'
+  | 'Layanan Mediasi';
 
 export interface CounselingService {
   id: string;
-  serviceType: 'Konseling Individu' | 'Konseling Kelompok' | 'Home Visit' | 'Layanan Informasi';
+  serviceType: BKServiceType;
   students: { id: string; name: string; class: string; nis: string }[];
   problem: string;
   description: string;
@@ -81,5 +94,19 @@ export interface Counselor {
   nip: string;
   avatar: string;
   allowedClasses: string[];
+}
+
+export interface BKJournalEntry {
+  id: string;
+  date: string; // YYYY-MM-DD
+  startTime: string; // HH:MM
+  endTime: string; // HH:MM
+  activityType: 'Bimbingan Klasikal' | 'Konsultasi Orang Tua' | 'Rapat Koordinasi' | 'Administrasi BK' | 'Kasus Mendesak' | 'Lain-lain';
+  title: string;
+  description: string;
+  target: string;
+  status: 'Selesai' | 'Perlu Tindak Lanjut' | 'Dalam Proses';
+  counselorId: string;
+  createdAt: string;
 }
 

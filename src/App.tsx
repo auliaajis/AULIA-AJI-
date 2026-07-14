@@ -8,6 +8,7 @@ import TambahLayananForm from './components/TambahLayananForm';
 import PengaturanView from './components/PengaturanView';
 import AbsensiView from './components/AbsensiView';
 import GoogleIntegrationView from './components/GoogleIntegrationView';
+import JurnalHarianView from './components/JurnalHarianView';
 import { downloadServicePDF } from './utils/pdfGenerator';
 
 import {
@@ -200,7 +201,7 @@ export default function App() {
     const newLog: ActivityLog = {
       id: `log-${Date.now()}`,
       timeLabel,
-      type: newService.serviceType === 'Home Visit' ? 'homevisit' : 'counseling',
+      type: 'counseling',
       title: newService.serviceType,
       description: `Sesi ${newService.status} dengan ${primaryStudentName} ${
         newService.students.length > 1 ? `dan ${newService.students.length - 1} lainnya` : ''
@@ -438,6 +439,21 @@ export default function App() {
               setPreSelectedStudentId(undefined);
               setCurrentView('dashboard');
             }}
+          />
+        );
+      case 'jurnal-harian':
+        return (
+          <JurnalHarianView
+            activeCounselor={activeCounselor}
+            services={filteredServices}
+            violations={filteredViolations}
+            onAddActivityLog={(data: any) => handleAddAttendanceActivityLog(
+              data.title,
+              data.description,
+              data.studentName,
+              data.studentClass,
+              'attendance'
+            )}
           />
         );
       case 'pengaturan':

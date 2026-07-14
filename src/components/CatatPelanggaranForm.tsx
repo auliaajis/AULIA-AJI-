@@ -58,6 +58,8 @@ export default function CatatPelanggaranForm({
   const [incidentTime, setIncidentTime] = useState('');
   const [incidentLocation, setIncidentLocation] = useState('');
   const [notes, setNotes] = useState('');
+  const [handledBy, setHandledBy] = useState<'Belum Ditangani' | 'Wali Kelas' | 'Guru BK' | 'Wali Kelas & Guru BK'>('Belum Ditangani');
+  const [handlingProgress, setHandlingProgress] = useState('');
 
   // Auto Ticket ID generation
   const ticketId = useMemo(() => {
@@ -138,6 +140,8 @@ export default function CatatPelanggaranForm({
       location: incidentLocation || 'Lokal Sekolah',
       reportedBy: activeCounselor.name,
       notes,
+      handledBy,
+      handlingProgress: handledBy !== 'Belum Ditangani' ? handlingProgress : '',
     });
 
     alert('Laporan Pelanggaran Siswa berhasil dicatat dan diverifikasi.');
@@ -239,6 +243,7 @@ export default function CatatPelanggaranForm({
                   <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Kategori</th>
                   <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Poin</th>
                   <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Waktu / Pelapor</th>
+                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Penanganan Wali / BK</th>
                   <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px] text-center">Unduh Bukti</th>
                 </tr>
               </thead>
@@ -260,6 +265,23 @@ export default function CatatPelanggaranForm({
                         <div>{v.date} &bull; {v.time}</div>
                         <div className="text-[10px] opacity-75 font-semibold">Oleh: {v.reportedBy}</div>
                       </td>
+                      <td className="px-6 py-4">
+                        <div className="space-y-1">
+                          <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                            v.handledBy === 'Wali Kelas' ? 'bg-amber-100 text-amber-800 border border-amber-200' :
+                            v.handledBy === 'Guru BK' ? 'bg-blue-100 text-blue-800 border border-blue-200' :
+                            v.handledBy === 'Wali Kelas & Guru BK' ? 'bg-purple-100 text-purple-800 border border-purple-200' :
+                            'bg-red-50 text-red-800 border border-red-100'
+                          }`}>
+                            {v.handledBy || 'Belum Ditangani'}
+                          </span>
+                          {v.handlingProgress && (
+                            <p className="text-[11px] text-gray-600 font-medium max-w-[200px] leading-snug">
+                              {v.handlingProgress}
+                            </p>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-6 py-4 text-center">
                         <button
                           type="button"
@@ -275,7 +297,7 @@ export default function CatatPelanggaranForm({
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={8} className="px-6 py-12 text-center text-gray-400 italic">
+                    <td colSpan={9} className="px-6 py-12 text-center text-gray-400 italic">
                       Tidak ada arsip pelanggaran yang cocok dengan kriteria pencarian.
                     </td>
                   </tr>
@@ -492,6 +514,54 @@ export default function CatatPelanggaranForm({
                     required
                     className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-4 py-3 text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 shadow-sm"
                   />
+                </div>
+              </div>
+
+              {/* Monitoring Penanganan Wali Kelas / Guru BK */}
+              <div className="p-5 bg-[#eff4ff]/40 rounded-2xl border border-blue-100 space-y-4">
+                <h4 className="text-xs font-extrabold uppercase tracking-wider text-[#0b1c30] flex items-center gap-2">
+                  <span className="w-1.5 h-3.5 bg-blue-600 rounded-full"></span>
+                  Monitoring Penanganan Kasus
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-[#0b1c30]">
+                      Status Penanganan
+                    </label>
+                    <select
+                      value={handledBy}
+                      onChange={(e) => setHandledBy(e.target.value as any)}
+                      className="w-full bg-white border border-[#bcc9c6]/40 rounded-xl px-4 py-3 text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 shadow-sm"
+                    >
+                      <option value="Belum Ditangani">Belum Ditangani / Dalam Proses</option>
+                      <option value="Wali Kelas">Sudah Ditangani Wali Kelas</option>
+                      <option value="Guru BK">Sudah Ditangani Guru BK</option>
+                      <option value="Wali Kelas & Guru BK">Sudah Ditangani Wali Kelas &amp; Guru BK</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-[#0b1c30]">
+                      Penanganan Sejauh Apa
+                    </label>
+                    <input
+                      type="text"
+                      value={handlingProgress}
+                      onChange={(e) => setHandlingProgress(e.target.value)}
+                      disabled={handledBy === 'Belum Ditangani'}
+                      placeholder={
+                        handledBy === 'Belum Ditangani'
+                          ? 'Pilih penangan terlebih dahulu...'
+                          : 'Contoh: Pemberian surat peringatan, pembinaan, panggilan ortu...'
+                      }
+                      required={handledBy !== 'Belum Ditangani'}
+                      className={`w-full border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 shadow-sm ${
+                        handledBy === 'Belum Ditangani'
+                          ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                          : 'bg-white text-[#0b1c30] border-[#bcc9c6]/40'
+                      }`}
+                    />
+                  </div>
                 </div>
               </div>
 
