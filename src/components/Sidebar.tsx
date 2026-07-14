@@ -1,13 +1,6 @@
-import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut, X, Settings, Calendar } from 'lucide-react';
+import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut, X, Settings, Calendar, Database } from 'lucide-react';
 import SchoolLogo from './SchoolLogo';
-
-interface Counselor {
-  id: string;
-  name: string;
-  role: string;
-  nip: string;
-  avatar: string;
-}
+import { Counselor } from '../types';
 
 interface SidebarProps {
   currentView: string;
@@ -146,6 +139,18 @@ export default function Sidebar({
         >
           <HeartHandshake className="w-4.5 h-4.5" />
           <span>Layanan BK</span>
+        </button>
+
+        <button
+          onClick={() => onNavigate('google-sync')}
+          className={`flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 ${
+            currentView === 'google-sync'
+              ? 'bg-[#008378] text-[#f4fffc] shadow-sm'
+              : 'text-[#3d4947] hover:bg-[#d3e4fe]/40'
+          }`}
+        >
+          <Database className="w-4.5 h-4.5" />
+          <span>Integrasi Google</span>
         </button>
 
         <button

@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { Student, ViolationRecord, CounselingService } from '../types';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Student, ViolationRecord, CounselingService, Counselor } from '../types';
 import {
   UserPlus,
   Search,
@@ -26,6 +26,7 @@ interface DataSiswaViewProps {
   students: Student[];
   violations: ViolationRecord[];
   services: CounselingService[];
+  activeCounselor: Counselor;
   onAddStudent: (student: Omit<Student, 'id' | 'initials'>) => void;
   onDeleteStudent: (id: string) => void;
   onClearAllStudents?: () => void;
@@ -38,6 +39,7 @@ export default function DataSiswaView({
   students,
   violations,
   services,
+  activeCounselor,
   onAddStudent,
   onDeleteStudent,
   onClearAllStudents,
@@ -165,6 +167,26 @@ export default function DataSiswaView({
         gender = 'P';
       }
 
+      // Validate class matches counselor's ampu classes
+      if (activeCounselor && activeCounselor.allowedClasses && activeCounselor.allowedClasses.length > 0) {
+        const cleanRaw = rawClass.replace(/kelas\s+/i, '').replace(/\s+/g, '').toUpperCase();
+        const isAllowed = activeCounselor.allowedClasses.some(allowed => {
+          const cleanAllowed = allowed.replace(/kelas\s+/i, '').replace(/\s+/g, '').toUpperCase();
+          return cleanRaw === cleanAllowed;
+        });
+
+        if (!isAllowed) {
+          result.push({
+            nis,
+            name,
+            class: rawClass,
+            gender,
+            error: `Bukan kelas ampu Anda (Batas: ${activeCounselor.allowedClasses.join(', ')})`
+          });
+          continue;
+        }
+      }
+
       result.push({
         nis,
         name,
@@ -174,7 +196,7 @@ export default function DataSiswaView({
     }
 
     return result;
-  }, [importText]);
+  }, [importText, activeCounselor]);
 
   const handleImportSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -216,8 +238,21 @@ export default function DataSiswaView({
   // Add student form state
   const [newNis, setNewNis] = useState('');
   const [newName, setNewName] = useState('');
-  const [newClass, setNewClass] = useState('XI - MIPA 1');
+  
+  const initialAddClass = useMemo(() => {
+    if (activeCounselor && activeCounselor.allowedClasses && activeCounselor.allowedClasses.length > 0) {
+      const first = activeCounselor.allowedClasses[0];
+      return first.startsWith('Kelas ') ? first : `Kelas ${first}`;
+    }
+    return 'Kelas 7A';
+  }, [activeCounselor]);
+
+  const [newClass, setNewClass] = useState(initialAddClass);
   const [newGender, setNewGender] = useState<'L' | 'P'>('L');
+
+  useEffect(() => {
+    setNewClass(initialAddClass);
+  }, [initialAddClass]);
 
   // Dynamic lists of unique classes represented in current student database
   const classesList = useMemo(() => {
@@ -269,7 +304,7 @@ export default function DataSiswaView({
     // Reset state
     setNewNis('');
     setNewName('');
-    setNewClass('XI - MIPA 1');
+    setNewClass(initialAddClass);
     setNewGender('L');
     setShowAddModal(false);
     alert('Siswa berhasil ditambahkan ke database!');
@@ -494,17 +529,28 @@ export default function DataSiswaView({
                 <select
                   value={newClass}
                   onChange={(e) => setNewClass(e.target.value)}
-                  className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-3.5 py-2.5 text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50"
+                  className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-3.5 py-2.5 text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 cursor-pointer"
                 >
-                  <option value="Kelas 7A">Kelas 7A</option>
-                  <option value="Kelas 7E">Kelas 7E</option>
-                  <option value="Kelas 8A">Kelas 8A</option>
-                  <option value="Kelas 8C">Kelas 8C</option>
-                  <option value="Kelas 9B">Kelas 9B</option>
-                  <option value="Kelas 9C">Kelas 9C</option>
-                  <option value="X - MIPA 4">X - MIPA 4</option>
-                  <option value="XI - MIPA 1">XI - MIPA 1</option>
-                  <option value="XI - IPS 2">XI - IPS 2</option>
+                  {activeCounselor && activeCounselor.allowedClasses && activeCounselor.allowedClasses.length > 0 ? (
+                    activeCounselor.allowedClasses.map((cls) => {
+                      const optVal = cls.startsWith('Kelas ') ? cls : `Kelas ${cls}`;
+                      return (
+                        <option key={optVal} value={optVal}>
+                          {optVal}
+                        </option>
+                      );
+                    })
+                  ) : (
+                    [
+                      'Kelas 7A', 'Kelas 7B', 'Kelas 7C', 'Kelas 7D', 'Kelas 7F',
+                      'Kelas 8A', 'Kelas 8B', 'Kelas 8C', 'Kelas 8D', 'Kelas 8E', 'Kelas 8F', 'Kelas 8G',
+                      'Kelas 9A', 'Kelas 9B', 'Kelas 9C', 'Kelas 9D', 'Kelas 9E', 'Kelas 9F', 'Kelas 9G'
+                    ].map((cls) => (
+                      <option key={cls} value={cls}>
+                        {cls}
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
 

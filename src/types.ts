@@ -73,3 +73,13 @@ export interface ClassAttendanceRecord {
   updatedAt: string;
   submittedBy: string; // Counselor name
 }
+
+export interface Counselor {
+  id: string;
+  name: string;
+  role: string;
+  nip: string;
+  avatar: string;
+  allowedClasses: string[];
+}
+

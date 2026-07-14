@@ -7,6 +7,7 @@ import CatatPelanggaranForm from './components/CatatPelanggaranForm';
 import TambahLayananForm from './components/TambahLayananForm';
 import PengaturanView from './components/PengaturanView';
 import AbsensiView from './components/AbsensiView';
+import GoogleIntegrationView from './components/GoogleIntegrationView';
 import { downloadServicePDF } from './utils/pdfGenerator';
 
 import {
@@ -16,8 +17,9 @@ import {
   initialLogs,
   counselors
 } from './data/mockData';
-import { Student, ViolationRecord, CounselingService, ActivityLog } from './types';
+import { Student, ViolationRecord, CounselingService, ActivityLog, Counselor } from './types';
 import { HeartHandshake, Calendar, Clock, Plus, UserCheck, Download } from 'lucide-react';
+import { filterStudents, filterViolations, filterServices, filterLogs } from './utils/accessControl';
 
 export default function App() {
   // Navigation Routing States
@@ -242,16 +244,56 @@ export default function App() {
     setLogs((prev) => [newLog, ...prev]);
   };
 
+  // State trigger: Handle imported Google database sync
+  const handleGoogleDataImported = (data: {
+    students?: Student[];
+    violations?: ViolationRecord[];
+    services?: CounselingService[];
+    attendance?: any[];
+  }) => {
+    if (data.students) setStudents(data.students);
+    if (data.violations) setViolations(data.violations);
+    if (data.services) setServices(data.services);
+    if (data.attendance) {
+      localStorage.setItem('bk_attendance_history', JSON.stringify(data.attendance));
+    }
+
+    // Insert sync event into activity feed
+    const today = new Date();
+    const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(
+      today.getMinutes()
+    ).padStart(2, '0')}`;
+    const timeLabel = `HARI INI, ${formattedHour}`;
+
+    const syncLog: ActivityLog = {
+      id: `log-sync-${Date.now()}`,
+      timeLabel,
+      type: 'attendance',
+      title: 'Sinkronisasi Google Sheets',
+      description: 'Seluruh database disinkronkan dengan data awan Google Sheets Anda.',
+      studentName: 'Sistem',
+      studentClass: 'Semua',
+      timestamp: new Date(),
+    };
+
+    setLogs((prev) => [syncLog, ...prev]);
+  };
+
   // Render individual view layout switch
   const renderMainView = () => {
+    const filteredStudents = filterStudents(students, activeCounselor);
+    const filteredViolations = filterViolations(violations, activeCounselor);
+    const filteredServices = filterServices(services, activeCounselor);
+    const filteredLogs = filterLogs(logs, activeCounselor);
+
     switch (currentView) {
       case 'dashboard':
         return (
           <DashboardView
-            students={students}
-            violations={violations}
-            services={services}
-            logs={logs}
+            students={filteredStudents}
+            violations={filteredViolations}
+            services={filteredServices}
+            logs={filteredLogs}
             onNavigateToTab={onNavigateToTab}
             onNavigateToForm={handleNavigateToForm}
           />
@@ -259,7 +301,7 @@ export default function App() {
       case 'absensi':
         return (
           <AbsensiView
-            students={students}
+            students={filteredStudents}
             activeCounselor={activeCounselor}
             onAddActivityLog={handleAddAttendanceActivityLog}
           />
@@ -267,9 +309,10 @@ export default function App() {
       case 'data-siswa':
         return (
           <DataSiswaView
-            students={students}
-            violations={violations}
-            services={services}
+            students={filteredStudents}
+            violations={filteredViolations}
+            services={filteredServices}
+            activeCounselor={activeCounselor}
             onAddStudent={handleAddStudent}
             onDeleteStudent={handleDeleteStudent}
             onClearAllStudents={handleClearAllStudents}
@@ -281,8 +324,8 @@ export default function App() {
       case 'pelanggaran':
         return (
           <CatatPelanggaranForm
-            students={students}
-            violations={violations}
+            students={filteredStudents}
+            violations={filteredViolations}
             activeCounselor={activeCounselor}
             preSelectedStudentId={preSelectedStudentId}
             onSaveViolation={handleSaveViolation}
@@ -313,7 +356,7 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {services.map((srv) => {
+              {filteredServices.map((srv) => {
                 let badgeColor = 'bg-[#00685f]/10 text-[#00685f]';
                 if (srv.status === 'Selesai') badgeColor = 'bg-[#6b38d4]/10 text-[#6b38d4]';
                 else if (srv.status === 'Dibatalkan') badgeColor = 'bg-[#ba1a1a]/10 text-[#ba1a1a]';
@@ -347,8 +390,8 @@ export default function App() {
                         <div className="flex flex-wrap gap-1.5">
                           {srv.students.map((st) => (
                             <span
-                              key={st.id}
-                              className="text-[10px] font-semibold bg-gray-100 text-gray-700 px-2 py-0.5 rounded"
+                               key={st.id}
+                               className="text-[10px] font-semibold bg-gray-100 text-gray-700 px-2 py-0.5 rounded"
                             >
                               {st.name} ({st.class})
                             </span>
@@ -388,7 +431,7 @@ export default function App() {
       case 'tambah-layanan':
         return (
           <TambahLayananForm
-            students={students}
+            students={filteredStudents}
             preSelectedStudentId={preSelectedStudentId}
             onSaveService={handleSaveService}
             onCancel={() => {
@@ -399,6 +442,8 @@ export default function App() {
         );
       case 'pengaturan':
         return <PengaturanView />;
+      case 'google-sync':
+        return <GoogleIntegrationView onDataImported={handleGoogleDataImported} />;
       default:
         return null;
     }

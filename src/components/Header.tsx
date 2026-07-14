@@ -1,12 +1,6 @@
 import { useState } from 'react';
 import { Search, Bell, Calendar as CalendarIcon, Check, Menu } from 'lucide-react';
-
-interface Counselor {
-  id: string;
-  name: string;
-  role: string;
-  avatar: string;
-}
+import { Counselor } from '../types';
 
 interface HeaderProps {
   activeCounselor: Counselor;
