@@ -1,6 +1,8 @@
 /**
  * Utility functions for Google Apps Script & Google Forms/Sheets integration
  */
+import { getAccessToken } from './firebaseAuth';
+import { pushDataDirect } from './googleSheetsDirect';
 
 export function getSavedScriptUrl(): string {
   return localStorage.getItem('bk_google_script_url') || '';
@@ -8,6 +10,38 @@ export function getSavedScriptUrl(): string {
 
 export function saveScriptUrl(url: string): void {
   localStorage.setItem('bk_google_script_url', url.trim());
+}
+
+/**
+ * Generate a detailed error message for GAS fetch failures
+ */
+function getDetailedGasErrorMessage(url: string, error: any): string {
+  const isFailedToFetch = error && (
+    error.message?.includes('Failed to fetch') || 
+    error.message?.includes('failed to fetch') ||
+    error.name === 'TypeError'
+  );
+
+  let msg = `Gagal terhubung dengan Google Apps Script (Error: ${error.message || error}).\n\n`;
+
+  if (isFailedToFetch) {
+    msg += `⚠️ KHUSUS PENGGUNA BARU (Masalah Koneksi / CORS):\n`;
+    
+    // Check if the URL doesn't look like a Web App Exec URL
+    if (!url.includes('/macros/s/') || !url.includes('/exec')) {
+      msg += `1. FORMAT URL SALAH: URL yang Anda masukkan tidak valid. URL Web App yang benar harus diawali dengan "https://script.google.com/macros/s/" dan diakhiri dengan "/exec".\n   * Pastikan Anda tidak memasukkan URL spreadsheet atau URL editor Apps Script.\n\n`;
+    } else {
+      msg += `1. SETUP DEPLOYMENT SALAH: Pastikan saat mendeploy (pilih "Terapkan" > "Penerapan Baru" > "Aplikasi Web") Anda menyetel:\n   * "Jalankan sebagai" (Execute as): setel ke "Saya" (Me / email Anda).\n   * "Siapa yang memiliki akses" (Who has access): setel ke "Siapa saja" (Anyone).\n\n`;
+    }
+
+    msg += `2. BELUM MEMBERI OTORISASI: Google meminta Anda mengizinkan akses ke spreadsheet saat mendeploy. Pastikan Anda sudah mengeklik "Izinkan Akses" (Authorize access) dan menyetujui peringatan keamanan (klik "Advanced" / "Lanjutan" lalu "Go to ... (unsafe)" lalu "Izinkan").\n\n`;
+    msg += `3. BELUM TERDEPLOY: Jika baru saja mengubah kode Code.gs, Anda harus mendeploy ulang versi baru tersebut (klik Terapkan > Kelola Penerapan > Edit > Pilih Versi Baru, lalu simpan).\n\n`;
+    msg += `Silakan buka menu "Integrasi Google" lagi dan ikuti panduan di panel kanan dengan teliti untuk memperbaiki masalah ini.`;
+  } else {
+    msg += `Pastikan jaringan internet Anda aktif, URL sudah benar, dan Google Apps Script sudah dideploy dengan benar.`;
+  }
+
+  return msg;
 }
 
 /**
@@ -45,7 +79,7 @@ export async function testConnection(url: string): Promise<{ success: boolean; m
     console.error('GAS connection error:', error);
     return { 
       success: false, 
-      message: `Gagal terhubung. Pastikan URL benar, sudah dideploy sebagai 'Anyone' (Siapa saja), dan mendukung CORS. (Error: ${error.message})` 
+      message: getDetailedGasErrorMessage(url, error)
     };
   }
 }
@@ -95,7 +129,7 @@ export async function pushDataToGoogle(url: string): Promise<{ success: boolean;
     return { success: false, message: resData.message || 'Sinkronisasi gagal, periksa log Apps Script.' };
   } catch (error: any) {
     console.error('GAS push error:', error);
-    return { success: false, message: `Gagal mengirim data: ${error.message}` };
+    return { success: false, message: getDetailedGasErrorMessage(url, error) };
   }
 }
 
@@ -132,6 +166,75 @@ export async function pullDataFromGoogle(url: string): Promise<{ success: boolea
     return { success: false, message: 'Respons kosong atau format spreadsheet tidak cocok.' };
   } catch (error: any) {
     console.error('GAS pull error:', error);
-    return { success: false, message: `Gagal menarik data: ${error.message}` };
+    return { success: false, message: getDetailedGasErrorMessage(url, error) };
   }
 }
+
+/**
+ * Automatically triggers background synchronization of all database tables (Siswa, Pelanggaran, Layanan, Absensi)
+ * to any configured active Google service (Direct Sync via Google Drive API or Google Apps Script URL).
+ */
+export async function triggerBackgroundAutoSync(): Promise<{ success: boolean; message: string }> {
+  const students = JSON.parse(localStorage.getItem('bk_students') || '[]');
+  const violations = JSON.parse(localStorage.getItem('bk_violations') || '[]');
+  const services = JSON.parse(localStorage.getItem('bk_services') || '[]');
+  const attendance = JSON.parse(localStorage.getItem('bk_attendance_history') || '[]');
+
+  let directSyncSuccess = false;
+  let gasSyncSuccess = false;
+  let hasIntegration = false;
+
+  // 1. Try Direct Sync (Google Drive / Sheets API via OAuth)
+  const spreadsheetId = localStorage.getItem('bk_google_spreadsheet_id');
+  if (spreadsheetId) {
+    try {
+      const token = await getAccessToken();
+      if (token) {
+        hasIntegration = true;
+        console.log('Auto-Sync: Memulai sinkronisasi langsung (OAuth) ke Spreadsheet...');
+        const res = await pushDataDirect(token, spreadsheetId, {
+          students,
+          violations,
+          services,
+          attendance
+        });
+        if (res.success) {
+          console.log('Auto-Sync: Sinkronisasi langsung berhasil!');
+          directSyncSuccess = true;
+        }
+      }
+    } catch (err) {
+      console.error('Auto-Sync: Gagal melakukan sinkronisasi langsung:', err);
+    }
+  }
+
+  // 2. Try Apps Script Web App Sync (via Web App URL)
+  const scriptUrl = localStorage.getItem('bk_google_script_url');
+  if (scriptUrl) {
+    hasIntegration = true;
+    console.log('Auto-Sync: Memulai sinkronisasi lewat Google Apps Script Web App...');
+    try {
+      const res = await pushDataToGoogle(scriptUrl);
+      if (res.success) {
+        console.log('Auto-Sync: Sinkronisasi Apps Script berhasil!');
+        gasSyncSuccess = true;
+      }
+    } catch (err) {
+      console.error('Auto-Sync: Gagal melakukan sinkronisasi Apps Script:', err);
+    }
+  }
+
+  if (!hasIntegration) {
+    return { success: false, message: 'Tidak ada koneksi Google Sheets yang aktif.' };
+  }
+
+  if (directSyncSuccess || gasSyncSuccess) {
+    return { 
+      success: true, 
+      message: `Database berhasil diperbarui secara otomatis di Google Sheets! (${directSyncSuccess ? 'Direct Sync' : ''} ${gasSyncSuccess ? 'Apps Script' : ''})` 
+    };
+  }
+
+  return { success: false, message: 'Gagal menyinkronkan database secara otomatis ke Google Sheets.' };
+}
+

@@ -21,12 +21,14 @@ interface AbsensiViewProps {
   students: Student[];
   activeCounselor: { name: string };
   onAddActivityLog: (title: string, description: string, studentName: string, studentClass: string, type: 'attendance') => void;
+  onAttendanceChanged?: () => void;
 }
 
 export default function AbsensiView({
   students,
   activeCounselor,
   onAddActivityLog,
+  onAttendanceChanged,
 }: AbsensiViewProps) {
   // Get unique classes from student database, fallback if empty
   const availableClasses = useMemo(() => {
@@ -146,6 +148,9 @@ export default function AbsensiView({
   const saveHistoryToStorage = (updatedHistory: ClassAttendanceRecord[]) => {
     setHistory(updatedHistory);
     localStorage.setItem('bk_attendance_history', JSON.stringify(updatedHistory));
+    if (onAttendanceChanged) {
+      onAttendanceChanged();
+    }
   };
 
   // Filter students matching the selected class

@@ -15,7 +15,8 @@ import {
   LogOut,
   User,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Download
 } from 'lucide-react';
 import { 
   getSavedScriptUrl, 
@@ -53,6 +54,17 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
   const [isSyncing, setIsSyncing] = useState(false);
   const [copied, setCopied] = useState(false);
 
+  // Connection Diagnostics State
+  const [checkStatus, setCheckStatus] = useState<'idle' | 'checking' | 'completed'>('idle');
+  const [diagnostics, setDiagnostics] = useState<{
+    urlValid: boolean;
+    reachable: boolean;
+    corsPassed: boolean;
+    codeMatched: boolean;
+    details: string;
+    actionItems: string[];
+  } | null>(null);
+
   // Direct Google API OAuth state
   const [user, setUser] = useState<any>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
@@ -61,6 +73,7 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
   const [spreadsheetUrl, setSpreadsheetUrl] = useState<string | null>(null);
   const [directSyncStatus, setDirectSyncStatus] = useState<'idle' | 'connecting' | 'connected' | 'syncing' | 'success' | 'error'>('idle');
   const [directSyncMessage, setDirectSyncMessage] = useState('');
+  const [downloadingHtml, setDownloadingHtml] = useState(false);
   const [syncHistory, setSyncHistory] = useState<{ type: 'push' | 'pull'; time: string; status: 'success' | 'failed' }[]>(() => {
     const saved = localStorage.getItem('bk_google_direct_history');
     return saved ? JSON.parse(saved) : [];
@@ -130,7 +143,11 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
         await handleAutoSetupSpreadsheet(result.accessToken);
       }
     } catch (error: any) {
-      alert(`Gagal Masuk Google: ${error.message || error}`);
+      if (error && error.message && (error.message.includes('popup-closed-by-user') || error.message.includes('auth/popup-closed-by-user'))) {
+        alert('Proses masuk dibatalkan karena jendela masuk Google ditutup sebelum selesai. Silakan coba klik masuk kembali dan selesaikan verifikasi.');
+      } else {
+        alert(`Gagal Masuk Google: ${error.message || error}`);
+      }
     } finally {
       setIsLoggingIn(false);
     }
@@ -146,6 +163,47 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       localStorage.removeItem('bk_google_spreadsheet_id');
       localStorage.removeItem('bk_google_spreadsheet_url');
       setDirectSyncStatus('idle');
+    }
+  };
+
+  const handleDownloadAppHtml = async () => {
+    setDownloadingHtml(true);
+    try {
+      // Coba unduh file HTML yang sudah dikompilasi (inlined) dari endpoint server dev terlebih dahulu
+      let response = await fetch('/api/get-compiled-html');
+      let htmlText = '';
+      
+      if (response.ok) {
+        htmlText = await response.text();
+      } else {
+        // Jika gagal atau sedang di production, coba langsung ambil /index.html (yang sudah dikompilasi di server produksi)
+        response = await fetch('/index.html');
+        if (!response.ok) {
+          throw new Error(`HTTP Error ${response.status}`);
+        }
+        htmlText = await response.text();
+      }
+      
+      // Deteksi apakah file HTML yang diunduh masih versi mentah/belum dikompilasi
+      if (htmlText.includes('/src/main.tsx') || htmlText.includes('@vite/client')) {
+        alert("PERINGATAN SISTEM:\n\nFile yang terunduh terdeteksi masih versi pengembangan (belum dikompilasi).\n\nSilakan tunggu sekitar 5 detik lalu coba klik 'Unduh File Aplikasi' lagi agar sistem dapat melakukan build produksi otomatis terlebih dahulu.");
+      } else {
+        alert("BERHASIL:\n\nFile tunggal 'Index.html' yang terkompilasi penuh siap diunduh! Silakan unggah file ini ke Google Apps Script Anda sebagai file HTML bernama 'Index'.");
+      }
+      
+      const blob = new Blob([htmlText], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'Index.html';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(`Gagal mengunduh file: ${err.message}`);
+    } finally {
+      setDownloadingHtml(false);
     }
   };
 
@@ -293,6 +351,136 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
     }
   };
 
+  const handleCheckConnection = async () => {
+    const url = scriptUrl.trim();
+    if (!url) {
+      alert('Silakan masukkan URL Apps Script terlebih dahulu.');
+      return;
+    }
+
+    setCheckStatus('checking');
+    setDiagnostics(null);
+
+    const isFormatValid = url.startsWith('https://script.google.com/') && url.includes('/exec');
+    
+    let isReachable = false;
+    let isCorsPassed = false;
+    let isCodeMatched = false;
+    let details = '';
+    const actionItems: string[] = [];
+
+    if (!isFormatValid) {
+      setCheckStatus('completed');
+      setDiagnostics({
+        urlValid: false,
+        reachable: false,
+        corsPassed: false,
+        codeMatched: false,
+        details: 'Format URL tidak valid. URL Google Apps Script Web App resmi harus dimulai dengan "https://script.google.com/" dan diakhiri dengan "/exec".',
+        actionItems: [
+          'Periksa kembali URL yang Anda tempel di kolom input.',
+          'Pastikan Anda tidak memasukkan URL Spreadsheet Google atau URL editor Apps Script.',
+          'Ikuti petunjuk penyalinan URL Aplikasi Web di panel kanan.'
+        ]
+      });
+      return;
+    }
+
+    // Step 1: Reachable Test (no-cors fetch to bypass CORS check on whether domain can be reached)
+    const testUrl = `${url}${url.includes('?') ? '&' : '?'}action=ping`;
+    try {
+      await fetch(testUrl, {
+        method: 'GET',
+        mode: 'no-cors',
+        credentials: 'omit'
+      });
+      isReachable = true;
+    } catch (e: any) {
+      isReachable = false;
+      details = `Gagal menjangkau server Google Apps Script (${e.message}). Jaringan atau domain tidak dapat dihubungi.`;
+      actionItems.push(
+        'Pastikan koneksi internet Anda aktif dan stabil.',
+        'Periksa kembali apakah ada kesalahan ketik (typo) pada URL Apps Script Anda.',
+        'Pastikan URL tersebut belum dihapus di proyek Google Apps Script.'
+      );
+    }
+
+    if (isReachable) {
+      // Step 2: CORS and JSON Parse Test
+      try {
+        const responseCors = await fetch(testUrl, {
+          method: 'GET',
+          mode: 'cors',
+          credentials: 'omit'
+        });
+
+        if (!responseCors.ok) {
+          throw new Error(`HTTP Error ${responseCors.status}`);
+        }
+
+        isCorsPassed = true;
+        const text = await responseCors.text();
+        
+        let json: any = null;
+        try {
+          json = JSON.parse(text);
+        } catch (jsonErr) {
+          details = `Browser berhasil menjangkau URL dan melewati batas CORS, namun respons dari script Anda bukan dalam format JSON. Respons yang diterima: "${text.substring(0, 120)}${text.length > 120 ? '...' : ''}"`;
+          actionItems.push(
+            'Salin seluruh kode Google Apps Script secara UTUH dari tab di panel kiri.',
+            'Kemungkinan Anda salah mendeploy atau file Apps Script Anda mengembalikan halaman HTML/Error bawaan Google.',
+            'Lakukan deployment baru (Terapkan > Penerapan Baru > Aplikasi Web) di editor Apps Script Anda.'
+          );
+        }
+
+        if (json) {
+          if (json.status === 'success' || (json.message && (json.message.includes('Koneksi berhasil') || json.message.includes('Terhubung ke Spreadsheet')))) {
+            isCodeMatched = true;
+            details = `Selamat! Koneksi browser ke Google Apps Script berjalan dengan sempurna. Apps Script Anda aktif dan siap menerima ekspor/impor data.`;
+            actionItems.push(
+              'Aplikasi Web Apps Script Anda siap digunakan untuk ekspor/impor!',
+              'Anda bisa mulai melakukan "Kirim via Apps Script" atau "Tarik via Apps Script" untuk mencadangkan data.'
+            );
+          } else if (json.status === 'error' || (json.message && (json.message.includes('Action tidak dikenali') || json.message.includes('tidak dikenal') || json.message.includes('tidak dikenali')))) {
+            isCodeMatched = false;
+            details = `URL valid dan terjangkau, namun proyek Google Apps Script Anda mengembalikan pesan error: "${json.message || 'Action tidak dikenali.'}". Ini berarti kode di Google Apps Script Anda belum diperbarui ke versi terbaru yang mendukung fitur "ping".`;
+            actionItems.push(
+              'Salin kode Google Apps Script terbaru di tab sebelah kiri secara UTUH.',
+              'Buka editor Google Apps Script Anda, hapus seluruh kode lama, lalu tempel kode baru tersebut.',
+              'PENTING: Anda harus mendeploy ulang sebagai VERSI BARU. Klik Terapkan (Deploy) > Kelola Penerapan (Manage deployments) > Klik ikon pensil (Edit) > Pada kolom Versi pilih "Versi Baru" (New Version) > Klik Terapkan.'
+            );
+          } else {
+            isCodeMatched = false;
+            details = `Respons JSON diterima dari Apps Script, namun isinya tidak sesuai dengan format yang diharapkan. Respons: ${JSON.stringify(json)}`;
+            actionItems.push(
+              'Pastikan Anda telah menyalin kode Google Apps Script (Code.gs) yang tepat.',
+              'Lakukan deployment ulang dengan memilih "Versi Baru" (New Version) agar perubahan kode diterapkan secara publik.'
+            );
+          }
+        }
+      } catch (corsErr: any) {
+        isCorsPassed = false;
+        details = `Browser berhasil menjangkau server Google secara fisik, tetapi koneksi diblokir oleh kebijakan keamanan CORS browser (Error: ${corsErr.message}). Hal ini biasanya terjadi jika Google Apps Script meminta login akun Google (tidak diakses secara bebas).`;
+        actionItems.push(
+          'Pastikan saat mendeploy (Terapkan > Penerapan baru > Aplikasi Web) Anda menyetel "Siapa yang memiliki akses" (Who has access) ke "Siapa saja" (Anyone), bukan "Hanya saya" atau akun institusi.',
+          'Pastikan Anda memilih "Jalankan sebagai" (Execute as) ke "Saya" (Me / email Anda).',
+          'Pastikan Anda telah mengeklik tombol "Izinkan Akses" (Authorize access) saat mempublikasikan deployment Google Apps Script Anda.',
+          'PENTING: Setelah mengubah setelan di atas, lakukan deployment sebagai versi baru (Kelola Penerapan > Edit > Pilih Versi Baru > Terapkan).'
+        );
+      }
+    }
+
+    setCheckStatus('completed');
+    setDiagnostics({
+      urlValid: isFormatValid,
+      reachable: isReachable,
+      corsPassed: isCorsPassed,
+      codeMatched: isCodeMatched,
+      details,
+      actionItems
+    });
+  };
+
   const handleExportData = async () => {
     const url = scriptUrl.trim() || getSavedScriptUrl();
     if (!url) {
@@ -347,118 +535,150 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
   const googleAppsScriptCode = `/**
  * GOOGLE APPS SCRIPT DATABASE ENDPOINT FOR BK PORTAL
  * --------------------------------------------------
- * Tempelkan kode ini pada Google Apps Script Anda (Ekstensi > Apps Script).
- * Deploy sebagai Aplikasi Web (Web App), setel Akses ke "Siapa saja" (Anyone).
+ * Tempelkan kode ini secara utuh pada Google Apps Script Anda (Ekstensi > Apps Script).
+ * Deploy sebagai Aplikasi Web (Web App), setel "Jalankan sebagai: Saya", dan "Akses: Siapa saja".
  */
 
 function doGet(e) {
-  var action = e.parameter.action;
-  var sheet = SpreadsheetApp.getActiveSpreadsheet();
-  var output = "";
+  var action = e && e.parameter ? e.parameter.action : "";
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
   
-  // Set CORS headers
-  if (action === "ping") {
-    output = JSON.stringify({ 
-      status: "success", 
-      message: "Koneksi Google Apps Script Berhasil terhubung ke Spreadsheet: " + sheet.getName() 
-    });
-  } else if (action === "readAll") {
-    output = JSON.stringify(readAllData(sheet));
-  } else {
-    output = JSON.stringify({ status: "error", message: "Action tidak dikenal" });
+  try {
+    if (action === "ping") {
+      return ContentService.createTextOutput(JSON.stringify({ 
+        status: "success", 
+        message: "Koneksi berhasil! Terhubung ke Spreadsheet: " + ss.getName() 
+      })).setMimeType(ContentService.MimeType.JSON);
+    } else if (action === "readAll") {
+      var output = JSON.stringify({
+        students: readTab(ss, "Siswa", ["id", "nis", "name", "class", "gender", "violationPoints", "bkServicesCount", "initials"]),
+        violations: readTab(ss, "Pelanggaran", ["id", "ticketId", "studentId", "studentName", "studentClass", "category", "pointsAdded", "date", "time", "location", "notes", "reportedBy", "handledBy", "handlingProgress"]),
+        services: readTab(ss, "LayananBK", ["id", "serviceType", "problem", "description", "output", "followUp", "status", "date", "startTime", "endTime", "students", "attachments", "notes"]),
+        attendance: readTab(ss, "Absensi", ["id", "class", "date", "records", "updatedAt", "submittedBy"])
+      });
+      return ContentService.createTextOutput(output).setMimeType(ContentService.MimeType.JSON);
+    } else {
+      // DEFAULT: Jika diakses langsung tanpa action di web browser, tampilkan UI Aplikasi BK (Index.html)
+      try {
+        var htmlOutput = HtmlService.createHtmlOutputFromFile("Index");
+        htmlOutput.setTitle("Sistem BK SMPN 2 Susukan")
+                  .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+                  .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+        return htmlOutput;
+      } catch(htmlErr) {
+        // Jika file "Index" belum diupload atau gagal diload, tampilkan halaman panduan ramah
+        var errDetail = htmlErr ? htmlErr.toString() : "File 'Index' tidak ditemukan di Apps Script Anda.";
+        return HtmlService.createHtmlOutput(
+          "<div style='font-family: sans-serif; padding: 25px; max-width: 600px; margin: 40px auto; border: 1px solid #cce8e5; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); background-color: #fcfefe;'>" +
+          "<h2 style='color: #00685f; margin-top: 0;'>Sistem Database BK SMPN 2 Susukan Aktif!</h2>" +
+          "<p style='color: #4a5568; line-height: 1.6;'>Database Google Apps Script Anda <strong>berhasil dikoneksikan</strong> ke Spreadsheet: <strong style='color: #00685f;'>" + ss.getName() + "</strong>.</p>" +
+          "<div style='background-color: #f0fdfa; border-left: 4px solid #0d9488; padding: 12px; margin: 15px 0; border-radius: 4px; color: #115e59; font-size: 14px; font-weight: bold;'>" +
+          "Langkah berikutnya: Hubungkan URL ini di aplikasi BK Anda!" +
+          "</div>" +
+          "<div style='background-color: #fef2f2; border-left: 4px solid #f87171; padding: 15px; margin: 15px 0; border-radius: 6px; color: #991b1b; font-size: 13px;'>" +
+          "<strong style='font-size: 14px;'>⚠️ Detail Status Hosting Aplikasi:</strong><br>" +
+          "<code style='background: #fee2e2; padding: 2px 6px; border-radius: 4px; font-family: monospace; display: block; margin-top: 5px; word-break: break-all;'>" + errDetail + "</code>" +
+          "<p style='margin: 8px 0 0 0; font-size: 12px;'>Jika status di atas adalah <strong>'Exception: Inside Sidebar/Dialog...'</strong> atau <strong>'ScriptError...'</strong> atau <strong>'Page not found'</strong>, itu artinya file 'Index' belum ditambahkan dengan benar atau deployment belum diperbarui ke Versi Baru.</p>" +
+          "</div>" +
+          "<hr style='border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;'>" +
+          "<h4 style='color: #2d3748; margin-bottom: 8px;'>Panduan Tambahan: Cara Menghosting Aplikasi Langsung di Sini</h4>" +
+          "<p style='color: #718096; font-size: 13px; margin-top: 0;'>Anda juga dapat membuka aplikasi BK secara penuh lewat link ini dengan mengupload file Index.html:</p>" +
+          "<ol style='color: #4a5568; line-height: 1.6; padding-left: 20px; font-size: 13.5px;'>" +
+          "<li>Buka aplikasi BK Anda, pergi menu <strong>Integrasi Google</strong>.</li>" +
+          "<li>Di panel kanan bawah, klik <strong>'Unduh File Aplikasi'</strong> untuk mendownload file <strong>Index.html</strong>.</li>" +
+          "<li>Pada editor Apps Script ini, di sebelah kiri (bagian File), klik ikon <strong>+</strong> > pilih <strong>HTML</strong>.</li>" +
+          "<li>Beri nama file tersebut <strong>Index</strong> (tanpa .html).</li>" +
+          "<li>Buka file Index.html yang terunduh tadi, salin semua kodenya, dan paste ke file Index di editor Apps Script ini.</li>" +
+          "<li>Klik Simpan (disket), lalu klik <strong>Terapkan (Deploy)</strong> > <strong>Kelola Penerapan (Manage deployments)</strong> > Edit > Pilih Versi Baru, lalu simpan.</li>" +
+          "</ol>" +
+          "</div>"
+        );
+      }
+    }
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.message }))
+      .setMimeType(ContentService.MimeType.JSON);
   }
-  
-  return ContentService.createTextOutput(output)
-    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function doPost(e) {
-  var data = JSON.parse(e.postData.contents);
-  var sheet = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
   var output = "";
   
-  if (data.action === "sync") {
-    saveAllData(sheet, data);
-    output = JSON.stringify({ 
-      status: "success", 
-      message: "Data berhasil disimpan ke Google Sheets! " + 
-               "Siswa: " + (data.students ? data.students.length : 0) + ", " +
-               "Pelanggaran: " + (data.violations ? data.violations.length : 0) + ", " +
-               "Layanan: " + (data.services ? data.services.length : 0) + ", " +
-               "Absensi: " + (data.attendance ? data.attendance.length : 0)
-    });
-  } else {
-    output = JSON.stringify({ status: "error", message: "Action POST tidak dikenal" });
+  try {
+    var payload = JSON.parse(e.postData.contents);
+    if (payload.action === "sync") {
+      syncTab(ss, "Siswa", ["id", "nis", "name", "class", "gender", "violationPoints", "bkServicesCount", "initials"], payload.students || []);
+      syncTab(ss, "Pelanggaran", ["id", "ticketId", "studentId", "studentName", "studentClass", "category", "pointsAdded", "date", "time", "location", "notes", "reportedBy", "handledBy", "handlingProgress"], payload.violations || []);
+      syncTab(ss, "LayananBK", ["id", "serviceType", "problem", "description", "output", "followUp", "status", "date", "startTime", "endTime", "students", "attachments", "notes"], payload.services || []);
+      syncTab(ss, "Absensi", ["id", "class", "date", "records", "updatedAt", "submittedBy"], payload.attendance || []);
+      
+      output = JSON.stringify({ 
+        status: "success", 
+        message: "Sinkronisasi berhasil! Spreadsheet telah diperbarui." 
+      });
+    } else {
+      output = JSON.stringify({ status: "error", message: "Aksi POST tidak dikenal." });
+    }
+  } catch (err) {
+    output = JSON.stringify({ status: "error", message: err.message });
   }
   
   return ContentService.createTextOutput(output)
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function readAllData(spreadsheet) {
-  return {
-    students: getSheetData(spreadsheet, "Siswa"),
-    violations: getSheetData(spreadsheet, "Pelanggaran"),
-    services: getSheetData(spreadsheet, "LayananBK"),
-    attendance: getSheetData(spreadsheet, "Absensi")
-  };
+function syncTab(ss, tabName, headers, items) {
+  var sheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
+  sheet.clear();
+  
+  var rows = [headers];
+  if (items && items.length > 0) {
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var row = headers.map(function(h) {
+        var val = item[h];
+        if (val === undefined || val === null) return "";
+        if (typeof val === "object") return JSON.stringify(val);
+        return val;
+      });
+      rows.push(row);
+    }
+  }
+  sheet.getRange(1, 1, rows.length, headers.length).setValues(rows);
 }
 
-function getSheetData(spreadsheet, name) {
-  var sheet = spreadsheet.getSheetByName(name);
+function readTab(ss, tabName, headers) {
+  var sheet = ss.getSheetByName(tabName);
   if (!sheet) return [];
+  
   var values = sheet.getDataRange().getValues();
   if (values.length <= 1) return [];
-  var headers = values[0];
+  
+  var sheetHeaders = values[0];
   var result = [];
+  
   for (var i = 1; i < values.length; i++) {
     var row = values[i];
     var obj = {};
-    for (var j = 0; j < headers.length; j++) {
-      var val = row[j];
-      // Jika berisi array atau objek yang di-serialize, parse kembali
+    headers.forEach(function(h) {
+      var idx = sheetHeaders.indexOf(h);
+      var val = idx !== -1 ? row[idx] : "";
+      
       if (typeof val === "string" && (val.indexOf("[") === 0 || val.indexOf("{") === 0)) {
-        try {
-          val = JSON.parse(val);
-        } catch(e) {}
+        try { val = JSON.parse(val); } catch(e) {}
       }
-      obj[headers[j]] = val;
-    }
+      
+      if (h === "violationPoints" || h === "bkServicesCount" || h === "pointsAdded") {
+        var num = Number(val);
+        if (!isNaN(num)) val = num;
+      }
+      
+      obj[h] = val;
+    });
     result.push(obj);
   }
   return result;
-}
-
-function saveAllData(spreadsheet, data) {
-  writeSheetData(spreadsheet, "Siswa", data.students, ["id", "nis", "name", "class", "gender", "violationPoints", "bkServicesCount"]);
-  writeSheetData(spreadsheet, "Pelanggaran", data.violations, ["id", "ticketId", "studentId", "studentName", "studentClass", "category", "pointsAdded", "date", "time", "location", "notes", "reportedBy", "handledBy", "handlingProgress"]);
-  writeSheetData(spreadsheet, "LayananBK", data.services, ["id", "serviceType", "problem", "description", "date", "startTime", "endTime", "status", "students", "notes"]);
-  writeSheetData(spreadsheet, "Absensi", data.attendance, ["id", "date", "class", "studentId", "studentName", "status", "notes", "submittedBy"]);
-}
-
-function writeSheetData(spreadsheet, name, data, headers) {
-  var sheet = spreadsheet.getSheetByName(name);
-  if (sheet) {
-    spreadsheet.deleteSheet(sheet);
-  }
-  sheet = spreadsheet.insertSheet(name);
-  sheet.appendRow(headers);
-  if (!data || data.length === 0) return;
-  
-  var rows = [];
-  for (var i = 0; i < data.length; i++) {
-    var item = data[i];
-    var row = [];
-    for (var j = 0; j < headers.length; j++) {
-      var val = item[headers[j]];
-      if (typeof val === "object" && val !== null) {
-        val = JSON.stringify(val);
-      }
-      row.push(val === undefined ? "" : val);
-    }
-    rows.push(row);
-  }
-  sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
 }
 `;
 
@@ -732,26 +952,128 @@ function writeSheetData(spreadsheet, name, data, headers) {
                   placeholder="https://script.google.com/macros/s/.../exec"
                   className="flex-1 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-4 py-3 text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 font-mono"
                 />
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button
                     onClick={handleSaveUrl}
-                    className="px-4.5 py-3 bg-[#0b1c30] hover:bg-[#142e4d] text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                    className="px-4 py-3 bg-[#0b1c30] hover:bg-[#142e4d] text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
                   >
                     Simpan URL
                   </button>
                   <button
+                    onClick={handleCheckConnection}
+                    disabled={checkStatus === 'checking'}
+                    className="px-4 py-3 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {checkStatus === 'checking' && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                    <span>Check Connection</span>
+                  </button>
+                  <button
                     onClick={handleTestConnection}
                     disabled={connectionStatus === 'testing'}
-                    className="px-4.5 py-3 bg-[#00685f]/10 text-[#00685f] hover:bg-[#00685f] hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    className="px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                   >
                     {connectionStatus === 'testing' && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                    <span>Uji Koneksi</span>
+                    <span>Uji Koneksi Singkat</span>
                   </button>
                 </div>
               </div>
             </div>
 
-            {/* Status Display Banner */}
+            {/* Detailed Connection Diagnostics Display */}
+            {checkStatus !== 'idle' && (
+              <div className="p-5 rounded-2xl border bg-[#fbfdff] border-[#bcc9c6]/30 space-y-4 animate-in slide-in-from-top-3">
+                <div className="flex items-center justify-between border-b border-[#bcc9c6]/10 pb-2.5">
+                  <h4 className="text-xs font-extrabold uppercase tracking-wider text-[#0b1c30] flex items-center gap-1.5">
+                    <CloudLightning className="w-4 h-4 text-[#00685f] animate-pulse" />
+                    <span>Hasil Diagnostik Koneksi Browser</span>
+                  </h4>
+                  <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded border uppercase ${
+                    checkStatus === 'checking' ? 'bg-blue-50 text-blue-700 border-blue-100' :
+                    (diagnostics?.codeMatched ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-100')
+                  }`}>
+                    {checkStatus === 'checking' ? 'Menganalisis...' : (diagnostics?.codeMatched ? 'Sempurna' : 'Perlu Tindakan')}
+                  </span>
+                </div>
+
+                {/* Steps checklist */}
+                <div className="space-y-2.5 text-xs">
+                  {/* Step 1: URL Format */}
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-gray-50/50">
+                    <span className="font-semibold text-gray-700">1. Validasi Format URL</span>
+                    {checkStatus === 'checking' ? (
+                      <RefreshCw className="w-4 h-4 text-blue-500 animate-spin" />
+                    ) : diagnostics?.urlValid ? (
+                      <span className="text-emerald-600 font-extrabold flex items-center gap-1">✔ Benar</span>
+                    ) : (
+                      <span className="text-red-500 font-extrabold flex items-center gap-1">❌ Salah</span>
+                    )}
+                  </div>
+
+                  {/* Step 2: Reachability */}
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-gray-50/50">
+                    <span className="font-semibold text-gray-700">2. Jangkauan Server (Ping Jaringan)</span>
+                    {checkStatus === 'checking' ? (
+                      <RefreshCw className="w-4 h-4 text-blue-500 animate-spin" />
+                    ) : diagnostics?.reachable ? (
+                      <span className="text-emerald-600 font-extrabold flex items-center gap-1">✔ Terhubung</span>
+                    ) : (
+                      <span className="text-red-500 font-extrabold flex items-center gap-1">❌ Terputus</span>
+                    )}
+                  </div>
+
+                  {/* Step 3: CORS security */}
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-gray-50/50">
+                    <span className="font-semibold text-gray-700">3. Izin Keamanan CORS Browser</span>
+                    {checkStatus === 'checking' ? (
+                      <RefreshCw className="w-4 h-4 text-blue-500 animate-spin" />
+                    ) : diagnostics?.corsPassed ? (
+                      <span className="text-emerald-600 font-extrabold flex items-center gap-1">✔ Lolos</span>
+                    ) : diagnostics?.reachable ? (
+                      <span className="text-amber-500 font-extrabold flex items-center gap-1">⚠️ Terblokir</span>
+                    ) : (
+                      <span className="text-gray-400 font-extrabold flex items-center gap-1">-</span>
+                    )}
+                  </div>
+
+                  {/* Step 4: Code matching */}
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-gray-50/50">
+                    <span className="font-semibold text-gray-700">4. Kesesuaian Versi Kode Apps Script</span>
+                    {checkStatus === 'checking' ? (
+                      <RefreshCw className="w-4 h-4 text-blue-500 animate-spin" />
+                    ) : diagnostics?.codeMatched ? (
+                      <span className="text-emerald-600 font-extrabold flex items-center gap-1">✔ Sesuai (Aktif)</span>
+                    ) : diagnostics?.corsPassed ? (
+                      <span className="text-red-500 font-extrabold flex items-center gap-1">❌ Outdated / Salah</span>
+                    ) : (
+                      <span className="text-gray-400 font-extrabold flex items-center gap-1">-</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Narrative Diagnostic Message */}
+                {checkStatus === 'completed' && diagnostics && (
+                  <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-100 text-xs leading-relaxed space-y-3">
+                    <div>
+                      <h5 className="font-extrabold text-gray-800 mb-1">Hasil Analisis:</h5>
+                      <p className="text-gray-600 font-semibold">{diagnostics.details}</p>
+                    </div>
+
+                    {diagnostics.actionItems.length > 0 && (
+                      <div className="pt-2.5 border-t border-gray-200/50">
+                        <h5 className="font-extrabold text-[#00685f] mb-1.5">Langkah Penyelesaian:</h5>
+                        <ul className="list-disc pl-4.5 space-y-1.5 text-gray-600 font-medium">
+                          {diagnostics.actionItems.map((item, idx) => (
+                            <li key={idx}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Traditional Status Display Banner */}
             {connectionStatus !== 'idle' && (
               <div className={`p-4 rounded-xl border flex items-start gap-3 animate-in slide-in-from-top-3 ${
                 connectionStatus === 'testing' ? 'bg-[#f8f9ff] border-blue-200 text-blue-700' :
@@ -866,6 +1188,29 @@ function writeSheetData(spreadsheet, name, data, headers) {
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* Download HTML Card */}
+          <div className="bg-white rounded-2xl p-6 border-2 border-[#00685f]/20 shadow-md space-y-4">
+            <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2 pb-3 border-b border-[#bcc9c6]/20">
+              <Download className="w-5 h-5 text-[#00685f]" />
+              <span>File Aplikasi (Index.html)</span>
+            </h3>
+            <p className="text-xs text-gray-500 leading-relaxed font-semibold">
+              Unduh versi file tunggal dari aplikasi ini untuk dimasukkan langsung ke file <strong className="text-gray-700">Index.html</strong> di Google Apps Script Anda.
+            </p>
+            <button
+              onClick={handleDownloadAppHtml}
+              disabled={downloadingHtml}
+              className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
+            >
+              {downloadingHtml ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
+              <span>Unduh File Aplikasi</span>
+            </button>
           </div>
 
           {/* Script Display Code Container Column */}

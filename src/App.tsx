@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import DashboardView from './components/DashboardView';
@@ -12,6 +12,7 @@ import JurnalHarianView from './components/JurnalHarianView';
 import PanggilanOrangTuaView from './components/PanggilanOrangTuaView';
 import LoginView from './components/LoginView';
 import { downloadServicePDF } from './utils/pdfGenerator';
+import { triggerBackgroundAutoSync } from './utils/googleSync';
 
 import {
   initialStudents,
@@ -83,6 +84,19 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('bk_logs', JSON.stringify(logs));
   }, [logs]);
+
+  // Background Auto-Sync Trigger when core data changes (excluding initial render)
+  const isInitialMount = useRef(true);
+
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    
+    // Run the background sync quietly to keep Google Sheets up-to-date in real-time
+    triggerBackgroundAutoSync();
+  }, [students, violations, services]);
 
   // Global search navigation trigger
   const handleNavigateToStudentTab = () => {
@@ -315,6 +329,7 @@ export default function App() {
             students={filteredStudents}
             activeCounselor={activeCounselor}
             onAddActivityLog={handleAddAttendanceActivityLog}
+            onAttendanceChanged={() => triggerBackgroundAutoSync()}
           />
         );
       case 'data-siswa':

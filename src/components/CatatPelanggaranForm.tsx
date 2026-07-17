@@ -177,6 +177,53 @@ export default function CatatPelanggaranForm({
     return `PLG-${year}-${randomNum}`;
   }, []);
 
+  // Load wali kelas config from localStorage
+  const waliKelasConfig = useMemo(() => {
+    const saved = localStorage.getItem('bk_walikelas_config');
+    if (saved) {
+      try {
+        return JSON.parse(saved) as { class: string; name: string; email: string }[];
+      } catch (e) {
+        return [];
+      }
+    }
+    return [];
+  }, []);
+
+  const currentWaliKelas = useMemo(() => {
+    if (!selectedStudent) return null;
+    
+    // Normalize student class name (e.g. "Kelas 8A" -> "8A", "Kelas 7A" -> "7A")
+    const sClass = selectedStudent.class.trim();
+    const cleanClass = sClass.replace(/kelas\s*/i, '').trim();
+    
+    // Find exact match or normalized match
+    const found = waliKelasConfig.find(item => 
+      item.class.trim().toLowerCase() === sClass.toLowerCase() ||
+      item.class.trim().toLowerCase() === cleanClass.toLowerCase() ||
+      item.class.trim().toLowerCase().replace(/kelas\s*/i, '').trim() === cleanClass.toLowerCase()
+    );
+    
+    if (found) return found;
+
+    // Default presets matching our predefined ones if not configured
+    const classCode = cleanClass.toLowerCase().replace(/\s+/g, '');
+    return {
+      class: sClass,
+      name: 'Wali Kelas ' + cleanClass,
+      email: `wali.kelas.${classCode}@smpn2susukan.sch.id`
+    };
+  }, [selectedStudent, waliKelasConfig]);
+
+  const emailThreshold = useMemo(() => {
+    const saved = localStorage.getItem('bk_email_threshold');
+    if (saved) {
+      const parsed = parseInt(saved);
+      if (!isNaN(parsed)) return parsed;
+    }
+    return 20; // default to 20
+  }, []);
+
   // Pre-fill student if preSelectedStudentId matches
   useEffect(() => {
     if (preSelectedStudentId) {
@@ -277,9 +324,10 @@ export default function CatatPelanggaranForm({
     }
 
     const classCode = selectedStudent.class.toLowerCase().replace(/kelas\s*/g, '').replace(/\s+/g, '');
-    const waliEmail = `wali.kelas.${classCode}@smpn2susukan.sch.id`;
+    const waliEmail = currentWaliKelas?.email || `wali.kelas.${classCode}@smpn2susukan.sch.id`;
+    const waliName = currentWaliKelas?.name || `Bapak/Ibu Wali Kelas ${selectedStudent.class}`;
 
-    if (projectedPoints >= 20) {
+    if (projectedPoints >= emailThreshold) {
       // Trigger automatic email notice to Homeroom Teacher (Wali Kelas)
       let severityLevel: 'TAHAP I' | 'TAHAP II (SIAGA)' | 'TAHAP III (KRITIS)' = 'TAHAP I';
       let actionRecommendation = '';
@@ -292,13 +340,13 @@ export default function CatatPelanggaranForm({
         actionRecommendation = 'Siswa telah menyentuh batas 50 poin pelanggaran. Guru BK dan Wali Kelas wajib segera mengagendakan Panggilan Orang Tua ke-I ke sekolah guna penandatanganan kontrak perilaku tertulis bermeterai.';
       } else {
         severityLevel = 'TAHAP I';
-        actionRecommendation = 'Siswa menyentuh akumulasi >= 20 poin. Sebagai Wali Kelas, mohon jadwalkan pembinaan persuasif langsung tingkat kelas, diskusi internal bersama siswa, serta catat dalam jurnal wali kelas.';
+        actionRecommendation = `Siswa menyentuh akumulasi >= ${emailThreshold} poin. Sebagai Wali Kelas, mohon jadwalkan pembinaan persuasif langsung tingkat kelas, diskusi internal bersama siswa, serta catat dalam jurnal wali kelas.`;
       }
 
       setEmailData({
         to: waliEmail,
         subject: `[ALERTI BK] Akumulasi Poin Pelanggaran Tinggi: ${selectedStudent.name} (${selectedStudent.class}) mencapai ${projectedPoints} Poin`,
-        body: `Yth. Bapak/Ibu Wali Kelas ${selectedStudent.class},
+        body: `Yth. ${waliName},
 
 Melalui surat elektronik sistem BK otomatis ini, kami memberitahukan bahwa salah satu siswa bimbingan Anda di kelas:
 
