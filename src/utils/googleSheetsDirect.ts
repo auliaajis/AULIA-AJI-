@@ -146,11 +146,36 @@ export async function pushDataDirect(
     violations: any[];
     services: any[];
     attendance: any[];
-  }
+  },
+  force: boolean = false
 ): Promise<{ success: boolean; message: string }> {
   try {
     // 1. Ensure required tabs exist
     await ensureTabsExist(accessToken, spreadsheetId);
+
+    // Safety check: Prevent overwriting remote data if this device hasn't been verified/synced
+    if (!force && localStorage.getItem('bk_google_sync_verified') !== 'true') {
+      try {
+        const checkUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Siswa!A2:A?majorDimension=ROWS`;
+        const checkRes = await fetch(checkUrl, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        });
+        if (checkRes.ok) {
+          const checkData = await checkRes.json();
+          if (checkData.values && checkData.values.length > 0) {
+            return {
+              success: false,
+              message: 'OVERWRITE_PREVENTION: Sistem mendeteksi adanya data riwayat yang tersimpan di Google Sheets Anda, sementara perangkat ini belum melakukan impor data lama. Untuk mencegah terhapusnya data lama Anda di awan, sinkronisasi otomatis ditangguhkan.\n\nSilakan lakukan "Impor Data dari Google Sheets" (Tarik Data) terlebih dahulu di menu Integrasi Google.'
+            };
+          }
+        }
+      } catch (err) {
+        console.warn('Gagal memverifikasi proteksi database:', err);
+      }
+    }
 
     // 2. Define structures & headers
     const structures = [
@@ -243,6 +268,9 @@ export async function pushDataDirect(
       const errText = await updateRes.text();
       throw new Error(`Gagal menulis data ke Spreadsheet: ${errText}`);
     }
+
+    localStorage.setItem('bk_google_sync_verified', 'true');
+    window.dispatchEvent(new Event('storage'));
 
     return {
       success: true,

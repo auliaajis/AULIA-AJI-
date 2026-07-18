@@ -1,4 +1,5 @@
-import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut, X, Settings, Calendar, Database, ClipboardList, Mail } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { LayoutDashboard, Users, AlertTriangle, HeartHandshake, PlusCircle, UserCircle, LogOut, X, Settings, Calendar, Database, ClipboardList, Mail, Check, Home } from 'lucide-react';
 import SchoolLogo from './SchoolLogo';
 import { Counselor } from '../types';
 
@@ -8,6 +9,7 @@ interface SidebarProps {
   activeCounselor: Counselor;
   allCounselors: Counselor[];
   onChangeCounselor?: (counselor: Counselor) => void;
+  onUpdateCounselor?: (counselor: Counselor) => void;
   onLogout: () => void;
   isOpen?: boolean;
   onClose?: () => void;
@@ -19,10 +21,55 @@ export default function Sidebar({
   activeCounselor,
   allCounselors,
   onChangeCounselor,
+  onUpdateCounselor,
   onLogout,
   isOpen = false,
   onClose,
 }: SidebarProps) {
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [name, setName] = useState(activeCounselor.name);
+  const [nip, setNip] = useState(activeCounselor.nip);
+  const [role, setRole] = useState(activeCounselor.role);
+  const [avatar, setAvatar] = useState(activeCounselor.avatar);
+
+  useEffect(() => {
+    setName(activeCounselor.name);
+    setNip(activeCounselor.nip);
+    setRole(activeCounselor.role);
+    setAvatar(activeCounselor.avatar);
+  }, [activeCounselor]);
+
+  const avatarPresets = [
+    { name: 'Default', url: activeCounselor.avatar },
+    { name: 'Pria Jas Biru', url: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120' },
+    { name: 'Wanita Kacamata', url: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=120' },
+    { name: 'Wanita Senyum', url: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&q=80&w=120' },
+    { name: 'Pria Kemeja', url: 'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&q=80&w=120' },
+    { name: 'Wanita Blazer', url: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&q=80&w=120' },
+    { name: 'Pria Senyum', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=120' }
+  ];
+
+  const uniqueAvatars = Array.from(new Set(avatarPresets.map(a => a.url)))
+    .map(url => avatarPresets.find(a => a.url === url)!)
+    .filter(Boolean);
+
+  const handleSaveProfile = () => {
+    if (!name.trim()) {
+      alert('Nama tidak boleh kosong.');
+      return;
+    }
+    if (onUpdateCounselor) {
+      onUpdateCounselor({
+        ...activeCounselor,
+        name: name.trim(),
+        nip: nip.trim(),
+        role: role.trim(),
+        avatar: avatar
+      });
+      setIsProfileModalOpen(false);
+    }
+  };
+
   return (
     <>
       {/* Mobile Backdrop Overlay */}
@@ -172,6 +219,18 @@ export default function Sidebar({
         </button>
 
         <button
+          onClick={() => onNavigate('home-visit')}
+          className={`flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 ${
+            currentView === 'home-visit'
+              ? 'bg-[#008378] text-[#f4fffc] shadow-sm'
+              : 'text-[#3d4947] hover:bg-[#d3e4fe]/40'
+          }`}
+        >
+          <Home className="w-4.5 h-4.5" />
+          <span>Home Visit</span>
+        </button>
+
+        <button
           onClick={() => onNavigate('google-sync')}
           className={`flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 ${
             currentView === 'google-sync'
@@ -226,9 +285,9 @@ export default function Sidebar({
 
         <button
           onClick={() => {
-            alert('Fitur Profil Saya sedang disiapkan.');
+            setIsProfileModalOpen(true);
           }}
-          className="flex items-center gap-3 px-4 py-2 text-xs font-semibold text-[#3d4947] hover:bg-[#d3e4fe]/40 rounded-xl transition-colors"
+          className="flex items-center gap-3 px-4 py-2 text-xs font-semibold text-[#3d4947] hover:bg-[#d3e4fe]/40 rounded-xl transition-colors cursor-pointer text-left w-full"
         >
           <UserCircle className="w-4.5 h-4.5 text-[#3d4947]" />
           <span>Profil Saya</span>
@@ -240,13 +299,171 @@ export default function Sidebar({
               onLogout();
             }
           }}
-          className="flex items-center gap-3 px-4 py-2 text-xs font-semibold text-[#ba1a1a] hover:bg-[#ffdad6]/40 rounded-xl transition-colors"
+          className="flex items-center gap-3 px-4 py-2 text-xs font-semibold text-[#ba1a1a] hover:bg-[#ffdad6]/40 rounded-xl transition-colors cursor-pointer text-left w-full"
         >
           <LogOut className="w-4.5 h-4.5" />
           <span>Keluar</span>
         </button>
       </div>
     </aside>
+
+    {/* Profil Saya Modal */}
+    {isProfileModalOpen && (
+      <div className="fixed inset-0 bg-black/60 z-[9999] backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200" id="profile-modal-overlay">
+        <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl border border-gray-100 overflow-hidden animate-in zoom-in-95 duration-200" id="profile-modal-container">
+          {/* Modal Header with Accent */}
+          <div className="bg-[#00685f] p-6 text-white relative">
+            <button 
+              onClick={() => setIsProfileModalOpen(false)}
+              className="absolute top-4 right-4 p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
+              title="Tutup"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <div className="flex items-center gap-4">
+              <div className="relative">
+                <img 
+                  src={avatar} 
+                  alt={name} 
+                  className="w-16 h-16 rounded-full border-2 border-white object-cover shadow-md"
+                  referrerPolicy="no-referrer"
+                />
+                <div className="absolute -bottom-1 -right-1 bg-teal-500 text-white p-1 rounded-full text-[9px] border border-white font-bold">
+                  BK
+                </div>
+              </div>
+              <div>
+                <h3 className="text-lg font-extrabold tracking-tight">{name || 'Nama Belum Diisi'}</h3>
+                <p className="text-xs text-teal-100 font-semibold uppercase tracking-wider">{role || 'Guru BK'}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Modal Body */}
+          <div className="p-6 space-y-5">
+            {/* Profile Fields */}
+            <div className="space-y-4">
+              {/* Nama Lengkap */}
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-wider text-[#3d4947] mb-1.5">
+                  Nama Lengkap &amp; Gelar
+                </label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full px-3 py-2 text-xs font-semibold bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#00685f]/30 focus:border-[#00685f] transition-all font-sans"
+                  placeholder="Masukkan nama lengkap"
+                />
+              </div>
+
+              {/* NIP */}
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-wider text-[#3d4947] mb-1.5">
+                  Nomor Induk Pegawai (NIP)
+                </label>
+                <input
+                  type="text"
+                  value={nip}
+                  onChange={(e) => setNip(e.target.value)}
+                  className="w-full px-3 py-2 text-xs font-semibold bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#00685f]/30 focus:border-[#00685f] transition-all font-sans"
+                  placeholder="Contoh: NIP. 1993..."
+                />
+              </div>
+
+              {/* Jabatan/Role */}
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-wider text-[#3d4947] mb-1.5">
+                  Jabatan / Peran BK
+                </label>
+                <input
+                  type="text"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                  className="w-full px-3 py-2 text-xs font-semibold bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#00685f]/30 focus:border-[#00685f] transition-all font-sans"
+                  placeholder="Contoh: Guru Pembimbing Kelas 8"
+                />
+              </div>
+
+              {/* Predefined Avatars Selector */}
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-wider text-[#3d4947] mb-2">
+                  Pilih Avatar Profil
+                </label>
+                <div className="flex flex-wrap gap-2.5">
+                  {uniqueAvatars.map((preset, index) => {
+                    const isSelected = avatar === preset.url;
+                    return (
+                      <button
+                        key={index}
+                        onClick={() => setAvatar(preset.url)}
+                        type="button"
+                        className={`relative w-11 h-11 rounded-full overflow-hidden border-2 transition-all cursor-pointer ${
+                          isSelected 
+                            ? 'border-[#00685f] scale-105 ring-2 ring-[#00685f]/20 shadow-md' 
+                            : 'border-transparent hover:border-gray-300'
+                        }`}
+                        title={preset.name}
+                      >
+                        <img 
+                          src={preset.url} 
+                          alt={preset.name} 
+                          className="w-full h-full object-cover"
+                          referrerPolicy="no-referrer"
+                        />
+                        {isSelected && (
+                          <div className="absolute inset-0 bg-[#00685f]/40 flex items-center justify-center">
+                            <Check className="w-4 h-4 text-white font-black stroke-[3]" />
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Kelas Bimbingan (Allowed Classes Display Only) */}
+              <div className="pt-2 border-t border-gray-100">
+                <span className="block text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">
+                  Kelas Bimbingan (Akses Kontrol)
+                </span>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {activeCounselor.allowedClasses.length === 0 ? (
+                    <span className="text-[10px] font-bold text-teal-700 bg-teal-50 px-2.5 py-0.5 rounded border border-teal-100">
+                      Seluruh Kelas (Administrator)
+                    </span>
+                  ) : (
+                    activeCounselor.allowedClasses.map((cls) => (
+                      <span key={cls} className="text-[9px] font-bold text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded">
+                        Kelas {cls}
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center gap-2.5 pt-4 border-t border-gray-100">
+              <button
+                onClick={() => setIsProfileModalOpen(false)}
+                type="button"
+                className="flex-1 py-2 px-4 rounded-xl border border-gray-200 hover:bg-gray-50 text-xs font-bold text-[#3d4947] transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                onClick={handleSaveProfile}
+                type="button"
+                className="flex-1 py-2 px-4 rounded-xl bg-[#00685f] hover:bg-[#00685f]/90 text-white text-xs font-bold transition-colors shadow-sm cursor-pointer"
+              >
+                Simpan Perubahan
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
   </>
   );
 }

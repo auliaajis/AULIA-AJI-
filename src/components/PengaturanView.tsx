@@ -21,7 +21,13 @@ import {
   Check,
   X,
   Info,
-  Pencil
+  Pencil,
+  Database,
+  Lock,
+  Laptop,
+  Layers,
+  AlertTriangle,
+  RefreshCw
 } from 'lucide-react';
 
 export interface WaliKelasConfig {
@@ -49,11 +55,36 @@ export default function PengaturanView() {
     departmentName: 'DINAS PENDIDIKAN, KEBUDAYAAN, KEPEMUDAAN DAN OLAHRAGA',
   });
 
-  const [activeTab, setActiveTab] = useState<'identitas' | 'walikelas'>('identitas');
+  const [activeTab, setActiveTab] = useState<'identitas' | 'walikelas' | 'database'>('identitas');
+  const [dbMode, setDbMode] = useState<'shared' | 'isolated'>(() => {
+    return (localStorage.getItem('bk_database_mode') as 'shared' | 'isolated') || 'shared';
+  });
   const [threshold, setThreshold] = useState<number>(() => {
     const saved = localStorage.getItem('bk_email_threshold');
     return saved ? parseInt(saved) || 20 : 20;
   });
+
+  const handleToggleDbMode = (mode: 'shared' | 'isolated') => {
+    if (mode === dbMode) return;
+    
+    const message = mode === 'isolated' 
+      ? "⚠️ AKTIFKAN ISOLASI DATABASE (DATABASE MANDIRI PER AKUN)?\n\n" +
+        "Setelah diaktifkan, data siswa, pelanggaran, layanan, jurnal, absensi, dan integrasi Google Sheets akan terpisah secara mandiri untuk masing-masing Akun Konselor.\n\n" +
+        "Akun Anda tidak akan saling menimpa atau mencampuri data rekan sejawat lainnya, meskipun menggunakan browser/perangkat yang sama.\n\n" +
+        "Sistem akan memuat ulang halaman untuk menerapkan ruang penyimpanan terisolasi yang baru. Lanjutkan?"
+      : "⚠️ NONAKTIFKAN ISOLASI DATABASE (KEMBALI KE DATABASE BERSAMA)?\n\n" +
+        "Sistem akan kembali menggunakan satu database lokal global yang sama (dibagikan untuk seluruh akun konselor di browser ini).\n\n" +
+        "Sistem akan memuat ulang halaman untuk menerapkan ruang penyimpanan bersama yang baru. Lanjutkan?";
+        
+    if (confirm(message)) {
+      localStorage.setItem('bk_database_mode', mode);
+      setDbMode(mode);
+      window.dispatchEvent(new Event('storage'));
+      setTimeout(() => {
+        window.location.reload();
+      }, 300);
+    }
+  };
 
   const defaultWaliKelasList: WaliKelasConfig[] = [
     { class: 'Kelas 7A', name: 'Ibu Nona Marlina, S.Pd.', email: 'wali.kelas.7a@smpn2susukan.sch.id' },
@@ -256,7 +287,8 @@ export default function PengaturanView() {
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          const base64 = canvas.toDataURL('image/jpeg', 0.85);
+          const isPng = file.type.toLowerCase().includes('png');
+          const base64 = canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', isPng ? undefined : 0.85);
           localStorage.setItem(key, base64);
           
           // Dispatch notifications for other components
@@ -355,6 +387,17 @@ export default function PengaturanView() {
           }`}
         >
           Wali Kelas &amp; Email Notifikasi ({waliKelasList.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('database')}
+          className={`pb-3 px-5 text-sm font-extrabold transition-all border-b-2 cursor-pointer ${
+            activeTab === 'database'
+              ? 'border-[#00685f] text-[#00685f]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Opsi Multi-Akun &amp; Database
         </button>
       </div>
 
@@ -866,6 +909,140 @@ export default function PengaturanView() {
               <Info className="w-4.5 h-4.5 text-emerald-600 shrink-0 mt-0.5" />
               <p className="leading-relaxed">
                 <strong>Alur Kerja Sistem Otomatis:</strong> Setiap kali pelanggaran baru dicatat untuk siswa yang membuat total akumulasi poinnya menyentuh atau melebihi batas <strong>{threshold} poin</strong>, sistem akan secara otomatis memicu draf surat elektronik bimbingan konseling yang siap dikirimkan secara instan ke email Wali Kelas di atas.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'database' && (
+        <div className="space-y-6 animate-in fade-in duration-200">
+          {/* Card Penjelasan Utama */}
+          <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-6">
+            <h3 className="font-extrabold text-sm text-[#0b1c30] flex items-center gap-2 pb-2 border-b border-gray-100">
+              <Users className="w-4.5 h-4.5 text-[#00685f]" />
+              <span>Solusi Penggunaan Bersama Rekan Sejawat (3 Guru BK)</span>
+            </h3>
+
+            <p className="text-xs text-[#3d4947] leading-relaxed">
+              Sistem Informasi BK &amp; E-Rapor SMP Negeri 2 Susukan didesain untuk mendukung fleksibilitas kolaborasi bimbingan konseling secara terintegrasi maupun mandiri. Berikut adalah pilihan konfigurasi terbaik untuk Anda dan 2 rekan sejawat BK lainnya:
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Card Opsi A */}
+              <div className="p-4 bg-[#f8fafa] rounded-xl border border-gray-100 space-y-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-teal-50 text-[#00685f] text-[11px] font-bold flex items-center justify-center border border-[#00685f]/20">A</span>
+                  <h4 className="font-extrabold text-xs text-[#0b1c30]">Berbeda Laptop / Perangkat (Sangat Direkomendasikan)</h4>
+                </div>
+                <p className="text-[11px] text-[#3d4947]/85 leading-relaxed">
+                  Karena aplikasi ini berjalan langsung pada browser, maka membuka aplikasi di laptop/perangkat pribadi masing-masing otomatis akan membuat database lokal yang terpisah secara alami di browser tersebut. 
+                </p>
+                <p className="text-[11px] text-[#3d4947]/85 leading-relaxed font-bold">
+                  Setiap Guru BK hanya perlu masuk ke menu &quot;Integrasi Google&quot; dan menyinkronkan dengan akun Google &amp; file Spreadsheet pribadinya masing-masing!
+                </p>
+              </div>
+
+              {/* Card Opsi B */}
+              <div className="p-4 bg-[#f8fafa] rounded-xl border border-gray-100 space-y-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-teal-50 text-[#00685f] text-[11px] font-bold flex items-center justify-center border border-[#00685f]/20">B</span>
+                  <h4 className="font-extrabold text-xs text-[#0b1c30]">Berbagi Browser / Perangkat yang Sama</h4>
+                </div>
+                <p className="text-[11px] text-[#3d4947]/85 leading-relaxed">
+                  Jika Anda dan rekan sejawat bergantian menggunakan satu laptop/komputer yang sama, Anda dapat mengaktifkan fitur <strong>Isolasi Database (Database Mandiri per Akun)</strong> di bawah ini.
+                </p>
+                <p className="text-[11px] text-[#3d4947]/85 leading-relaxed font-bold">
+                  Sistem akan mengisolasi ruang penyimpanan localStorage berdasarkan Akun Konselor yang sedang aktif sehingga data Anda tidak akan tercampur!
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Pengaturan Mode Database */}
+          <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-5">
+            <div className="flex items-center justify-between pb-2 border-b border-gray-100">
+              <h3 className="font-extrabold text-sm text-[#0b1c30] flex items-center gap-2">
+                <Database className="w-4.5 h-4.5 text-[#00685f]" />
+                <span>Mode Penyimpanan Database Lokal</span>
+              </h3>
+              <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wide uppercase ${
+                dbMode === 'isolated' 
+                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' 
+                  : 'bg-amber-50 text-amber-700 border border-amber-100'
+              }`}>
+                {dbMode === 'isolated' ? 'Isolasi Akun Aktif' : 'Database Bersama (Shared)'}
+              </span>
+            </div>
+
+            <p className="text-xs text-[#3d4947]/80 leading-relaxed">
+              Pilih mode penyimpanan yang sesuai dengan kebutuhan operasional BK di SMP Negeri 2 Susukan:
+            </p>
+
+            <div className="space-y-3">
+              {/* Mode Bersama */}
+              <button
+                type="button"
+                onClick={() => handleToggleDbMode('shared')}
+                className={`w-full text-left p-4 rounded-xl border transition-all flex gap-3 cursor-pointer items-start ${
+                  dbMode === 'shared'
+                    ? 'bg-[#00685f]/5 border-[#00685f] ring-1 ring-[#00685f]/20'
+                    : 'bg-white border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <Layers className={`w-5 h-5 mt-0.5 shrink-0 ${dbMode === 'shared' ? 'text-[#00685f]' : 'text-gray-400'}`} />
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-extrabold text-xs text-[#0b1c30]">Mode Database Bersama (Shared Database)</span>
+                    {dbMode === 'shared' && <span className="bg-[#00685f] text-white text-[8px] font-extrabold px-1.5 py-0.2 rounded-full">AKTIF</span>}
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-relaxed">
+                    Satu database lokal yang sama digunakan bersama-sama oleh semua akun konselor pada browser ini. Data siswa, catatan pelanggaran, dan riwayat bimbingan konseling digabungkan dalam satu wadah global.
+                  </p>
+                </div>
+              </button>
+
+              {/* Mode Isolasi */}
+              <button
+                type="button"
+                onClick={() => handleToggleDbMode('isolated')}
+                className={`w-full text-left p-4 rounded-xl border transition-all flex gap-3 cursor-pointer items-start ${
+                  dbMode === 'isolated'
+                    ? 'bg-[#00685f]/5 border-[#00685f] ring-1 ring-[#00685f]/20'
+                    : 'bg-white border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <Lock className={`w-5 h-5 mt-0.5 shrink-0 ${dbMode === 'isolated' ? 'text-[#00685f]' : 'text-gray-400'}`} />
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-extrabold text-xs text-[#0b1c30]">Mode Database Mandiri per Akun (Isolated Database)</span>
+                    {dbMode === 'isolated' && <span className="bg-[#00685f] text-white text-[8px] font-extrabold px-1.5 py-0.2 rounded-full">AKTIF</span>}
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-relaxed">
+                    Setiap akun konselor yang masuk (misal: <strong>Aulia</strong>, <strong>Nona</strong>, atau <strong>Tri</strong>) akan memiliki database siswa, pelanggaran, bimbingan, serta pengaturan sinkronisasi Google Sheets yang <strong>100% terpisah secara lokal</strong>. Sangat aman jika bergantian menggunakan satu komputer.
+                  </p>
+                </div>
+              </button>
+            </div>
+          </div>
+
+          {/* Petunjuk Penyusunan & Sinkronisasi */}
+          <div className="bg-[#00685f]/5 rounded-xl border border-[#00685f]/15 p-4 space-y-3">
+            <h4 className="font-extrabold text-xs text-[#00685f] flex items-center gap-2">
+              <Info className="w-4.5 h-4.5 shrink-0" />
+              <span>Panduan Kolaborasi Multi-Konselor (Rekan Sejawat)</span>
+            </h4>
+            <div className="space-y-2 text-[11px] text-[#3d4947] leading-relaxed">
+              <p>
+                <strong>1. Pembagian Kelas Bimbingan:</strong> Secara default, aplikasi telah mengonfigurasi hak akses kelas bimbingan masing-masing Guru BK secara presisi:
+              </p>
+              <ul className="list-disc list-inside pl-2 space-y-1 font-semibold text-gray-700 font-sans">
+                <li>Ibu Nona Muanifah, S.Pd. &rarr; Kelas Bimbingan 7</li>
+                <li>Bapak Aulia Aji Sasongko, S.Pd. &rarr; Kelas Bimbingan 8</li>
+                <li>Ibu Tri Juni Budiastuti, S.Pd. &rarr; Kelas Bimbingan 9</li>
+              </ul>
+              <p className="mt-2">
+                <strong>2. Pengaturan Sinkronisasi Google Sheets:</strong> Jika Anda menggunakan <strong>Mode Database Mandiri per Akun</strong>, setiap kali akun konselor masuk, mereka dapat menautkan akun Google pribadinya di menu <strong>Integrasi Google</strong>. Spreadsheet baru bernama <em>&quot;Database BK Sekolah&quot;</em> akan otomatis dibuat di Google Drive masing-masing konselor, memastikan kedaulatan data tetap aman di akun Google Drive pribadi mereka.
               </p>
             </div>
           </div>

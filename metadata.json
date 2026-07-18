@@ -1,6 +1,6 @@
 {
   "name": "Sistem Informasi BK Gridasus",
   "description": "Sistem bimbingan konseling dan pencatatan pelanggaran siswa BK Gridasus.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

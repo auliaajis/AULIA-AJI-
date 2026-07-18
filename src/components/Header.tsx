@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Search, Bell, Calendar as CalendarIcon, Check, Menu } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Search, Bell, Calendar as CalendarIcon, Check, Menu, ShieldCheck, ShieldAlert } from 'lucide-react';
 import { Counselor } from '../types';
 
 interface HeaderProps {
@@ -19,6 +19,27 @@ export default function Header({
 }: HeaderProps) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [unreadCount, setUnreadCount] = useState(2);
+
+  // Database Overwrite Protection Indicator States
+  const [isSyncVerified, setIsSyncVerified] = useState(() => {
+    return localStorage.getItem('bk_google_sync_verified') === 'true';
+  });
+  const [hasIntegration, setHasIntegration] = useState(() => {
+    return !!(localStorage.getItem('bk_google_spreadsheet_id') || localStorage.getItem('bk_google_script_url'));
+  });
+
+  useEffect(() => {
+    const checkSync = () => {
+      setIsSyncVerified(localStorage.getItem('bk_google_sync_verified') === 'true');
+      setHasIntegration(!!(localStorage.getItem('bk_google_spreadsheet_id') || localStorage.getItem('bk_google_script_url')));
+    };
+    window.addEventListener('storage', checkSync);
+    const interval = setInterval(checkSync, 1500);
+    return () => {
+      window.removeEventListener('storage', checkSync);
+      clearInterval(interval);
+    };
+  }, []);
 
   const notifications = [
     {
@@ -93,6 +114,33 @@ export default function Header({
 
       {/* Action Items */}
       <div className="flex items-center gap-4">
+        {/* Database Overwrite Protection Indicator */}
+        {hasIntegration && (
+          <button
+            onClick={() => {
+              if (isSyncVerified) {
+                alert("SISTEM PROTEKSI AKTIF:\n\nSistem mendeteksi koneksi Google Sheets Anda aktif dan aman.\n\nPerangkat ini telah disinkronkan dengan data awan, sehingga data riwayat Anda di awan terlindungi dari penimpaan data kosong.");
+              } else {
+                alert("SINKRONISASI DITANGGUHKAN:\n\nSistem mendeteksi Anda menggunakan perangkat baru. Sinkronisasi otomatis ditangguhkan demi melindungi data lama Anda di Google Sheets dari penimpaan data kosong.\n\nSolusi: Buka menu 'Integrasi Google' lalu lakukan 'Impor Data' (Tarik Data) terlebih dahulu untuk membuka kunci sinkronisasi.");
+              }
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider border transition-all duration-200 cursor-pointer ${
+              isSyncVerified 
+                ? 'bg-[#e6fcf5] text-[#00685f] border-[#00685f]/20 hover:bg-[#c2f9e6]' 
+                : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100 animate-pulse'
+            }`}
+            title={isSyncVerified ? "Proteksi Database Aktif (Aman)" : "Sinkronisasi Ditangguhkan (Perlu Impor)"}
+          >
+            {isSyncVerified ? (
+              <ShieldCheck className="w-4 h-4 text-[#00685f]" />
+            ) : (
+              <ShieldAlert className="w-4 h-4 text-amber-600" />
+            )}
+            <span className="hidden md:inline">{isSyncVerified ? 'Proteksi Aktif' : 'Sync Ditangguhkan'}</span>
+            <span className="md:hidden">{isSyncVerified ? 'Aman' : 'Perlu Sync'}</span>
+          </button>
+        )}
+
         {/* Notifications Icon with Popup */}
         <div className="relative">
           <button

@@ -44,6 +44,8 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
 
   // Form States
   const [selectedStudentId, setSelectedStudentId] = useState<string>('');
+  const [studentSearchQuery, setStudentSearchQuery] = useState<string>('');
+  const [showStudentDropdown, setShowStudentDropdown] = useState<boolean>(false);
   const [parentName, setParentName] = useState<string>('');
   const [letterNumber, setLetterNumber] = useState<string>('');
   const [letterDate, setLetterDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
@@ -88,6 +90,20 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
     }
   }, [activeTab, summons.length]);
 
+  // Filtered Student Suggestions for Autocomplete
+  const filteredStudentSuggestions = React.useMemo(() => {
+    const q = studentSearchQuery.toLowerCase().trim();
+    if (!q) {
+      return students;
+    }
+    return students.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        s.nis.includes(q) ||
+        s.class.toLowerCase().includes(q)
+    );
+  }, [studentSearchQuery, students]);
+
   // Handle student selection to auto fill fields if appropriate
   const handleStudentChange = (studentId: string) => {
     setSelectedStudentId(studentId);
@@ -95,8 +111,10 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
     if (student) {
       // Propose common default parent prefix
       setParentName(`Bapak / Ibu Wali dari ${student.name}`);
+      setStudentSearchQuery(student.name);
     } else {
       setParentName('');
+      setStudentSearchQuery('');
     }
   };
 
@@ -246,23 +264,68 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               
               {/* Target Student selection */}
-              <div className="space-y-1.5 md:col-span-2">
+              <div className="space-y-1.5 md:col-span-2 relative">
                 <label className="text-xs font-bold text-[#0b1c30] uppercase tracking-wide block">
                   Pilih Siswa Target <span className="text-red-500">*</span>
                 </label>
-                <select
-                  value={selectedStudentId}
-                  onChange={(e) => handleStudentChange(e.target.value)}
-                  className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
-                  required
-                >
-                  <option value="">-- Pilih Siswa --</option>
-                  {students.map((student) => (
-                    <option key={student.id} value={student.id}>
-                      {student.name} (Kelas {student.class}) [NIS: {student.nis}]
-                    </option>
-                  ))}
-                </select>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={studentSearchQuery}
+                    onChange={(e) => {
+                      setStudentSearchQuery(e.target.value);
+                      setSelectedStudentId('');
+                      setParentName('');
+                      setShowStudentDropdown(true);
+                    }}
+                    onFocus={() => setShowStudentDropdown(true)}
+                    placeholder="Cari nama, NISN, atau kelas siswa..."
+                    className="w-full pl-3.5 pr-10 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                    required
+                  />
+                  <Search className="w-4.5 h-4.5 absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                </div>
+
+                {showStudentDropdown && (
+                  <>
+                    <div 
+                      className="fixed inset-0 z-20" 
+                      onClick={() => setShowStudentDropdown(false)}
+                    />
+                    <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-[#bcc9c6]/40 rounded-xl shadow-xl z-30 max-h-48 overflow-y-auto custom-scrollbar">
+                      {filteredStudentSuggestions.length > 0 ? (
+                        filteredStudentSuggestions.map((s) => (
+                          <div
+                            key={s.id}
+                            onClick={() => {
+                              handleStudentChange(s.id);
+                              setShowStudentDropdown(false);
+                            }}
+                            className={`p-3 hover:bg-[#eff4ff]/60 cursor-pointer flex items-center justify-between border-b border-[#bcc9c6]/10 last:border-b-0 relative z-40 ${
+                              selectedStudentId === s.id ? 'bg-[#e6fcf5]' : ''
+                            }`}
+                          >
+                            <div>
+                              <p className="text-xs font-bold text-[#0b1c30]">{s.name}</p>
+                              <p className="text-[10px] text-gray-500 font-semibold">
+                                NISN: {s.nis} | Kelas: {s.class}
+                              </p>
+                            </div>
+                            {selectedStudentId === s.id && (
+                              <span className="text-[10px] font-bold text-[#00685f] bg-[#e6fcf5] px-2 py-0.5 rounded">
+                                Terpilih
+                              </span>
+                            )}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="p-3 text-center text-xs text-[#3d4947] opacity-60 relative z-40">
+                          Siswa tidak ditemukan...
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* Parents Name */}

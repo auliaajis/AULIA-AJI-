@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Counselor, BKJournalEntry, CounselingService, ViolationRecord } from '../types';
 import { 
   Calendar, 
@@ -19,7 +19,10 @@ import {
   ClipboardList,
   User,
   Users,
-  Settings
+  Settings,
+  Camera,
+  ImageIcon,
+  X
 } from 'lucide-react';
 import { downloadJournalPDF, downloadJournalRangePDF, formatIndonesianDate } from '../utils/pdfGenerator';
 
@@ -181,6 +184,85 @@ export default function JurnalHarianView({
   const [target, setTarget] = useState('');
   const [status, setStatus] = useState<BKJournalEntry['status']>('Selesai');
 
+  // Verification Proof Photo states & camera setup
+  const [proofPhotoUrl, setProofPhotoUrl] = useState<string | undefined>(undefined);
+  const [proofPhotoName, setProofPhotoName] = useState<string | undefined>(undefined);
+  const [showCamera, setShowCamera] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Auto clean up camera stream on unmount
+  useEffect(() => {
+    return () => {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, [cameraStream]);
+
+  const startCamera = async () => {
+    setShowCamera(true);
+    setCameraError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false,
+      });
+      setCameraStream(stream);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+    } catch (err) {
+      console.error('Camera access error:', err);
+      setCameraError('Gagal mengakses kamera. Pastikan izin kamera diberikan.');
+    }
+  };
+
+  const capturePhoto = () => {
+    if (!videoRef.current) return;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = videoRef.current.videoWidth || 640;
+      canvas.height = videoRef.current.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/jpeg');
+        setProofPhotoUrl(dataUrl);
+        setProofPhotoName(`Kamera_Jurnal_${new Date().toISOString().slice(0,10)}_${Math.floor(Math.random() * 1000)}.jpg`);
+        stopCamera();
+      }
+    } catch (err) {
+      console.error('Capture error:', err);
+      setCameraError('Gagal mengambil gambar dari kamera.');
+    }
+  };
+
+  const stopCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((track) => track.stop());
+      setCameraStream(null);
+    }
+    setShowCamera(false);
+  };
+
+  const handleProofFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    setProofPhotoName(file.name);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (event.target?.result) {
+        setProofPhotoUrl(event.target.result as string);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
   // Sync to localStorage
   useEffect(() => {
     localStorage.setItem('bk_daily_journals', JSON.stringify(journalEntries));
@@ -196,6 +278,8 @@ export default function JurnalHarianView({
       setDescription(editingEntry.description);
       setTarget(editingEntry.target);
       setStatus(editingEntry.status);
+      setProofPhotoUrl(editingEntry.proofPhotoUrl);
+      setProofPhotoName(editingEntry.proofPhotoName);
       setIsFormOpen(true);
     }
   }, [editingEntry]);
@@ -208,6 +292,8 @@ export default function JurnalHarianView({
     setDescription('');
     setTarget('');
     setStatus('Selesai');
+    setProofPhotoUrl(undefined);
+    setProofPhotoName(undefined);
     setEditingEntry(null);
     setIsFormOpen(false);
   };
@@ -234,6 +320,8 @@ export default function JurnalHarianView({
             target,
             status,
             date: selectedDate, // update to currently viewed date
+            proofPhotoUrl,
+            proofPhotoName,
           };
         }
         return item;
@@ -251,7 +339,9 @@ export default function JurnalHarianView({
         target,
         status,
         counselorId: activeCounselor.id,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        proofPhotoUrl,
+        proofPhotoName,
       };
       setJournalEntries(prev => [newEntry, ...prev]);
 
@@ -575,6 +665,108 @@ export default function JurnalHarianView({
                   </select>
                 </div>
 
+                {/* Foto Bukti Layanan / Jurnal (Kamera HP / Upload File) */}
+                <div className="space-y-2 border-t border-gray-100 pt-4">
+                  <label className="text-xs font-bold text-[#0b1c30] flex items-center gap-1.5">
+                    <Camera className="w-4 h-4 text-[#00685f]" />
+                    <span>Lampirkan Foto Bukti Kegiatan (Opsional)</span>
+                  </label>
+                  <p className="text-[11px] text-gray-500 leading-normal font-semibold">
+                    Ambil foto langsung sebagai bukti valid menggunakan kamera HP/laptop Anda atau unggah file foto dari penyimpanan.
+                  </p>
+
+                  {proofPhotoUrl ? (
+                    <div className="relative border border-gray-200 rounded-xl overflow-hidden bg-gray-50 p-3 max-w-sm text-center">
+                      <img
+                        src={proofPhotoUrl}
+                        alt="Bukti Foto Jurnal"
+                        className="max-h-48 mx-auto object-contain rounded-lg"
+                        referrerPolicy="no-referrer"
+                      />
+                      <p className="text-[10px] text-gray-500 truncate mt-2 font-bold">
+                        {proofPhotoName}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setProofPhotoUrl(undefined);
+                          setProofPhotoName(undefined);
+                        }}
+                        className="absolute top-2.5 right-2.5 bg-red-600 text-white hover:bg-red-700 p-1.5 rounded-full shadow-md cursor-pointer transition-colors"
+                        title="Hapus Foto"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="max-w-md">
+                      {showCamera ? (
+                        <div className="relative bg-black rounded-xl overflow-hidden border border-gray-300">
+                          {cameraError ? (
+                            <div className="p-4 text-center text-xs text-red-600 font-semibold">
+                              <AlertCircle className="w-6 h-6 mx-auto text-red-600 mb-1" />
+                              <p>{cameraError}</p>
+                              <button
+                                type="button"
+                                onClick={stopCamera}
+                                className="mt-2 px-3 py-1 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold rounded-lg text-[10px] cursor-pointer"
+                              >
+                                Tutup Kamera
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <video
+                                ref={videoRef}
+                                playsInline
+                                className="w-full h-56 object-cover"
+                              />
+                              <div className="absolute bottom-3 inset-x-0 flex justify-center gap-2 px-4">
+                                <button
+                                  type="button"
+                                  onClick={capturePhoto}
+                                  className="bg-[#00685f] hover:bg-[#005049] text-white px-3.5 py-2 rounded-lg text-xs font-bold shadow-md cursor-pointer flex items-center gap-1.5"
+                                >
+                                  <Camera className="w-4 h-4" /> Ambil Foto
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={stopCamera}
+                                  className="bg-gray-800/80 hover:bg-gray-900 text-white px-3.5 py-2 rounded-lg text-xs font-bold shadow-md cursor-pointer"
+                                >
+                                  Batal
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-3">
+                          <button
+                            type="button"
+                            onClick={startCamera}
+                            className="flex flex-col items-center justify-center p-4 border border-dashed border-[#bcc9c6]/60 bg-gray-50 rounded-xl hover:bg-gray-100/50 hover:border-[#00685f]/80 transition-all cursor-pointer text-center"
+                          >
+                            <Camera className="w-5 h-5 text-[#00685f] mb-1" />
+                            <span className="text-[11px] font-bold text-[#0b1c30]">Gunakan Kamera</span>
+                          </button>
+
+                          <label className="flex flex-col items-center justify-center p-4 border border-dashed border-[#bcc9c6]/60 bg-gray-50 rounded-xl hover:bg-gray-100/50 hover:border-[#00685f]/80 transition-all cursor-pointer text-center">
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={handleProofFileChange}
+                              className="sr-only"
+                            />
+                            <ImageIcon className="w-5 h-5 text-[#6b38d4] mb-1" />
+                            <span className="text-[11px] font-bold text-[#0b1c30]">Unggah Foto</span>
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 {/* Action Buttons */}
                 <div className="flex justify-end gap-2 pt-2 border-t border-gray-100">
                   <button
@@ -667,6 +859,22 @@ export default function JurnalHarianView({
                         <p className="text-xs text-gray-600 leading-relaxed font-semibold whitespace-pre-wrap">
                           {entry.description}
                         </p>
+
+                        {/* Proof Photo thumbnail */}
+                        {entry.proofPhotoUrl && (
+                          <div className="mt-3 p-2 bg-gray-50 border border-gray-100 rounded-xl max-w-xs">
+                            <p className="text-[9px] text-[#00685f] font-bold mb-1 uppercase tracking-wider flex items-center gap-1">
+                              <Camera className="w-3 h-3" />
+                              <span>Foto Bukti Valid</span>
+                            </p>
+                            <img
+                              src={entry.proofPhotoUrl}
+                              alt="Bukti Jurnal"
+                              className="rounded-lg max-h-32 object-cover border border-gray-200"
+                              referrerPolicy="no-referrer"
+                            />
+                          </div>
+                        )}
                       </div>
 
                       {/* Card Actions Bottom footer */}

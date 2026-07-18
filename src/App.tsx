@@ -10,6 +10,7 @@ import AbsensiView from './components/AbsensiView';
 import GoogleIntegrationView from './components/GoogleIntegrationView';
 import JurnalHarianView from './components/JurnalHarianView';
 import PanggilanOrangTuaView from './components/PanggilanOrangTuaView';
+import HomeVisitView from './components/HomeVisitView';
 import LoginView from './components/LoginView';
 import { downloadServicePDF } from './utils/pdfGenerator';
 import { triggerBackgroundAutoSync } from './utils/googleSync';
@@ -35,11 +36,37 @@ export default function App() {
     return localStorage.getItem('bk_is_logged_in') === 'true';
   });
 
+  const [allCounselors, setAllCounselors] = useState<Counselor[]>(() => {
+    const saved = localStorage.getItem('bk_counselors');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return counselors;
+      }
+    }
+    return counselors;
+  });
+
   const [activeCounselor, setActiveCounselor] = useState<Counselor>(() => {
     const savedId = localStorage.getItem('bk_active_counselor_id');
-    const found = counselors.find((c) => c.id === savedId);
-    return found || counselors[0];
+    const savedCounselors = localStorage.getItem('bk_counselors');
+    let list = counselors;
+    if (savedCounselors) {
+      try { list = JSON.parse(savedCounselors); } catch (e) {}
+    }
+    const found = list.find((c) => c.id === savedId);
+    return found || list[0];
   });
+
+  const handleUpdateCounselor = (updated: Counselor) => {
+    const newList = allCounselors.map(c => c.id === updated.id ? updated : c);
+    setAllCounselors(newList);
+    setActiveCounselor(updated);
+    localStorage.setItem('bk_counselors', JSON.stringify(newList));
+    localStorage.setItem('bk_active_counselor_id', updated.id);
+    window.dispatchEvent(new Event('storage'));
+  };
 
   // Search State
   const [searchQuery, setSearchQuery] = useState('');
@@ -276,6 +303,9 @@ export default function App() {
     services?: CounselingService[];
     attendance?: any[];
   }) => {
+    localStorage.setItem('bk_google_sync_verified', 'true');
+    window.dispatchEvent(new Event('storage'));
+
     if (data.students) setStudents(data.students);
     if (data.violations) setViolations(data.violations);
     if (data.services) setServices(data.services);
@@ -397,9 +427,16 @@ export default function App() {
                         <span className="text-xs bg-[#eff4ff] text-[#00685f] font-extrabold px-2.5 py-1 rounded-lg">
                           {srv.serviceType}
                         </span>
-                        <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${badgeColor}`}>
-                          {srv.status}
-                        </span>
+                        <div className="flex items-center gap-1">
+                          {srv.targetType && (
+                            <span className="text-[9px] font-bold px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-full">
+                              {srv.targetType}
+                            </span>
+                          )}
+                          <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${badgeColor}`}>
+                            {srv.status}
+                          </span>
+                        </div>
                       </div>
 
                       <h4 className="font-bold text-[#0b1c30] text-sm line-clamp-1">
@@ -408,6 +445,20 @@ export default function App() {
                       <p className="text-xs text-[#3d4947]/80 line-clamp-2 mt-1 leading-relaxed">
                         {srv.description}
                       </p>
+
+                      {srv.proofPhotoUrl && (
+                        <div className="mt-3 relative rounded-lg overflow-hidden border border-gray-100 bg-gray-50 h-20 flex items-center justify-center">
+                          <img
+                            src={srv.proofPhotoUrl}
+                            alt="Bukti Sesi"
+                            className="h-full object-contain"
+                            referrerPolicy="no-referrer"
+                          />
+                          <span className="absolute bottom-1 right-1 bg-black/60 text-white text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">
+                            Bukti Foto
+                          </span>
+                        </div>
+                      )}
 
                       <div className="mt-4 pt-4 border-t border-[#bcc9c6]/10 space-y-1.5">
                         <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">
@@ -488,6 +539,13 @@ export default function App() {
             activeCounselor={activeCounselor}
           />
         );
+      case 'home-visit':
+        return (
+          <HomeVisitView
+            students={filteredStudents}
+            activeCounselor={activeCounselor}
+          />
+        );
       case 'pengaturan':
         return <PengaturanView />;
       case 'google-sync':
@@ -508,7 +566,7 @@ export default function App() {
   if (!isLoggedIn) {
     return (
       <LoginView
-        allCounselors={counselors}
+        allCounselors={allCounselors}
         onLoginSuccess={(counselor) => {
           setActiveCounselor(counselor);
           setIsLoggedIn(true);
@@ -529,7 +587,8 @@ export default function App() {
           setIsMobileSidebarOpen(false); // Auto close sidebar on mobile navigation
         }}
         activeCounselor={activeCounselor}
-        allCounselors={counselors}
+        allCounselors={allCounselors}
+        onUpdateCounselor={handleUpdateCounselor}
         onLogout={() => {
           setIsLoggedIn(false);
           localStorage.removeItem('bk_is_logged_in');

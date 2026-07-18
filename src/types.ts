@@ -31,6 +31,8 @@ export interface ViolationRecord {
   notes: string;
   handledBy?: 'Belum Ditangani' | 'Wali Kelas' | 'Guru BK' | 'Wali Kelas & Guru BK';
   handlingProgress?: string; // Penanganan sejauh apa
+  proofPhotoUrl?: string;
+  proofPhotoName?: string;
 }
 
 export type BKServiceType =
@@ -57,6 +59,9 @@ export interface CounselingService {
   startTime: string;
   endTime: string;
   attachments: { name: string; size: string }[];
+  targetType?: 'Individu' | 'Kelompok' | 'Klasikal';
+  proofPhotoUrl?: string;
+  proofPhotoName?: string;
 }
 
 export interface ActivityLog {
@@ -108,6 +113,8 @@ export interface BKJournalEntry {
   status: 'Selesai' | 'Perlu Tindak Lanjut' | 'Dalam Proses';
   counselorId: string;
   createdAt: string;
+  proofPhotoUrl?: string;
+  proofPhotoName?: string;
 }
 
 export interface ParentSummon {
@@ -127,4 +134,27 @@ export interface ParentSummon {
   status: 'Terkirim' | 'Hadir' | 'Batal' | 'Penjadwalan Ulang';
   createdAt: string;
 }
+
+export interface HomeVisitRecord {
+  id: string;
+  reportNumber: string; // e.g., "HV-2026-104"
+  date: string; // YYYY-MM-DD
+  studentId: string;
+  studentName: string;
+  studentClass: string;
+  studentNis: string;
+  parentNameMet: string;
+  address: string;
+  purpose: string;
+  result: string;
+  agreement: string;
+  photoUrl?: string; // Base64 or Unsplash fallback or loaded image
+  photoName?: string;
+  parentSignature?: string; // Base64 signature image
+  counselorSignature?: string; // Base64 signature image
+  counselorName: string;
+  counselorId: string;
+  createdAt: string;
+}
+
 

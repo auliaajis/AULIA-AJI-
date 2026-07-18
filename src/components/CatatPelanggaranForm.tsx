@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Student, ViolationRecord } from '../types';
 import {
   ChevronRight,
@@ -13,7 +13,11 @@ import {
   Filter,
   Mail,
   Send,
-  CheckCircle
+  CheckCircle,
+  Camera,
+  ImageIcon,
+  AlertCircle,
+  X
 } from 'lucide-react';
 import { downloadViolationPDF } from '../utils/pdfGenerator';
 
@@ -152,6 +156,85 @@ export default function CatatPelanggaranForm({
     triggerPoints: number;
     severity: 'TAHAP I' | 'TAHAP II (SIAGA)' | 'TAHAP III (KRITIS)';
   } | null>(null);
+
+  // Verification Proof Photo states & camera setup
+  const [proofPhotoUrl, setProofPhotoUrl] = useState<string | undefined>(undefined);
+  const [proofPhotoName, setProofPhotoName] = useState<string | undefined>(undefined);
+  const [showCamera, setShowCamera] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Auto clean up camera stream on unmount
+  useEffect(() => {
+    return () => {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, [cameraStream]);
+
+  const startCamera = async () => {
+    setShowCamera(true);
+    setCameraError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false,
+      });
+      setCameraStream(stream);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+    } catch (err) {
+      console.error('Camera access error:', err);
+      setCameraError('Gagal mengakses kamera. Pastikan izin kamera diberikan.');
+    }
+  };
+
+  const capturePhoto = () => {
+    if (!videoRef.current) return;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = videoRef.current.videoWidth || 640;
+      canvas.height = videoRef.current.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/jpeg');
+        setProofPhotoUrl(dataUrl);
+        setProofPhotoName(`Kamera_${new Date().toISOString().slice(0,10)}_${Math.floor(Math.random() * 1000)}.jpg`);
+        stopCamera();
+      }
+    } catch (err) {
+      console.error('Capture error:', err);
+      setCameraError('Gagal mengambil gambar dari kamera.');
+    }
+  };
+
+  const stopCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((track) => track.stop());
+      setCameraStream(null);
+    }
+    setShowCamera(false);
+  };
+
+  const handleProofFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    setProofPhotoName(file.name);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (event.target?.result) {
+        setProofPhotoUrl(event.target.result as string);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
 
   // Derived violation category string matching existing fields
   const violationCategory = useMemo(() => {
@@ -308,6 +391,8 @@ export default function CatatPelanggaranForm({
       notes,
       handledBy,
       handlingProgress: handledBy !== 'Belum Ditangani' ? handlingProgress : '',
+      proofPhotoUrl,
+      proofPhotoName,
     });
     setShowEmailModal(false);
   };
@@ -387,6 +472,8 @@ SMP Negeri 2 Susukan`,
         notes,
         handledBy: handledBy === 'Belum Ditangani' ? 'Wali Kelas' : handledBy, // Auto mark as resolved by Homeroom Teacher as points are low
         handlingProgress: handledBy === 'Belum Ditangani' ? 'Teguran persuasif & pembinaan tingkat kelas oleh Wali Kelas.' : handlingProgress,
+        proofPhotoUrl,
+        proofPhotoName,
       });
       alert(`Laporan berhasil disimpan. Karena akumulasi masih rendah (${projectedPoints} Poin), kasus cukup diselesaikan oleh Wali Kelas.`);
     }
@@ -504,6 +591,17 @@ SMP Negeri 2 Susukan`,
                         <span className="px-2 py-0.5 rounded bg-red-50 text-[#ba1a1a] font-bold text-[10px]">
                           {v.category}
                         </span>
+                        {v.proofPhotoUrl && (
+                          <div className="mt-1 flex items-center gap-1.5">
+                            <img
+                              src={v.proofPhotoUrl}
+                              alt="Bukti Foto"
+                              className="w-7 h-7 rounded object-cover border border-gray-200 shadow-xs"
+                              referrerPolicy="no-referrer"
+                            />
+                            <span className="text-[9px] text-emerald-700 font-bold bg-emerald-50 px-1 py-0.2 rounded border border-emerald-200">Foto Bukti</span>
+                          </div>
+                        )}
                       </td>
                       <td className="px-6 py-4 font-bold text-red-600">+{v.pointsAdded}</td>
                       <td className="px-6 py-4 text-gray-500">
@@ -891,6 +989,108 @@ SMP Negeri 2 Susukan`,
                   required
                   className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-4 py-3 text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 resize-none shadow-sm"
                 ></textarea>
+              </div>
+
+              {/* Foto Bukti Pelanggaran (Kamera HP / Upload File) */}
+              <div className="space-y-2 border-t border-[#bcc9c6]/10 pt-4">
+                <label className="text-xs font-bold text-[#0b1c30] flex items-center gap-1.5">
+                  <Camera className="w-4 h-4 text-[#00685f]" />
+                  <span>Bukti Foto Kejadian / Fisik (Opsional)</span>
+                </label>
+                <p className="text-[11px] text-gray-500 leading-normal font-semibold">
+                  Ambil foto langsung sebagai bukti valid menggunakan kamera HP/laptop Anda atau unggah file foto dari penyimpanan.
+                </p>
+
+                {proofPhotoUrl ? (
+                  <div className="relative border border-gray-200 rounded-xl overflow-hidden bg-gray-50 p-3 max-w-sm text-center">
+                    <img
+                      src={proofPhotoUrl}
+                      alt="Bukti Foto Pelanggaran"
+                      className="max-h-48 mx-auto object-contain rounded-lg"
+                      referrerPolicy="no-referrer"
+                    />
+                    <p className="text-[10px] text-gray-500 truncate mt-2 font-bold">
+                      {proofPhotoName}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProofPhotoUrl(undefined);
+                        setProofPhotoName(undefined);
+                      }}
+                      className="absolute top-2.5 right-2.5 bg-red-600 text-white hover:bg-red-700 p-1.5 rounded-full shadow-md cursor-pointer transition-colors"
+                      title="Hapus Foto"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="max-w-md">
+                    {showCamera ? (
+                      <div className="relative bg-black rounded-xl overflow-hidden border border-gray-300">
+                        {cameraError ? (
+                          <div className="p-4 text-center text-xs text-red-600 font-semibold">
+                            <AlertCircle className="w-6 h-6 mx-auto text-red-600 mb-1" />
+                            <p>{cameraError}</p>
+                            <button
+                              type="button"
+                              onClick={stopCamera}
+                              className="mt-2 px-3 py-1 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold rounded-lg text-[10px] cursor-pointer"
+                            >
+                              Tutup Kamera
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <video
+                              ref={videoRef}
+                              playsInline
+                              className="w-full h-56 object-cover"
+                            />
+                            <div className="absolute bottom-3 inset-x-0 flex justify-center gap-2 px-4">
+                              <button
+                                type="button"
+                                onClick={capturePhoto}
+                                className="bg-[#00685f] hover:bg-[#005049] text-white px-3.5 py-2 rounded-lg text-xs font-bold shadow-md cursor-pointer flex items-center gap-1.5"
+                              >
+                                <Camera className="w-4 h-4" /> Ambil Foto
+                              </button>
+                              <button
+                                type="button"
+                                onClick={stopCamera}
+                                className="bg-gray-800/80 hover:bg-gray-900 text-white px-3.5 py-2 rounded-lg text-xs font-bold shadow-md cursor-pointer"
+                              >
+                                Batal
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-3">
+                        <button
+                          type="button"
+                          onClick={startCamera}
+                          className="flex flex-col items-center justify-center p-5 border border-dashed border-[#bcc9c6]/60 bg-[#f8f9ff] rounded-xl hover:bg-gray-50 hover:border-[#00685f]/80 transition-all cursor-pointer text-center"
+                        >
+                          <Camera className="w-6 h-6 text-[#00685f] mb-1.5" />
+                          <span className="text-xs font-bold text-[#0b1c30]">Gunakan Kamera</span>
+                        </button>
+
+                        <label className="flex flex-col items-center justify-center p-5 border border-dashed border-[#bcc9c6]/60 bg-[#f8f9ff] rounded-xl hover:bg-gray-50 hover:border-[#00685f]/80 transition-all cursor-pointer text-center">
+                          <input
+                            type="file"
+                            accept="image/*"
+                            onChange={handleProofFileChange}
+                            className="sr-only"
+                          />
+                          <ImageIcon className="w-6 h-6 text-[#6b38d4] mb-1.5" />
+                          <span className="text-xs font-bold text-[#0b1c30]">Unggah Foto</span>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Footer Action buttons */}

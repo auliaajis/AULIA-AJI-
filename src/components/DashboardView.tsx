@@ -10,7 +10,16 @@ import {
   Eye,
   Calendar,
   AlertTriangle,
-  Award
+  Award,
+  Search,
+  Filter,
+  User,
+  MessageSquare,
+  FileText,
+  Activity,
+  History,
+  Sparkles,
+  Inbox
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -31,6 +40,9 @@ export default function DashboardView({
   onNavigateToForm,
 }: DashboardViewProps) {
   const [hoveredMonthIndex, setHoveredMonthIndex] = useState<number | null>(null);
+  const [atensiFilter, setAtensiFilter] = useState<'all' | 'critical'>('all');
+  const [aktivitasFilter, setAktivitasFilter] = useState<'all' | 'violation' | 'counseling' | 'other'>('all');
+  const [atensiSearch, setAtensiSearch] = useState('');
 
   // Dynamic calculations from current global state
   const totalSiswaCount = students.length * 10 + 1128; // scale realistically to match 1,248 base
@@ -185,200 +197,203 @@ export default function DashboardView({
 
       {/* Bento Grid Section */}
       <div className="grid grid-cols-12 gap-8">
-        {/* Main Line Chart (8 cols) */}
-        <div className="col-span-12 lg:col-span-8 bg-white p-8 rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.015)] border border-[#bcc9c6]/30">
-          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end gap-4 mb-6">
+        {/* Atensi Khusus (8 cols) */}
+        <div className="col-span-12 lg:col-span-8 bg-white p-6 sm:p-8 rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.015)] border border-[#bcc9c6]/30 flex flex-col">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-[#bcc9c6]/20 mb-6">
             <div>
-              <h2 className="text-xl font-bold text-[#0b1c30]">
-                Tren Kedisiplinan &amp; Layanan
+              <h2 className="text-lg font-extrabold text-[#0b1c30] flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-amber-500 shrink-0" />
+                <span>Atensi Khusus (Siswa dalam Pengawasan)</span>
               </h2>
-              <p className="text-xs text-[#3d4947]/70 font-medium mt-1">
-                Perbandingan tren pelanggaran vs intervensi BK (6 Bulan)
+              <p className="text-xs text-[#3d4947]/70 font-semibold mt-0.5">
+                Daftar siswa yang memerlukan intervensi bimbingan atau tindakan disiplin segera
               </p>
             </div>
-            <div className="flex items-center gap-4 text-xs font-bold">
-              <div className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-full bg-[#ba1a1a]"></span>
-                <span className="text-[#3d4947]/80">Pelanggaran</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-full bg-[#00685f]"></span>
-                <span className="text-[#3d4947]/80">Layanan BK</span>
-              </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAtensiFilter('all')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  atensiFilter === 'all'
+                    ? 'bg-[#00685f]/10 text-[#00685f] border border-[#00685f]/20'
+                    : 'bg-[#f4f7f6] text-gray-500 hover:text-gray-700 border border-transparent'
+                }`}
+              >
+                Semua Poin &gt; 0
+              </button>
+              <button
+                type="button"
+                onClick={() => setAtensiFilter('critical')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  atensiFilter === 'critical'
+                    ? 'bg-[#ba1a1a]/10 text-[#ba1a1a] border border-[#ba1a1a]/20'
+                    : 'bg-[#f4f7f6] text-gray-500 hover:text-gray-700 border border-transparent'
+                }`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                Siswa Kritis (&ge; 30)
+              </button>
             </div>
           </div>
 
-          {/* Interactive Custom SVG Chart Container */}
-          <div className="w-full relative bg-[#eff4ff]/20 p-4 rounded-xl border border-[#bcc9c6]/20">
-            <svg viewBox="0 0 800 240" className="w-full overflow-visible">
-              <defs>
-                <linearGradient id="gradTeal" x1="0%" x2="0%" y1="0%" y2="100%">
-                  <stop offset="0%" stopColor="#00685f" stopOpacity="0.15" />
-                  <stop offset="100%" stopColor="#00685f" stopOpacity="0.0" />
-                </linearGradient>
-                <linearGradient id="gradRed" x1="0%" x2="0%" y1="0%" y2="100%">
-                  <stop offset="0%" stopColor="#ba1a1a" stopOpacity="0.08" />
-                  <stop offset="100%" stopColor="#ba1a1a" stopOpacity="0.0" />
-                </linearGradient>
-              </defs>
+          {/* Search Box */}
+          <div className="relative mb-5">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Cari nama atau kelas siswa..."
+              value={atensiSearch}
+              onChange={(e) => setAtensiSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-[#f4f7f6] border border-[#bcc9c6]/30 rounded-xl text-xs font-medium text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f]/30 placeholder:text-gray-400"
+            />
+            {atensiSearch && (
+              <button
+                onClick={() => setAtensiSearch('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs font-bold"
+              >
+                Clear
+              </button>
+            )}
+          </div>
 
-              {/* Grid Lines */}
-              <line x1="40" y1="40" x2="760" y2="40" stroke="#bcc9c6" strokeOpacity="0.25" strokeWidth="1" />
-              <line x1="40" y1="130" x2="760" y2="130" stroke="#bcc9c6" strokeOpacity="0.25" strokeWidth="1" />
-              <line x1="40" y1="220" x2="760" y2="220" stroke="#bcc9c6" strokeOpacity="0.4" strokeWidth="1.5" />
+          {/* Student Watchlist */}
+          <div className="flex-1 space-y-4">
+            {(() => {
+              const baseList = [...students]
+                .sort((a, b) => b.violationPoints - a.violationPoints);
 
-              {/* Draw Layanan BK Line (Area first then stroke) */}
-              <path
-                d={`M 50 220 
-                    ${chartData.map((d, i) => {
-                      const { x, y } = getCoordinates(i, d.layanan, true);
-                      return `L ${x} ${y}`;
-                    }).join(' ')} 
-                    L 750 220 Z`}
-                fill="url(#gradTeal)"
-              />
-              <path
-                d={chartData.map((d, i) => {
-                  const { x, y } = getCoordinates(i, d.layanan, true);
-                  return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
-                }).join(' ')}
-                fill="none"
-                stroke="#00685f"
-                strokeWidth="3.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+              const filtered = baseList.filter((s) => {
+                const matchesFilter = atensiFilter === 'critical' ? s.violationPoints >= 30 : s.violationPoints > 0;
+                const matchesSearch = s.name.toLowerCase().includes(atensiSearch.toLowerCase()) || 
+                                      s.class.toLowerCase().includes(atensiSearch.toLowerCase());
+                return matchesFilter && matchesSearch;
+              }).slice(0, 6);
 
-              {/* Draw Pelanggaran Line (Area then dashed stroke) */}
-              <path
-                d={`M 50 220 
-                    ${chartData.map((d, i) => {
-                      const { x, y } = getCoordinates(i, d.pelanggaran, false);
-                      return `L ${x} ${y}`;
-                    }).join(' ')} 
-                    L 750 220 Z`}
-                fill="url(#gradRed)"
-              />
-              <path
-                d={chartData.map((d, i) => {
-                  const { x, y } = getCoordinates(i, d.pelanggaran, false);
-                  return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
-                }).join(' ')}
-                fill="none"
-                stroke="#ba1a1a"
-                strokeWidth="3"
-                strokeDasharray="6 4"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+              if (filtered.length === 0) {
+                return (
+                  <div className="py-12 flex flex-col items-center justify-center text-center bg-[#f8fafa] rounded-2xl border border-dashed border-gray-200">
+                    <Inbox className="w-10 h-10 text-gray-300 mb-2.5" />
+                    <h4 className="font-extrabold text-xs text-[#0b1c30]">Tidak Ada Siswa Terdeteksi</h4>
+                    <p className="text-[11px] text-gray-400 mt-0.5 max-w-xs leading-relaxed">
+                      {atensiSearch 
+                        ? 'Tidak ada siswa pengawasan yang cocok dengan pencarian Anda.' 
+                        : 'Luar biasa! Tidak ada siswa dengan poin pelanggaran aktif yang sesuai kategori ini.'}
+                    </p>
+                  </div>
+                );
+              }
 
-              {/* Interactive Circles / Hover Zones */}
-              {chartData.map((d, i) => {
-                const coordLayanan = getCoordinates(i, d.layanan, true);
-                const coordPelanggaran = getCoordinates(i, d.pelanggaran, false);
-                const isHovered = hoveredMonthIndex === i;
+              return filtered.map((student) => {
+                const points = student.violationPoints;
+                const pct = Math.min(100, points);
+
+                // Risk configuration
+                let badgeBg = 'bg-[#eff4ff] text-[#00685f] border-[#bcc9c6]/30';
+                let riskLabel = 'Sedang';
+                let progressColor = 'bg-[#00685f]';
+
+                if (points >= 50) {
+                  badgeBg = 'bg-[#ffdad6] text-[#ba1a1a] border-[#ffdad6]';
+                  riskLabel = 'Sangat Kritis (SP2)';
+                  progressColor = 'bg-[#ba1a1a]';
+                } else if (points >= 30) {
+                  badgeBg = 'bg-[#ffe0b2] text-[#e65100] border-[#ffe0b2]';
+                  riskLabel = 'Tinggi (SP1)';
+                  progressColor = 'bg-[#e65100]';
+                }
 
                 return (
-                  <g key={i}>
-                    {/* Layanan Node */}
-                    <circle
-                      cx={coordLayanan.x}
-                      cy={coordLayanan.y}
-                      r={isHovered ? 6 : 4}
-                      fill="#00685f"
-                      stroke="#ffffff"
-                      strokeWidth="2.5"
-                    />
-                    {/* Pelanggaran Node */}
-                    <circle
-                      cx={coordPelanggaran.x}
-                      cy={coordPelanggaran.y}
-                      r={isHovered ? 6 : 4}
-                      fill="#ba1a1a"
-                      stroke="#ffffff"
-                      strokeWidth="2.5"
-                    />
+                  <div
+                    key={student.id}
+                    className="flex flex-col sm:flex-row sm:items-center gap-4 p-3.5 rounded-xl border border-[#bcc9c6]/20 bg-white hover:border-[#00685f]/30 hover:shadow-[0_2px_12px_rgba(0,104,95,0.03)] transition-all group"
+                  >
+                    {/* Left: Info */}
+                    <div className="flex items-center gap-3.5 flex-1 min-w-0">
+                      <div className="w-11 h-11 rounded-full overflow-hidden bg-teal-50 border border-[#00685f]/10 shrink-0 flex items-center justify-center font-extrabold text-[#00685f] text-sm shadow-inner">
+                        {student.avatarUrl ? (
+                          <img
+                            src={student.avatarUrl}
+                            alt={student.name}
+                            className="w-full h-full object-cover"
+                            referrerPolicy="no-referrer"
+                          />
+                        ) : (
+                          <span>{student.initials}</span>
+                        )}
+                      </div>
 
-                    {/* X Axis vertical tracking line on hover */}
-                    {isHovered && (
-                      <line
-                        x1={coordLayanan.x}
-                        y1="40"
-                        x2={coordLayanan.x}
-                        y2="220"
-                        stroke="#00685f"
-                        strokeOpacity="0.25"
-                        strokeDasharray="2 2"
-                        strokeWidth="1.5"
-                      />
-                    )}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h4 className="font-extrabold text-[#0b1c30] text-xs truncate max-w-[200px]">
+                            {student.name}
+                          </h4>
+                          <span className="text-[#3d4947] font-bold text-[10px] bg-gray-100 px-2 py-0.5 rounded-full shrink-0">
+                            {student.class}
+                          </span>
+                          <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full border uppercase tracking-wider shrink-0 ${badgeBg}`}>
+                            {riskLabel}
+                          </span>
+                        </div>
+                        
+                        <div className="flex items-center gap-3 mt-2">
+                          <div className="flex-1 h-2 bg-[#eff4ff] rounded-full overflow-hidden border border-gray-100">
+                            <div
+                              className={`h-full ${progressColor} rounded-full transition-all duration-500`}
+                              style={{ width: `${pct}%` }}
+                            ></div>
+                          </div>
+                          <span className="text-[10px] font-extrabold text-[#3d4947] shrink-0">
+                            {points} Poin
+                          </span>
+                        </div>
+                      </div>
+                    </div>
 
-                    {/* Mouse sensor rect for hover indexing */}
-                    <rect
-                      x={coordLayanan.x - 40}
-                      y="10"
-                      width="80"
-                      height="210"
-                      fill="transparent"
-                      className="cursor-pointer"
-                      onMouseEnter={() => setHoveredMonthIndex(i)}
-                      onMouseLeave={() => setHoveredMonthIndex(null)}
-                    />
-                  </g>
+                    {/* Right: Quick Actions */}
+                    <div className="flex items-center gap-1.5 shrink-0 justify-end pt-2 sm:pt-0 border-t border-gray-50 sm:border-0">
+                      <button
+                        title="Catat Pelanggaran Siswa"
+                        onClick={() => onNavigateToForm('catat-pelanggaran', student.id)}
+                        className="p-1.5 hover:bg-red-50 text-[#ba1a1a] rounded-lg transition-colors border border-transparent hover:border-[#ba1a1a]/15 cursor-pointer flex items-center gap-1 text-[10px] font-extrabold"
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        <span className="hidden md:inline">+ Poin</span>
+                      </button>
+                      <button
+                        title="Berikan Bimbingan &amp; Layanan"
+                        onClick={() => onNavigateToForm('layanan-bk', student.id)}
+                        className="p-1.5 hover:bg-teal-50 text-[#00685f] rounded-lg transition-colors border border-transparent hover:border-[#00685f]/15 cursor-pointer flex items-center gap-1 text-[10px] font-extrabold"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span className="hidden md:inline">Layanan</span>
+                      </button>
+                      <button
+                        title="Buat Surat Panggilan Orang Tua"
+                        onClick={() => onNavigateToForm('panggilan-orang-tua', student.id)}
+                        className="p-1.5 hover:bg-amber-50 text-[#825100] rounded-lg transition-colors border border-transparent hover:border-[#825100]/15 cursor-pointer flex items-center gap-1 text-[10px] font-extrabold"
+                      >
+                        <FileText className="w-3.5 h-3.5" />
+                        <span className="hidden md:inline">Panggilan</span>
+                      </button>
+                    </div>
+                  </div>
                 );
-              })}
-            </svg>
-
-            {/* Custom SVG Tooltip */}
-            {hoveredMonthIndex !== null && (
-              <div
-                className="absolute bg-[#0b1c30] text-white text-xs rounded-xl p-3 shadow-xl border border-white/10 z-20 space-y-1"
-                style={{
-                  left: `${6 + hoveredMonthIndex * 15}%`,
-                  bottom: '75%',
-                  transform: 'translateX(-50%)',
-                }}
-              >
-                <p className="font-extrabold border-b border-white/20 pb-1 text-center">
-                  Bulan {months[hoveredMonthIndex]}
-                </p>
-                <div className="flex items-center gap-3 justify-between">
-                  <span className="text-gray-300">Layanan BK:</span>
-                  <span className="font-bold text-[#6bd8cb]">
-                    {chartData[hoveredMonthIndex].layanan} Sesi
-                  </span>
-                </div>
-                <div className="flex items-center gap-3 justify-between">
-                  <span className="text-gray-300">Pelanggaran:</span>
-                  <span className="font-bold text-[#ffdad6]">
-                    {chartData[hoveredMonthIndex].pelanggaran} Kasus
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Labels Axis */}
-            <div className="flex justify-between px-6 mt-4 text-[10px] font-bold text-[#3d4947]/60 uppercase tracking-wider">
-              {months.map((m) => (
-                <span key={m}>{m}</span>
-              ))}
-            </div>
+              });
+            })()}
           </div>
         </div>
 
         {/* Bar Chart - Pelanggaran per Kelas (4 cols) */}
-        <div className="col-span-12 lg:col-span-4 bg-white p-8 rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.015)] border border-[#bcc9c6]/30 flex flex-col">
-          <h2 className="text-lg font-bold text-[#0b1c30] mb-5">
+        <div className="col-span-12 lg:col-span-4 bg-white p-6 sm:p-8 rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.015)] border border-[#bcc9c6]/30 flex flex-col">
+          <h2 className="text-lg font-extrabold text-[#0b1c30] mb-5">
             Pelanggaran per Kelas
           </h2>
 
           <div className="flex-1 space-y-4.5">
             {sortedClasses.map((cl, i) => {
-              // Dynamically determine colors and percentage widths
               const maxPoints = sortedClasses[0].points || 1;
               const pct = Math.max(15, Math.min(100, (cl.points / maxPoints) * 100));
 
-              // Styled classes
               let barColor = 'bg-[#00685f]';
               if (cl.points >= 20) barColor = 'bg-[#ba1a1a]';
               else if (cl.points >= 15) barColor = 'bg-[#825100]';
@@ -402,7 +417,7 @@ export default function DashboardView({
 
           <button
             onClick={() => onNavigateToTab('data-siswa')}
-            className="mt-6 text-sm text-[#00685f] font-bold flex items-center justify-center gap-1 hover:underline group self-center cursor-pointer"
+            className="mt-6 text-xs text-[#00685f] font-extrabold flex items-center justify-center gap-1 hover:underline group self-center cursor-pointer"
           >
             <span>Lihat Semua Kelas</span>
             <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
@@ -410,147 +425,157 @@ export default function DashboardView({
         </div>
       </div>
 
-      {/* Attention & Activity Section */}
-      <div className="grid grid-cols-12 gap-8">
-        {/* Atensi Khusus (7 cols) */}
-        <div className="col-span-12 lg:col-span-7 bg-white p-8 rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.015)] border border-[#bcc9c6]/30">
-          <div className="flex justify-between items-center mb-6 border-b border-[#bcc9c6]/20 pb-4">
-            <div>
-              <h2 className="text-lg font-bold text-[#0b1c30]">Atensi Khusus</h2>
-              <p className="text-xs text-[#3d4947]/70 font-semibold mt-0.5">
-                Siswa dengan akumulasi pelanggaran tertinggi
-              </p>
-            </div>
-            <span className="bg-[#ffdad6] text-[#93000a] px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-widest border border-[#ba1a1a]/20 shadow-sm animate-pulse">
-              Prioritas Tinggi
-            </span>
+      {/* Full-width Recent Activity Feed (12 cols) */}
+      <div className="bg-white p-6 sm:p-8 rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.015)] border border-[#bcc9c6]/30 animate-in fade-in duration-300">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-[#bcc9c6]/20 mb-6">
+          <div>
+            <h2 className="text-lg font-extrabold text-[#0b1c30] flex items-center gap-2">
+              <History className="w-5 h-5 text-[#00685f] shrink-0" />
+              <span>Aktivitas Terbaru &amp; Jurnal Linimasa</span>
+            </h2>
+            <p className="text-xs text-[#3d4947]/70 font-semibold mt-0.5">
+              Jurnal kronologis bimbingan, pelanggaran, dan administrasi BK sekolah terupdate
+            </p>
           </div>
-
-          <div className="space-y-5">
-            {topAttentionStudents.map((student) => {
-              // Percentage threshold representation (max is 100 as limit)
-              const ratio = student.violationPoints;
-              const pct = Math.min(100, ratio);
-
-              // Badge status colors
-              let colorClasses = {
-                text: 'text-[#ba1a1a]',
-                bar: 'bg-[#ba1a1a]',
-              };
-              if (ratio < 50) {
-                colorClasses = {
-                  text: 'text-[#00685f]',
-                  bar: 'bg-[#00685f]',
-                };
-              } else if (ratio < 80) {
-                colorClasses = {
-                  text: 'text-[#825100]',
-                  bar: 'bg-[#825100]',
-                };
-              }
-
-              return (
-                <div
-                  key={student.id}
-                  onClick={() => onNavigateToTab('data-siswa', student.name)}
-                  className="flex items-center gap-4 p-3 rounded-xl border border-transparent hover:border-[#bcc9c6]/30 hover:bg-[#eff4ff]/20 transition-all cursor-pointer group"
-                >
-                  {/* Student Avatar */}
-                  <div className="w-12 h-12 rounded-full overflow-hidden bg-[#eff4ff] border-2 border-transparent group-hover:border-[#ba1a1a]/40 transition-all flex-shrink-0 flex items-center justify-center font-bold text-[#00685f]">
-                    {student.avatarUrl ? (
-                      <img
-                        src={student.avatarUrl}
-                        alt={student.name}
-                        className="w-full h-full object-cover"
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      <span>{student.initials}</span>
-                    )}
-                  </div>
-
-                  {/* Student Progress */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex justify-between items-center mb-1">
-                      <h4 className="font-bold text-[#0b1c30] text-sm group-hover:text-[#ba1a1a] transition-colors truncate">
-                        {student.name}
-                        <span className="text-[#3d4947]/70 font-medium text-xs ml-2">
-                          • {student.class}
-                        </span>
-                      </h4>
-                      <span className={`font-bold text-xs ${colorClasses.text}`}>
-                        {student.violationPoints}/100 Poin
-                      </span>
-                    </div>
-                    <div className="w-full h-2.5 bg-[#eff4ff] rounded-full overflow-hidden border border-[#bcc9c6]/10">
-                      <div
-                        className={`h-full ${colorClasses.bar} rounded-full`}
-                        style={{ width: `${pct}%` }}
-                      ></div>
-                    </div>
-                  </div>
-
-                  {/* Action Link Icon */}
-                  <button className="p-1.5 hover:bg-[#eff4ff] rounded-full transition-colors text-[#3d4947] flex-shrink-0">
-                    <ChevronRight className="w-5 h-5" />
-                  </button>
-                </div>
-              );
-            })}
+          
+          {/* Activity Filter Tabs */}
+          <div className="flex flex-wrap items-center gap-1.5 bg-[#f4f7f6] p-1 rounded-xl border border-[#bcc9c6]/20">
+            <button
+              onClick={() => setAktivitasFilter('all')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                aktivitasFilter === 'all'
+                  ? 'bg-white text-[#00685f] shadow-sm font-extrabold'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Semua
+            </button>
+            <button
+              onClick={() => setAktivitasFilter('violation')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                aktivitasFilter === 'violation'
+                  ? 'bg-white text-[#ba1a1a] shadow-sm font-extrabold'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Pelanggaran
+            </button>
+            <button
+              onClick={() => setAktivitasFilter('counseling')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                aktivitasFilter === 'counseling'
+                  ? 'bg-white text-[#00685f] shadow-sm font-extrabold'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Layanan BK
+            </button>
+            <button
+              onClick={() => setAktivitasFilter('other')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                aktivitasFilter === 'other'
+                  ? 'bg-white text-gray-700 shadow-sm font-extrabold'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Absensi &amp; Lainnya
+            </button>
           </div>
         </div>
 
-        {/* Recent Activity (5 cols) */}
-        <div className="col-span-12 lg:col-span-5 bg-white p-8 rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.015)] border border-[#bcc9c6]/30 flex flex-col">
-          <h2 className="text-lg font-bold text-[#0b1c30] mb-5">
-            Aktivitas Terbaru
-          </h2>
+        {/* Timeline List */}
+        <div className="space-y-6">
+          {(() => {
+            const filteredLogs = logs.filter((log) => {
+              if (aktivitasFilter === 'all') return true;
+              if (aktivitasFilter === 'violation') return log.type === 'violation';
+              if (aktivitasFilter === 'counseling') return log.type === 'counseling' || log.type === 'homevisit';
+              if (aktivitasFilter === 'other') return log.type === 'attendance';
+              return true;
+            });
 
-          <div className="flex-grow space-y-5 overflow-y-auto max-h-[300px] pr-2 custom-scrollbar">
-            {logs.map((log) => {
-              // Select badge icon & style based on log category
-              let iconBg = 'bg-[#00685f]';
-              let iconSymbol = <Award className="w-3.5 h-3.5 text-white" />;
-
-              if (log.type === 'violation') {
-                iconBg = 'bg-[#ba1a1a]';
-                iconSymbol = <AlertTriangle className="w-3.5 h-3.5 text-white" />;
-              } else if (log.type === 'homevisit') {
-                iconBg = 'bg-[#6b38d4]';
-                iconSymbol = <Calendar className="w-3.5 h-3.5 text-white" />;
-              } else if (log.type === 'attendance') {
-                iconBg = 'bg-[#00685f]';
-                iconSymbol = <Calendar className="w-3.5 h-3.5 text-white" />;
-              }
-
+            if (filteredLogs.length === 0) {
               return (
-                <div
-                  key={log.id}
-                  className="relative pl-7 pb-4 border-l border-[#bcc9c6]/40 last:pb-0 last:border-l-transparent"
-                >
-                  {/* Status Indicator Dot/Badge */}
-                  <span
-                    className={`absolute -left-[11px] top-0.5 w-5.5 h-5.5 rounded-full ${iconBg} flex items-center justify-center shadow-sm ring-4 ring-white z-10`}
-                  >
-                    {iconSymbol}
-                  </span>
-
-                  {/* Log Card Info */}
-                  <div>
-                    <p className="text-[10px] text-[#3d4947] opacity-60 font-bold uppercase tracking-wider">
-                      {log.timeLabel}
-                    </p>
-                    <h5 className="text-sm font-bold text-[#0b1c30] mt-0.5">
-                      {log.title}
-                    </h5>
-                    <p className="text-xs text-[#3d4947]/80 mt-1 leading-relaxed">
-                      {log.description}
-                    </p>
-                  </div>
+                <div className="py-12 flex flex-col items-center justify-center text-center bg-[#f8fafa] rounded-2xl border border-dashed border-gray-200 animate-in fade-in duration-200">
+                  <Activity className="w-10 h-10 text-gray-300 mb-2.5" />
+                  <h4 className="font-extrabold text-xs text-[#0b1c30]">Belum Ada Aktivitas</h4>
+                  <p className="text-[11px] text-gray-400 mt-0.5 max-w-xs leading-relaxed">
+                    Belum ada riwayat aktivitas yang tercatat untuk kategori bimbingan atau pelanggaran ini.
+                  </p>
                 </div>
               );
-            })}
-          </div>
+            }
+
+            return (
+              <div className="relative pl-4 sm:pl-6 border-l-2 border-gray-100 space-y-6 ml-2">
+                {filteredLogs.map((log) => {
+                  let iconBg = 'bg-[#00685f]';
+                  let iconSymbol = <Award className="w-3.5 h-3.5 text-white" />;
+                  let categoryLabel = 'Layanan BK';
+                  let badgeStyle = 'bg-teal-50 text-[#00685f] border-teal-100';
+
+                  if (log.type === 'violation') {
+                    iconBg = 'bg-[#ba1a1a]';
+                    iconSymbol = <AlertTriangle className="w-3.5 h-3.5 text-white" />;
+                    categoryLabel = 'Pelanggaran';
+                    badgeStyle = 'bg-red-50 text-[#ba1a1a] border-red-100';
+                  } else if (log.type === 'homevisit') {
+                    iconBg = 'bg-[#6b38d4]';
+                    iconSymbol = <Calendar className="w-3.5 h-3.5 text-white" />;
+                    categoryLabel = 'Home Visit';
+                    badgeStyle = 'bg-purple-50 text-[#6b38d4] border-purple-100';
+                  } else if (log.type === 'attendance') {
+                    iconBg = 'bg-slate-500';
+                    iconSymbol = <Calendar className="w-3.5 h-3.5 text-white" />;
+                    categoryLabel = 'Absensi';
+                    badgeStyle = 'bg-slate-50 text-slate-700 border-slate-100';
+                  }
+
+                  return (
+                    <div
+                      key={log.id}
+                      className="relative group transition-all"
+                    >
+                      {/* Left Dot Tracker */}
+                      <span className={`absolute -left-[25px] sm:-left-[33px] top-1 w-6 h-6 rounded-full ${iconBg} flex items-center justify-center shadow-md ring-4 ring-white group-hover:scale-110 transition-transform`}>
+                        {iconSymbol}
+                      </span>
+
+                      {/* Timeline Card */}
+                      <div className="p-4 rounded-xl border border-gray-100 bg-[#fbfcfc]/50 hover:bg-[#fbfcfc] hover:border-gray-200 hover:shadow-sm transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                        <div className="space-y-1 flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[10px] font-extrabold text-gray-400">
+                              {log.timeLabel}
+                            </span>
+                            <span className={`text-[8px] font-extrabold px-1.5 py-0.2 rounded uppercase border tracking-wider ${badgeStyle}`}>
+                              {categoryLabel}
+                            </span>
+                          </div>
+                          <h4 className="font-extrabold text-xs text-[#0b1c30]">
+                            {log.title}
+                          </h4>
+                          <p className="text-[11px] text-gray-500 leading-relaxed">
+                            {log.description}
+                          </p>
+                        </div>
+                        
+                        <div className="shrink-0 flex items-center gap-2 self-start sm:self-center">
+                          <button
+                            onClick={() => onNavigateToTab('data-siswa', log.studentName)}
+                            className="text-[10px] font-extrabold text-[#00685f] hover:underline bg-[#00685f]/5 hover:bg-[#00685f]/10 px-2.5 py-1 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <span>Lihat Siswa</span>
+                            <ChevronRight className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>

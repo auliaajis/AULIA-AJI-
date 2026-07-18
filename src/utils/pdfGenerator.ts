@@ -141,7 +141,8 @@ export function drawLetterhead(doc: jsPDF, accentColor: number[]) {
   if (customKabupatenLogo) {
     try {
       // Draw at bounding box: X = 26 - 9 = 17, Y = 24 - 9 = 15, size 18x18
-      doc.addImage(customKabupatenLogo, 'JPEG', 17, 15, 18, 18);
+      const kabFormat = customKabupatenLogo.toLowerCase().includes('image/png') ? 'PNG' : 'JPEG';
+      doc.addImage(customKabupatenLogo, kabFormat, 17, 15, 18, 18);
     } catch (e) {
       drawKabSemarangLogo(doc, 26, 24, 9);
     }
@@ -154,7 +155,8 @@ export function drawLetterhead(doc: jsPDF, accentColor: number[]) {
   if (customSchoolLogo) {
     try {
       // Draw at bounding box: X = 184 - 9 = 175, Y = 24 - 9 = 15, size 18x18
-      doc.addImage(customSchoolLogo, 'JPEG', 175, 15, 18, 18);
+      const schoolFormat = customSchoolLogo.toLowerCase().includes('image/png') ? 'PNG' : 'JPEG';
+      doc.addImage(customSchoolLogo, schoolFormat, 175, 15, 18, 18);
     } catch (e) {
       drawSchoolLogo(doc, 184, 24, 9);
     }
@@ -1566,18 +1568,29 @@ export function downloadParentSummonPDF(summon: any, counselor: any) {
   // 7. Meeting Schedule Details in clean indents
   doc.setFont('Helvetica', 'bold');
   doc.text('Hari, Tanggal', 25, currentY);
-  doc.text('Waktu', 25, currentY + 6);
-  doc.text('Tempat', 25, currentY + 12);
-  doc.text('Acara', 25, currentY + 18);
-
   doc.setFont('Helvetica', 'normal');
   doc.text(`:  ${formatIndonesianDate(summon.summonDate)}`, 60, currentY);
-  doc.text(`:  ${summon.summonTime} WIB s.d. Selesai`, 60, currentY + 6);
-  doc.text(`:  ${summon.summonPlace}`, 60, currentY + 12);
-  doc.setFont('Helvetica', 'bold');
-  doc.text(`:  ${summon.agenda}`, 60, currentY + 18);
 
-  currentY += 26;
+  currentY += 6;
+  doc.setFont('Helvetica', 'bold');
+  doc.text('Waktu', 25, currentY);
+  doc.setFont('Helvetica', 'normal');
+  doc.text(`:  ${summon.summonTime} WIB s.d. Selesai`, 60, currentY);
+
+  currentY += 6;
+  doc.setFont('Helvetica', 'bold');
+  doc.text('Tempat', 25, currentY);
+  doc.setFont('Helvetica', 'normal');
+  const tempatLines = doc.splitTextToSize(`:  ${summon.summonPlace}`, 135);
+  doc.text(tempatLines, 60, currentY);
+
+  currentY += tempatLines.length * 5 + 1;
+  doc.setFont('Helvetica', 'bold');
+  doc.text('Acara', 25, currentY);
+  const agendaLines = doc.splitTextToSize(`:  ${summon.agenda}`, 135);
+  doc.text(agendaLines, 60, currentY);
+
+  currentY += agendaLines.length * 5 + 8;
 
   // 8. Body Paragraph 2
   doc.setFont('Helvetica', 'normal');

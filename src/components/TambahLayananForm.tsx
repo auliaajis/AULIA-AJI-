@@ -18,7 +18,10 @@ import {
   Lightbulb,
   Plus,
   Trash2,
-  Check
+  Check,
+  Camera,
+  AlertCircle,
+  Image as ImageIcon
 } from 'lucide-react';
 
 interface TambahLayananFormProps {
@@ -59,6 +62,84 @@ export default function TambahLayananForm({
     { name: 'surat_panggilan_001.pdf', size: '1.2 MB' },
   ]);
   const [isDragging, setIsDragging] = useState(false);
+
+  // New Target Type and Photo proof states
+  const [targetType, setTargetType] = useState<'Individu' | 'Kelompok' | 'Klasikal'>('Individu');
+  const [proofPhotoUrl, setProofPhotoUrl] = useState<string | undefined>(undefined);
+  const [proofPhotoName, setProofPhotoName] = useState<string | undefined>(undefined);
+  
+  const [showCamera, setShowCamera] = useState(false);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const videoRef = React.useRef<HTMLVideoElement>(null);
+
+  const startCamera = async () => {
+    setCameraError(null);
+    setShowCamera(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: 640, height: 480 },
+        audio: false
+      });
+      setCameraStream(stream);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+    } catch (err: any) {
+      console.error('Camera access error:', err);
+      setCameraError(
+        'Gagal mengakses kamera. Pastikan izin kamera telah diberikan dan kamera tidak sedang digunakan oleh aplikasi lain.'
+      );
+    }
+  };
+
+  const stopCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((track) => track.stop());
+      setCameraStream(null);
+    }
+    setShowCamera(false);
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current) {
+      const video = videoRef.current;
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        setProofPhotoUrl(dataUrl);
+        setProofPhotoName(`kamera_capture_${Date.now()}.jpg`);
+        stopCamera();
+      }
+    }
+  };
+
+  const processProofFile = (file: File) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      alert('Hanya diperbolehkan melampirkan berkas gambar/foto.');
+      return;
+    }
+    
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const base64 = e.target?.result as string;
+      setProofPhotoUrl(base64);
+      setProofPhotoName(file.name);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleProofFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      processProofFile(e.target.files[0]);
+    }
+  };
 
   // Initialize values
   useEffect(() => {
@@ -131,8 +212,8 @@ export default function TambahLayananForm({
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (selectedParticipants.length === 0) {
-      alert('Tambahkan minimal 1 siswa peserta layanan!');
+    if (targetType === 'Individu' && selectedParticipants.length === 0) {
+      alert('Tambahkan minimal 1 siswa peserta layanan untuk bimbingan perorangan/individu!');
       return;
     }
     if (!problem.trim()) {
@@ -157,6 +238,9 @@ export default function TambahLayananForm({
       startTime,
       endTime,
       attachments,
+      targetType,
+      proofPhotoUrl,
+      proofPhotoName,
     });
 
     alert('Catatan rekam layanan BK berhasil didokumentasikan.');
@@ -243,12 +327,61 @@ export default function TambahLayananForm({
             </div>
           </section>
 
+          {/* Sasaran Layanan Section (Conditionally displayed/enhanced when not individual counseling) */}
+          {serviceType !== 'Layanan Konseling Perorangan (Individual)' && (
+            <section className="bg-white rounded-2xl p-6 shadow-sm border border-[#bcc9c6]/30 animate-in fade-in slide-in-from-top-3 duration-200">
+              <h3 className="font-extrabold text-sm uppercase tracking-wider text-[#0b1c30] mb-3 flex items-center gap-2">
+                <span className="w-1.5 h-3.5 bg-[#00685f] rounded-full"></span>
+                Sasaran Layanan
+              </h3>
+              <p className="text-xs text-[#3d4947]/70 font-semibold mb-4">
+                Pilih lingkup sasaran untuk layanan {serviceType}. Sesi selain konseling perorangan dapat dilaksanakan secara berkelompok maupun klasikal.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {[
+                  { value: 'Individu', label: 'Individu (Perorangan)', desc: 'Satu siswa secara khusus' },
+                  { value: 'Kelompok', label: 'Kelompok', desc: 'Beberapa siswa terpilih' },
+                  { value: 'Klasikal', label: 'Klasikal', desc: 'Satu kelas secara umum' }
+                ].map((option) => {
+                  const isSelected = targetType === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setTargetType(option.value as any)}
+                      className={`flex flex-col p-3 border rounded-xl text-left hover:bg-[#f4fffc]/40 cursor-pointer transition-all ${
+                        isSelected
+                          ? 'border-[#00685f] bg-[#f4fffc] ring-2 ring-[#00685f]/25'
+                          : 'border-[#bcc9c6]/30 bg-white'
+                      }`}
+                    >
+                      <span className="text-xs font-bold text-[#0b1c30] flex items-center justify-between">
+                        {option.label}
+                        {isSelected && <Check className="w-3.5 h-3.5 text-[#00685f]" />}
+                      </span>
+                      <span className="text-[10px] text-[#3d4947]/70 mt-1 leading-normal font-semibold">
+                        {option.desc}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
           {/* Participant Selector component */}
           <section className="bg-white rounded-2xl p-6 shadow-sm border border-[#bcc9c6]/30">
             <div className="flex justify-between items-center mb-4 border-b border-[#bcc9c6]/10 pb-3">
               <h3 className="font-extrabold text-sm uppercase tracking-wider text-[#0b1c30] flex items-center gap-2">
                 <span className="w-1.5 h-3.5 bg-[#00685f] rounded-full"></span>
                 Peserta Layanan
+                <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
+                  targetType === 'Individu'
+                    ? 'bg-red-50 text-red-600 border border-red-100'
+                    : 'bg-emerald-50 text-emerald-600 border border-emerald-100'
+                }`}>
+                  {targetType === 'Individu' ? 'Wajib Diisi' : 'Opsional'}
+                </span>
               </h3>
               <div className="relative">
                 <button
@@ -338,8 +471,10 @@ export default function TambahLayananForm({
                   </div>
                 ))
               ) : (
-                <div className="text-center py-6 border-2 border-dashed border-[#bcc9c6]/30 rounded-xl text-xs text-gray-400 font-semibold">
-                  Belum ada peserta yang dimasukkan. Gunakan tombol + Tambah Siswa.
+                <div className="text-center py-6 border-2 border-dashed border-[#bcc9c6]/30 rounded-xl text-xs text-gray-400 font-semibold px-4">
+                  {targetType === 'Individu'
+                    ? 'Belum ada peserta yang dimasukkan. Gunakan tombol "+ Tambah Siswa" di atas (Wajib Diisi).'
+                    : 'Belum ada peserta khusus yang dimasukkan. Anda bisa membiarkannya kosong untuk sasaran Kelompok/Klasikal, atau tetap menambahkan peserta jika diperlukan.'}
                 </div>
               )}
             </div>
@@ -548,6 +683,108 @@ export default function TambahLayananForm({
                     </button>
                   </div>
                 ))}
+              </div>
+            )}
+          </section>
+
+          {/* Foto Bukti Layanan BK (Kamera Langsung / Upload File) */}
+          <section className="bg-white rounded-2xl p-6 shadow-sm border border-[#bcc9c6]/30 space-y-4">
+            <h3 className="font-extrabold text-xs uppercase tracking-wider text-[#3d4947] flex items-center gap-1.5">
+              <Camera className="w-4 h-4 text-[#00685f]" />
+              Bukti Foto Sesi (Opsional)
+            </h3>
+            <p className="text-[10px] text-gray-500 font-semibold leading-normal">
+              Ambil foto langsung melalui kamera HP/laptop Anda atau pilih file foto dari penyimpanan sebagai bukti valid.
+            </p>
+
+            {proofPhotoUrl ? (
+              <div className="relative border border-gray-200 rounded-xl overflow-hidden bg-gray-50 p-2 text-center">
+                <img
+                  src={proofPhotoUrl}
+                  alt="Bukti Sesi Layanan"
+                  className="max-h-40 mx-auto object-contain rounded-lg"
+                  referrerPolicy="no-referrer"
+                />
+                <p className="text-[10px] text-gray-500 truncate mt-1.5 font-bold">
+                  {proofPhotoName}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProofPhotoUrl(undefined);
+                    setProofPhotoName(undefined);
+                  }}
+                  className="absolute top-2 right-2 bg-red-600 text-white hover:bg-red-700 p-1.5 rounded-full shadow-md cursor-pointer transition-colors"
+                  title="Hapus Foto"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {showCamera ? (
+                  <div className="relative bg-black rounded-xl overflow-hidden border border-gray-300">
+                    {cameraError ? (
+                      <div className="p-4 text-center text-xs text-red-600 font-semibold">
+                        <AlertCircle className="w-6 h-6 mx-auto text-red-600 mb-1" />
+                        <p>{cameraError}</p>
+                        <button
+                          type="button"
+                          onClick={stopCamera}
+                          className="mt-2 px-3 py-1 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold rounded-lg text-[10px] cursor-pointer"
+                        >
+                          Tutup Kamera
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <video
+                          ref={videoRef}
+                          playsInline
+                          className="w-full h-48 object-cover"
+                        />
+                        <div className="absolute bottom-2 inset-x-0 flex justify-center gap-2 px-4">
+                          <button
+                            type="button"
+                            onClick={capturePhoto}
+                            className="bg-[#00685f] hover:bg-[#005049] text-white px-3 py-1.5 rounded-lg text-[11px] font-bold shadow-md cursor-pointer flex items-center gap-1"
+                          >
+                            <Camera className="w-3.5 h-3.5" /> Ambil Foto
+                          </button>
+                          <button
+                            type="button"
+                            onClick={stopCamera}
+                            className="bg-gray-800/80 hover:bg-gray-900 text-white px-3 py-1.5 rounded-lg text-[11px] font-bold shadow-md cursor-pointer"
+                          >
+                            Batal
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={startCamera}
+                      className="flex flex-col items-center justify-center p-4 border border-dashed border-[#bcc9c6]/60 bg-[#f8f9ff] rounded-xl hover:bg-gray-50 hover:border-[#00685f]/80 transition-all cursor-pointer text-center"
+                    >
+                      <Camera className="w-5 h-5 text-[#00685f] mb-1" />
+                      <span className="text-[10px] font-bold text-[#0b1c30]">Kamera HP</span>
+                    </button>
+
+                    <label className="flex flex-col items-center justify-center p-4 border border-dashed border-[#bcc9c6]/60 bg-[#f8f9ff] rounded-xl hover:bg-gray-50 hover:border-[#00685f]/80 transition-all cursor-pointer text-center">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleProofFileChange}
+                        className="sr-only"
+                      />
+                      <ImageIcon className="w-5 h-5 text-[#6b38d4] mb-1" />
+                      <span className="text-[10px] font-bold text-[#0b1c30]">Pilih File</span>
+                    </label>
+                  </div>
+                )}
               </div>
             )}
           </section>

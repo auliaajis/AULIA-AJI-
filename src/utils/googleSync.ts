@@ -87,12 +87,31 @@ export async function testConnection(url: string): Promise<{ success: boolean; m
 /**
  * Push all local data from localStorage to Google Sheets via Apps Script Web App
  */
-export async function pushDataToGoogle(url: string): Promise<{ success: boolean; message: string }> {
+export async function pushDataToGoogle(url: string, force: boolean = false): Promise<{ success: boolean; message: string }> {
   if (!url) {
     return { success: false, message: 'URL Google Apps Script belum dikonfigurasi.' };
   }
   
   try {
+    // Safety check: Prevent overwriting remote database if this device hasn't been verified/synced
+    if (!force && localStorage.getItem('bk_google_sync_verified') !== 'true') {
+      try {
+        const checkRes = await pullDataFromGoogle(url);
+        if (checkRes.success && checkRes.data) {
+          const d = checkRes.data;
+          const remoteCount = (d.students?.length || 0) + (d.violations?.length || 0) + (d.services?.length || 0);
+          if (remoteCount > 0) {
+            return {
+              success: false,
+              message: 'OVERWRITE_PREVENTION: Sistem mendeteksi adanya data riwayat yang tersimpan di Google Sheets Anda, sementara perangkat ini belum melakukan impor data lama. Untuk mencegah terhapusnya data lama Anda di awan, sinkronisasi otomatis ditangguhkan.\n\nSilakan lakukan "Impor Data" (Tarik Data) terlebih dahulu di menu Integrasi Google.'
+            };
+          }
+        }
+      } catch (err) {
+        console.warn('Gagal memverifikasi proteksi database:', err);
+      }
+    }
+
     const students = JSON.parse(localStorage.getItem('bk_students') || '[]');
     const violations = JSON.parse(localStorage.getItem('bk_violations') || '[]');
     const services = JSON.parse(localStorage.getItem('bk_services') || '[]');
@@ -123,6 +142,8 @@ export async function pushDataToGoogle(url: string): Promise<{ success: boolean;
     
     const resData = await response.json();
     if (resData && resData.status === 'success') {
+      localStorage.setItem('bk_google_sync_verified', 'true');
+      window.dispatchEvent(new Event('storage'));
       return { success: true, message: resData.message || 'Data berhasil diekspor ke Google Sheets!' };
     }
     
@@ -175,6 +196,16 @@ export async function pullDataFromGoogle(url: string): Promise<{ success: boolea
  * to any configured active Google service (Direct Sync via Google Drive API or Google Apps Script URL).
  */
 export async function triggerBackgroundAutoSync(): Promise<{ success: boolean; message: string }> {
+  const spreadsheetId = localStorage.getItem('bk_google_spreadsheet_id');
+  const scriptUrl = localStorage.getItem('bk_google_script_url');
+  const hasIntegration = !!(spreadsheetId || scriptUrl);
+
+  // Security guard: Skip automatic background sync if device hasn't pulled/verified yet
+  if (hasIntegration && localStorage.getItem('bk_google_sync_verified') !== 'true') {
+    console.warn('Auto-Sync: Sinkronisasi otomatis ditangguhkan demi melindungi data lama Anda di Google Sheets dari overwrite perangkat baru.');
+    return { success: false, message: 'Sinkronisasi otomatis ditangguhkan demi perlindungan database.' };
+  }
+
   const students = JSON.parse(localStorage.getItem('bk_students') || '[]');
   const violations = JSON.parse(localStorage.getItem('bk_violations') || '[]');
   const services = JSON.parse(localStorage.getItem('bk_services') || '[]');
@@ -182,15 +213,10 @@ export async function triggerBackgroundAutoSync(): Promise<{ success: boolean; m
 
   let directSyncSuccess = false;
   let gasSyncSuccess = false;
-  let hasIntegration = false;
-
-  // 1. Try Direct Sync (Google Drive / Sheets API via OAuth)
-  const spreadsheetId = localStorage.getItem('bk_google_spreadsheet_id');
   if (spreadsheetId) {
     try {
       const token = await getAccessToken();
       if (token) {
-        hasIntegration = true;
         console.log('Auto-Sync: Memulai sinkronisasi langsung (OAuth) ke Spreadsheet...');
         const res = await pushDataDirect(token, spreadsheetId, {
           students,
@@ -209,9 +235,7 @@ export async function triggerBackgroundAutoSync(): Promise<{ success: boolean; m
   }
 
   // 2. Try Apps Script Web App Sync (via Web App URL)
-  const scriptUrl = localStorage.getItem('bk_google_script_url');
   if (scriptUrl) {
-    hasIntegration = true;
     console.log('Auto-Sync: Memulai sinkronisasi lewat Google Apps Script Web App...');
     try {
       const res = await pushDataToGoogle(scriptUrl);

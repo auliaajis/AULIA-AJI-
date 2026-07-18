@@ -16,7 +16,8 @@ import {
   User,
   CheckCircle2,
   AlertCircle,
-  Download
+  Download,
+  ShieldCheck
 } from 'lucide-react';
 import { 
   getSavedScriptUrl, 
@@ -117,8 +118,13 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
     setDirectSyncStatus('connecting');
     setDirectSyncMessage('Mencari atau membuat file basis data "Database BK Sekolah" di Google Drive Anda...');
     
+    const oldId = localStorage.getItem('bk_google_spreadsheet_id');
     const result = await getOrCreateSpreadsheet(token);
     if (result.success && result.spreadsheetId) {
+      if (oldId !== result.spreadsheetId) {
+        localStorage.removeItem('bk_google_sync_verified');
+        window.dispatchEvent(new Event('storage'));
+      }
       setSpreadsheetId(result.spreadsheetId);
       setSpreadsheetUrl(result.spreadsheetUrl || null);
       localStorage.setItem('bk_google_spreadsheet_id', result.spreadsheetId);
@@ -162,6 +168,8 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       setSpreadsheetUrl(null);
       localStorage.removeItem('bk_google_spreadsheet_id');
       localStorage.removeItem('bk_google_spreadsheet_url');
+      localStorage.removeItem('bk_google_sync_verified');
+      window.dispatchEvent(new Event('storage'));
       setDirectSyncStatus('idle');
     }
   };
@@ -176,8 +184,8 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       if (response.ok) {
         htmlText = await response.text();
       } else {
-        // Jika gagal atau sedang di production, coba langsung ambil /index.html (yang sudah dikompilasi di server produksi)
-        response = await fetch('/index.html');
+        // Jika gagal atau sedang di production, coba langsung ambil /single.html (yang sudah dikompilasi di server produksi)
+        response = await fetch('/single.html');
         if (!response.ok) {
           throw new Error(`HTTP Error ${response.status}`);
         }
@@ -233,12 +241,35 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       const services = JSON.parse(localStorage.getItem('bk_services') || '[]');
       const attendance = JSON.parse(localStorage.getItem('bk_attendance_history') || '[]');
 
-      const result = await pushDataDirect(token, spreadsheetId, {
+      let result = await pushDataDirect(token, spreadsheetId, {
         students,
         violations,
         services,
         attendance
       });
+
+      if (!result.success && result.message.includes('OVERWRITE_PREVENTION')) {
+        const forceExport = confirm(
+          "⚠️ PERINGATAN OVERWRITE (PENIMPAAN DATA):\n\n" +
+          "Sistem mendeteksi ada data riwayat tersimpan di Google Sheets Anda, sementara perangkat ini belum di-sinkronisasi (belum pernah mengimpor data).\n\n" +
+          "SANGAT DIREKOMENDASIKAN: Klik 'Batal', lalu klik tombol 'Tarik Data dari Google Sheets' terlebih dahulu demi keamanan.\n\n" +
+          "Klik 'OK' HANYA jika Anda ingin memaksa menimpa data Google Sheets dengan data baru di perangkat ini (menghapus data lama di awan)."
+        );
+        if (forceExport) {
+          setDirectSyncStatus('syncing');
+          setDirectSyncMessage('Memaksa menulis data ke Google Sheets...');
+          result = await pushDataDirect(token, spreadsheetId, {
+            students,
+            violations,
+            services,
+            attendance
+          }, true);
+        } else {
+          setDirectSyncStatus('idle');
+          setDirectSyncMessage('Sinkronisasi ditangguhkan demi perlindungan basis data.');
+          return;
+        }
+      }
 
       if (result.success) {
         setDirectSyncStatus('success');
@@ -493,7 +524,25 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
     }
 
     setIsSyncing(true);
-    const result = await pushDataToGoogle(url);
+    let result = await pushDataToGoogle(url);
+    
+    if (!result.success && result.message.includes('OVERWRITE_PREVENTION')) {
+      setIsSyncing(false);
+      const forceExport = confirm(
+        "⚠️ PERINGATAN OVERWRITE (PENIMPAAN DATA):\n\n" +
+        "Sistem mendeteksi ada data riwayat tersimpan di Google Sheets Anda, sementara perangkat ini belum di-sinkronisasi (belum pernah mengimpor data).\n\n" +
+        "SANGAT DIREKOMENDASIKAN: Klik 'Batal', lalu klik tombol 'Tarik via Apps Script' terlebih dahulu demi keamanan.\n\n" +
+        "Klik 'OK' HANYA jika Anda ingin memaksa menimpa data Google Sheets dengan data baru di perangkat ini (menghapus data lama di awan)."
+      );
+      if (forceExport) {
+        setIsSyncing(true);
+        result = await pushDataToGoogle(url, true);
+      } else {
+        alert('Ekspor ditangguhkan demi perlindungan basis data.');
+        return;
+      }
+    }
+    
     setIsSyncing(false);
     
     if (result.success) {
@@ -1178,13 +1227,16 @@ function readTab(ss, tabName, headers) {
                 </p>
               </div>
 
-              <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl space-y-1.5">
-                <h4 className="font-extrabold text-amber-800 text-xs flex items-center gap-1">
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>Aturan Keamanan Data</span>
+              <div className="p-3 bg-emerald-50 border border-emerald-100 rounded-xl space-y-1.5">
+                <h4 className="font-extrabold text-emerald-800 text-xs flex items-center gap-1">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>Sistem Proteksi Anti-Overwrite Aktif</span>
                 </h4>
-                <p className="text-gray-600 text-[11px]">
-                  Proses ekspor dan impor bersifat <strong>menimpa data lama</strong>. Pastikan Anda melakukan ekspor terlebih dahulu sebelum memuat ulang aplikasi atau menyinkronkan data antar-perangkat guna mencegah hilangnya pembinaan kesiswaan Anda.
+                <p className="text-[#3d4947]/90 text-[11px] leading-relaxed">
+                  Sistem keamanan pintar kami mendeteksi pergantian perangkat secara otomatis. Jika Anda masuk dengan perangkat baru yang datanya kosong, sistem akan memblokir ekspor otomatis agar data lama Anda di Google Sheets tidak terhapus secara tidak sengaja.
+                </p>
+                <p className="text-[#3d4947]/90 text-[11px] font-bold">
+                  Silakan lakukan <strong>"Tarik Data" (Impor)</strong> satu kali pada perangkat baru untuk mengaktifkan kembali fungsi ekspor secara aman!
                 </p>
               </div>
             </div>

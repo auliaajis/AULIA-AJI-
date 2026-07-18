@@ -251,6 +251,37 @@ export default function DataSiswaView({
   const [newClass, setNewClass] = useState(initialAddClass);
   const [newGender, setNewGender] = useState<'L' | 'P'>('L');
 
+  // Load wali kelas config from localStorage to dynamically resolve email addresses
+  const waliKelasConfig = useMemo(() => {
+    const saved = localStorage.getItem('bk_walikelas_config');
+    if (saved) {
+      try {
+        return JSON.parse(saved) as { class: string; name: string; email: string }[];
+      } catch (e) {
+        return [];
+      }
+    }
+    return [];
+  }, []);
+
+  const getWaliKelasEmail = (className: string) => {
+    if (!className) return '';
+    const sClass = className.trim();
+    const cleanClass = sClass.replace(/kelas\s*/i, '').trim();
+    
+    const found = waliKelasConfig.find(item => 
+      item.class.trim().toLowerCase() === sClass.toLowerCase() ||
+      item.class.trim().toLowerCase() === cleanClass.toLowerCase() ||
+      item.class.trim().toLowerCase().replace(/kelas\s*/i, '').trim() === cleanClass.toLowerCase()
+    );
+    
+    if (found) return found.email;
+
+    // fallback
+    const classCode = cleanClass.toLowerCase().replace(/\s+/g, '');
+    return `wali.kelas.${classCode}@smpn2susukan.sch.id`;
+  };
+
   useEffect(() => {
     setNewClass(initialAddClass);
   }, [initialAddClass]);
@@ -520,7 +551,7 @@ export default function DataSiswaView({
                       </div>
                       <p className="text-gray-700">Notifikasi Peringatan Terkirim Ke:</p>
                       <p className="font-mono text-gray-800 font-bold bg-white/70 px-1.5 py-0.5 rounded border border-yellow-200/40 inline-block">
-                        wali.kelas.{showDossierModal.class.toLowerCase().replace(/kelas\s*/g, '').replace(/\s+/g, '')}@smpn2susukan.sch.id
+                        {getWaliKelasEmail(showDossierModal.class)}
                       </p>
                       <p className="text-gray-400 text-[9px] font-medium italic mt-1">Siswa telah menyentuh akumulasi &gt;= 20 poin. Wali Kelas berkewajiban memulai pembinaan tingkat kelas.</p>
                     </div>
@@ -534,7 +565,7 @@ export default function DataSiswaView({
                       </div>
                       <p className="text-gray-700">Notifikasi Sidang Konseling Terkirim Ke:</p>
                       <p className="font-mono text-gray-800 font-bold bg-white/70 px-1.5 py-0.5 rounded border border-orange-200/40 inline-block">
-                        wali.kelas.{showDossierModal.class.toLowerCase().replace(/kelas\s*/g, '').replace(/\s+/g, '')}@smpn2susukan.sch.id
+                        {getWaliKelasEmail(showDossierModal.class)}
                       </p>
                       <p className="text-gray-400 text-[9px] font-medium italic mt-1">Siswa telah menyentuh akumulasi &gt;= 50 poin. Guru BK &amp; Wali kelas wajib menjadwalkan Panggilan Orang Tua I.</p>
                     </div>
@@ -548,7 +579,7 @@ export default function DataSiswaView({
                       </div>
                       <p className="text-gray-700">Notifikasi Sidang Dewan Guru Terkirim Ke:</p>
                       <p className="font-mono text-gray-800 font-bold bg-white/70 px-1.5 py-0.5 rounded border border-red-200/40 inline-block">
-                        wali.kelas.{showDossierModal.class.toLowerCase().replace(/kelas\s*/g, '').replace(/\s+/g, '')}@smpn2susukan.sch.id
+                        {getWaliKelasEmail(showDossierModal.class)}
                       </p>
                       <p className="text-gray-400 text-[9px] font-medium italic mt-1">Siswa telah menyentuh akumulasi &gt;= 75 poin. Penanganan resmi beralih ke Sidang Dewan Guru &amp; Kepala Sekolah.</p>
                     </div>
@@ -1023,6 +1054,33 @@ export default function DataSiswaView({
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Filters Panel */}
         <div className="lg:col-span-3 bg-white p-4 rounded-2xl shadow-sm border border-[#bcc9c6]/30 flex flex-wrap items-center gap-4">
+          {/* Search Box */}
+          <div className="relative flex-1 min-w-[200px]">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Cari nama atau NISN siswa..."
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="w-full pl-10 pr-8 py-2 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-xs font-semibold text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 placeholder:text-gray-400"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setCurrentPage(1);
+                }}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs font-bold"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
           {/* Class Filter */}
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold text-[#3d4947] uppercase tracking-wider">
