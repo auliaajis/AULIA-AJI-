@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Student, CounselingService, BKServiceType } from '../types';
+import { Student, CounselingService, BKServiceType, PresetServiceData } from '../types';
 import {
   User,
   Users,
@@ -21,19 +21,168 @@ import {
   Check,
   Camera,
   AlertCircle,
-  Image as ImageIcon
+  Sparkles,
+  RefreshCw,
+  Image as ImageIcon,
+  ChevronDown,
+  SlidersHorizontal as Sliders,
+  ShieldAlert
 } from 'lucide-react';
+import StudentCombobox from './StudentCombobox';
+import { showToast } from '../utils/toast';
+import { addToGoogleCalendar } from '../utils/calendarSync';
+
+// Local Professional BK Playbook for Offline/Google Apps Script fallback (Robustness & Stability)
+const LOCAL_BK_PLAYBOOK = [
+  {
+    keywords: ['belajar', 'akademik', 'nilai', 'tugas', 'matematika', 'ipa', 'ips', 'ujian', 'malas', 'susah'],
+    topik: 'Kesulitan Belajar & Motivasi Akademik',
+    pendekatan: 'Solution-Focused Brief Therapy (SFBT) & Cognitive Behavioral Therapy (CBT)',
+    langkah: [
+      'Identifikasi hambatan belajar spesifik dan emosi negatif terkait mata pelajaran tertentu.',
+      'Lakukan teknik "Scale Question" (skala motivasi 1-10) untuk mengetahui titik awal siswa.',
+      'Diskusikan "Miracle Question": bayangkan jika besok kesulitan belajar hilang, apa yang berbeda?',
+      'Rumuskan jadwal belajar mandiri harian yang realistis (menggunakan metode Pomodoro 25 menit).'
+    ],
+    tindakLanjut: 'Kolaborasi dengan wali kelas untuk memantau kehadiran dan mengumpulkan tugas tepat waktu. Lakukan evaluasi berkala 1 minggu mendatang.',
+    kalimatEmpati: [
+      '“Ibu/Bapak mengerti bahwa materi ini terasa sangat menumpuk, tetapi kamu tidak sendirian. Kita akan pecahkan ini bersama-sama.”',
+      '“Wajar sekali jika merasa lelah. Yang terpenting bukan seberapa cepat kamu paham, melainkan usahamu untuk terus mencoba.”',
+      '“Ibu/Bapak sangat menghargai kejujuranmu menceritakan kesulitan ini. Ini langkah awal yang sangat luar biasa.”'
+    ],
+    output: 'Siswa menunjukkan peningkatan motivasi belajar, bersedia menyusun jadwal belajar baru secara disiplin, dan merasa lebih optimis menghadapi ujian.',
+    deskripsi: 'Siswa menceritakan kecemasan menghadapi nilai akademik yang menurun. Konselor membantu meluapkan kecemasan, mengidentifikasi gaya belajar yang cocok, serta membimbing penyusunan jadwal belajar mandiri berbasis manajemen waktu yang seimbang.'
+  },
+  {
+    keywords: ['bolos', 'mangkir', 'absen', 'cabut', 'sekolah', 'terlambat', 'bolos', 'tidur'],
+    topik: 'Ketidakhadiran & Perilaku Membolos',
+    pendekatan: 'Behavioral Therapy (Kontrak Perilaku / Contingency Management)',
+    langkah: [
+      'Gali alasan mendasar perilaku membolos (apakah karena konflik, kecanduan game, begadang, atau pengaruh teman).',
+      'Susun kontrak perilaku (Behavior Contract) formal dengan konsekuensi positif dan negatif yang disepakati bersama.',
+      'Identifikasi pihak pendukung di sekolah (teman dekat/guru favorit) untuk menyambut siswa setiap pagi di gerbang.',
+      'Diskusikan konsekuensi jangka panjang ketidakhadiran terhadap prestasi dan cita-cita siswa.'
+    ],
+    tindakLanjut: 'Koordinasikan absensi harian siswa secara langsung dengan piket sekolah, serta komunikasikan perkembangan kehadiran harian ke orang tua siswa secara berkala.',
+    kalimatEmpati: [
+      '“Ibu/Bapak ingin mendengar suaramu terlebih dahulu. Ceritakan apa yang membuatmu merasa enggan melangkahkan kaki ke sekolah?”',
+      '“Pintu ruangan BK ini selalu terbuka tanpa penghakiman. Ibu/Bapak di sini untuk membantumu kembali nyaman belajar.”',
+      '“Ibu/Bapak percaya kamu adalah anak yang cerdas dan bertanggung jawab. Mari kita urai masalah di luar sana agar sekolahmu lancar kembali.”'
+    ],
+    output: 'Siswa menyepakati kontrak komitmen kehadiran baru, berkomitmen hadir tepat waktu di sekolah, serta memahami tanggung jawab akademiknya.',
+    deskripsi: 'Konselor berdialog empatik mengenai ketidakhadiran siswa tanpa keterangan. Konselor membimbing siswa menyusun kesepakatan tertulis (kontrak perilaku) untuk mengurangi aktivitas begadang dan memantau kehadiran harian.'
+  },
+  {
+    keywords: ['bullying', 'rundung', 'ejek', 'hina', 'teman', 'sosial', 'kelompok', 'kucil', 'berantem'],
+    topik: 'Perundungan (Bullying) & Penyesuaian Sosial',
+    pendekatan: 'Assertive Training (Latihan Asertivitas) & Humanistik',
+    langkah: [
+      'Berikan ruang aman yang hangat bagi korban untuk mengekspresikan seluruh emosi, rasa takut, dan amarahnya.',
+      'Latih keterampilan berkomunikasi asertif (teknik "I-Message") untuk menetapkan batasan pribadi yang tegas menghadapi ejekan.',
+      'Simulasikan bermain peran (Role Play) melatih ketegasan postur tubuh dan ketenangan vokal saat diintimidasi.',
+      'Koordinasikan penanganan rahasia dengan wali kelas untuk memantau perilaku pelaku perundungan secara terukur.'
+    ],
+    tindakLanjut: 'Lakukan pemantauan berkala (silent monitoring) kondisi psikososial siswa di kelas, berdayakan peer counselor untuk mendampingi siswa saat jam istirahat.',
+    kalimatEmpati: [
+      '“Ibu/Bapak sangat menyesal hal buruk ini menimpamu. Ini sama sekali bukan kesalahanmu, dan kamu sangat aman menceritakannya di sini.”',
+      '“Kamu sangat berani karena telah bersuara hari ini. Ibu/Bapak akan melindungimu dan memastikan hal ini ditindaklanjuti secara adil.”',
+      '“Mari kita latih bersama bagaimana cara menatap mata mereka dan berkata tegas bahwa perbuatan mereka tidak pantas dan menyakitimu.”'
+    ],
+    output: 'Siswa merasa dilindungi dan dikuatkan harga dirinya, menguasai respon asertif dasar menghadapi ejekan, serta merasa lebih aman bersekolah.',
+    deskripsi: 'Sesi pemulihan kondisi emosional korban ejekan teman sekelas. Konselor membimbing katarsis emosi, melatih ketegasan asertif interpersonal, serta mengagendakan mediasi damai secara rahasia.'
+  },
+  {
+    keywords: ['gadget', 'hp', 'game', 'main', 'sosmed', 'gawai', 'begadang', 'internet'],
+    topik: 'Kecanduan Gawai (Gadget) & Game Online',
+    pendekatan: 'Cognitive Behavioral Therapy (CBT - Restrukturisasi Kognitif)',
+    langkah: [
+      'Gali durasi harian penggunaan gawai dan analisis dampaknya terhadap kesehatan fisik serta prestasi belajar siswa.',
+      'Lakukan teknik restrukturisasi pikiran untuk mereduksi distorsi kognitif (misal anggapan belajar tidak menyenangkan dibanding game).',
+      'Sepakati komitmen "Detoks Digital" harian yang bertahap (misal mematikan gawai di atas pukul 21:30 malam).',
+      'Bimbing siswa menemukan alternatif hobi positif di dunia nyata (olahraga, musik, atau organisasi).'
+    ],
+    tindakLanjut: 'Kolaborasi dengan orang tua untuk melakukan kontrol waktu layar (Screen Time) di rumah dan melakukan evaluasi perkembangan emosi siswa minggu depan.',
+    kalimatEmpati: [
+      '“Bermain game memang sangat menyenangkan, Ibu/Bapak paham itu. Namun mari kita cermati bersama bagaimana ini perlahan menyita waktu tidurmu.”',
+      '“Tujuan kita bukan membuang HP-mu, melainkan melatih kekuatan dirimu agar kamu yang memegang kendali penuh atas gawai tersebut.”',
+      '“Ibu/Bapak siap mendampingimu menemukan aktivitas baru yang seru di sekolah agar pikiranmu tidak melulu tertuju pada game.”'
+    ],
+    output: 'Siswa menyadari kerugian waktu akibat kecanduan game, menyepakati pembatasan screen time secara mandiri, dan berkomitmen menyalurkan minat ke olahraga.',
+    deskripsi: 'Konseling individual mengenai disiplin waktu gawai. Konselor memandu siswa merefleksikan pengaruh game online terhadap konsentrasi belajarnya, dilanjutkan dengan pembuatan target harian bebas gawai.'
+  },
+  {
+    keywords: ['rokok', 'vape', 'asap', 'disiplin', 'tertangkap', 'razia', 'langgar'],
+    topik: 'Bimbingan Perilaku Khusus (Eskalasi Merokok / Vape)',
+    pendekatan: 'Rational Emotive Behavior Therapy (REBT) & Motivational Interviewing',
+    langkah: [
+      'Bangun hubungan konseling hangat tanpa penghakiman untuk menggali pemicu awal merokok (misal tekanan pertemanan, stres, rasa ingin tahu).',
+      'Lakukan refleksi realistis terhadap dampak kesehatan fisik siswa (kapasitas pernapasan untuk hobi olahraga) dan citra dirinya.',
+      'Identifikasi pemicu kepulan (stres) dan ganti perilaku merokok dengan teknik permen sehat atau relaksasi.',
+      'Tegaskan pentingnya kesadaran menjaga keyakinan bersama dan kenyamanan bersama di sekolah.'
+    ],
+    tindakLanjut: 'Lakukan pemantauan bersama tim kesiswaan di area sekolah yang memerlukan pendampingan khusus, serta berikan umpan balik positif setiap kali siswa menunjukkan konsistensi menjauh.',
+    kalimatEmpati: [
+      '“Ibu/Bapak menghargai kejujuranmu hari ini. Kita tidak fokus menyalahkan masa lalu, tapi merancang masa depanmu agar bersih dan sehat.”',
+      '“Kamu tidak sedang disidang di sini. Ibu/Bapak ingin membantumu mencari saluran yang jauh lebih sehat untuk mengatasi kebosanan atau tekanan.”',
+      '“Mari kita buktikan bersama bahwa kamu memiliki kepribadian kuat yang mandiri tanpa harus ikut-ikutan tren merokok di lingkunganmu.”'
+    ],
+    output: 'Siswa menyadari konsekuensi perilaku terhadap keyakinan sekolah dan risiko kesehatan, berkomitmen menjauhi rokok, serta menyepakati kontrol diri yang kokoh.',
+    deskripsi: 'Konseling pemulihan karakter mengenai perilaku merokok. Konselor mengedepankan pendekatan wawancara motivasional guna membangkitkan tekad internal siswa untuk berhenti.'
+  },
+  {
+    keywords: ['marah', 'emosi', 'berkelahi', 'ribut', 'pukul', 'temperamen', 'singgung', 'emosional'],
+    topik: 'Manajemen Kemarahan & Kontrol Emosi',
+    pendekatan: 'Cognitive Behavioral Therapy (CBT - Terapi Relaksasi & Reframing)',
+    langkah: [
+      'Bimbing siswa mengidentifikasi pemicu fisik amarahnya (misal detak jantung cepat, kepalan tangan) sebelum meledak.',
+      'Ajarkan teknik relaksasi pernapasan diafragma mendalam (Deep Breathing) dan aturan "Menghitung 1-10" saat kesal.',
+      'Latih kognitif reframing: mengubah pikiran defensif/agresif menjadi pemahaman asertif yang tenang.',
+      'Arahkan penyaluran energi emosi negatif ke aktivitas fisik positif seperti olahraga intensif atau curahan tulisan.'
+    ],
+    tindakLanjut: 'Diskusikan perkembangan pengendalian emosi siswa dengan wali kelas dan berikan pujian tulus setiap kali siswa berhasil menyelesaikan konflik kelas secara damai.',
+    kalimatEmpati: [
+      '“Marah adalah emosi manusiawi yang normal. Namun cara kita mengekspresikan kemarahan itu yang menentukan kualitas diri kita.”',
+      '“Ibu/Bapak mengerti dadamu terasa sesak saat direndahkan. Mari tarik napas bersama-sama, kita urai secara jernih solusinya.”',
+      '“Ibu/Bapak sangat bangga kamu memilih masuk ke ruangan ini untuk bercerita ketimbang membalas perbuatan mereka dengan pukulan fisik.”'
+    ],
+    output: 'Siswa menguasai latihan penanganan emosi dasar, bersedia menggunakan teknik relaksasi saat tertekan, serta berkomitmen merespon asertif.',
+    deskripsi: 'Bimbingan kontrol emosi menyusul konflik antar-teman sekelas. Konselor mengajarkan visualisasi ketenangan, teknik meredam luapan emosi seketika, serta membimbing siswa membuat jurnal emosi harian.'
+  },
+  {
+    keywords: ['keluarga', 'broken', 'rumah', 'orang tua', 'cerai', 'pukul', 'ribut', 'ayah', 'ibu', 'sedih', 'stres'],
+    topik: 'Dukungan Psikososial Isu Keluarga / Trauma Rumah',
+    pendekatan: 'Humanistik & Narrative Therapy (Katarsis Emosi)',
+    langkah: [
+      'Berikan penerimaan penuh tanpa syarat (unconditional positive regard), dengarkan tumpahan keluh kesah siswa dengan hangat.',
+      'Bantu siswa memisahkan konflik orang dewasa dari harga diri pribadinya (menegaskan bahwa masalah keluarga bukan salahnya).',
+      'Fokuskan energi siswa pada hal-hal produktif yang berada di bawah kendali pribadinya (prestasi, hobi, persahabatan sehat).',
+      'Bangun kenyamanan lingkungan sekolah sebagai pelindung emosional (safe space).'
+    ],
+    tindakLanjut: 'Jaga kerahasiaan kasus dengan standar tertinggi, lakukan monitoring emosi siswa secara berkala, dan posisikan ruang BK sebagai tempat bersandar yang aman.',
+    kalimatEmpati: [
+      '“Kamu adalah anak yang luar biasa kuat. Menghadapi situasi rumah yang seberat ini sambil tetap berjuang sekolah adalah bukti ketangguhanmu.”',
+      '“Ingatlah, apa pun badai yang sedang dialami ayah dan ibumu, itu urusan mereka. Kamu berhak sepenuhnya untuk tumbuh bahagia dan sukses.”',
+      '“Kapan saja rumah terasa terlalu bising untuk jiwamu, pintu ruangan BK ini selalu terbuka sebagai tempat perlindungan yang tenang bagimu.”'
+    ],
+    output: 'Siswa merasakan kehangatan katarsis, terbebas dari beban rasa bersalah atas konflik orang tua, dan termotivasi mengejar mimpi akademiknya.',
+    deskripsi: 'Sesi terapi konseling naratif untuk meredakan kepedihan mental akibat disharmoni keluarga. Konselor memandu siswa mengekspresikan emosi tertahan secara verbal dan menulis surat ekspresi diri yang menenangkan.'
+  }
+];
 
 interface TambahLayananFormProps {
   students: Student[];
   preSelectedStudentId?: string;
+  presetServiceData?: PresetServiceData | null;
+  onClearPresetServiceData?: () => void;
   onSaveService: (service: Omit<CounselingService, 'id'>) => void;
   onCancel: () => void;
 }
 
 export default function TambahLayananForm({
-  students,
+  students = [],
   preSelectedStudentId,
+  presetServiceData,
+  onClearPresetServiceData,
   onSaveService,
   onCancel,
 }: TambahLayananFormProps) {
@@ -52,6 +201,17 @@ export default function TambahLayananForm({
   const [followUp, setFollowUp] = useState('');
   const [status, setStatus] = useState<'Terjadwal' | 'Selesai' | 'Dibatalkan'>('Terjadwal');
 
+  // AI Assistant Recommender States (Stability, Attractive & Comprehensive Data Request)
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [aiRecommendation, setAiRecommendation] = useState<{
+    summary?: string;
+    rootCauses?: string[];
+    recommendations?: string[];
+    actionPlan?: string[];
+  } | string | null>(null);
+  const [counselingAdviceObj, setCounselingAdviceObj] = useState<any | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
+
   // Schedule states
   const [scheduleDate, setScheduleDate] = useState('');
   const [startTime, setStartTime] = useState('');
@@ -65,6 +225,7 @@ export default function TambahLayananForm({
 
   // New Target Type and Photo proof states
   const [targetType, setTargetType] = useState<'Individu' | 'Kelompok' | 'Klasikal'>('Individu');
+  const [showOptionalFields, setShowOptionalFields] = useState(false);
   const [proofPhotoUrl, setProofPhotoUrl] = useState<string | undefined>(undefined);
   const [proofPhotoName, setProofPhotoName] = useState<string | undefined>(undefined);
   
@@ -141,7 +302,7 @@ export default function TambahLayananForm({
     }
   };
 
-  // Initialize values
+  // Initialize values (including preset data from violations or student context)
   useEffect(() => {
     const today = new Date();
     setScheduleDate(today.toISOString().substring(0, 10));
@@ -150,22 +311,67 @@ export default function TambahLayananForm({
     setStartTime(`${String(hr).padStart(2, '0')}:00`);
     setEndTime(`${String(hr + 1).padStart(2, '0')}:00`);
 
-    if (preSelectedStudentId) {
-      const found = students.find((s) => s.id === preSelectedStudentId);
+    if (presetServiceData) {
+      if (presetServiceData.serviceType) {
+        setServiceType(presetServiceData.serviceType);
+      }
+      if (presetServiceData.targetType) {
+        setTargetType(presetServiceData.targetType);
+      }
+      if (presetServiceData.problem) {
+        setProblem(presetServiceData.problem);
+      }
+      if (presetServiceData.description) {
+        setDescription(presetServiceData.description);
+      }
+      if (presetServiceData.output) {
+        setOutput(presetServiceData.output);
+      }
+      if (presetServiceData.followUp) {
+        setFollowUp(presetServiceData.followUp);
+      }
+      if (presetServiceData.status) {
+        setStatus(presetServiceData.status);
+      }
+      if (presetServiceData.scheduleDate) {
+        setScheduleDate(presetServiceData.scheduleDate);
+      }
+      if (presetServiceData.startTime) {
+        setStartTime(presetServiceData.startTime);
+      }
+      if (presetServiceData.endTime) {
+        setEndTime(presetServiceData.endTime);
+      }
+      if (Array.isArray(presetServiceData.studentIds) && presetServiceData.studentIds.length > 0 && Array.isArray(students)) {
+        const foundList = students.filter((s) => presetServiceData.studentIds!.includes(s.id));
+        if (foundList.length > 0) {
+          setSelectedParticipants(foundList);
+          if (foundList.length > 1 && !presetServiceData.targetType) {
+            setTargetType('Kelompok');
+          }
+        }
+      }
+    } else if (preSelectedStudentId && Array.isArray(students)) {
+      const found = students.find((s) => s?.id === preSelectedStudentId);
       if (found) {
         setSelectedParticipants([found]);
       }
     }
-  }, [preSelectedStudentId, students]);
+  }, [preSelectedStudentId, presetServiceData, students]);
 
   // Autocomplete matching list for participant selection
   const autocompleteList = useMemo(() => {
+    if (!Array.isArray(students)) return [];
     if (!searchQuery.trim()) return [];
-    return students.filter(
-      (s) =>
-        (s.name.toLowerCase().includes(searchQuery.toLowerCase()) || s.nis.includes(searchQuery)) &&
-        !selectedParticipants.some((p) => p.id === s.id)
-    );
+    const q = searchQuery.toLowerCase().trim();
+    return students
+      .filter(
+        (s) =>
+          s &&
+          (String(s.name || '').toLowerCase().includes(q) || String(s.nis || '').toLowerCase().includes(q)) &&
+          !selectedParticipants.some((p) => p.id === s.id)
+      )
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'id'));
   }, [searchQuery, students, selectedParticipants]);
 
   const handleAddParticipant = (student: Student) => {
@@ -210,6 +416,124 @@ export default function TambahLayananForm({
     setAttachments(attachments.filter((_, i) => i !== index));
   };
 
+  // Automated Smart AI Recommender handler (Vite secure server API route + Playbook fallback)
+  const handleGetCounselingRecommendations = async () => {
+    const trimmedProblem = problem.trim();
+    if (!trimmedProblem) {
+      alert('Silakan ketik deskripsi singkat tentang Masalah / Permintaan Layanan siswa terlebih dahulu sebelum meminta analisis solusi.');
+      return;
+    }
+
+    setIsGenerating(true);
+    setAiRecommendation(null);
+    setCounselingAdviceObj(null);
+    setAiError(null);
+
+    // 1. Attempt to call server-side secure Gemini API proxy
+    try {
+      const response = await fetch('/api/gemini/recommend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'session',
+          problem: trimmedProblem,
+          serviceType: serviceType,
+          targetType: targetType,
+          studentName: selectedParticipants.map(p => p.name).join(', ') || undefined
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success && data.recommendation) {
+          setAiRecommendation(data.recommendation);
+          setIsGenerating(false);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('API call failed or server-side key missing. Falling back to built-in offline playbook system.');
+    }
+
+    // 2. Fallback to incredibly rich built-in Local Playbook (Always works, 100% stable!)
+    setTimeout(() => {
+      const queryLower = trimmedProblem.toLowerCase();
+      // Look for first matched entry
+      let matched = LOCAL_BK_PLAYBOOK.find(entry => 
+        entry.keywords.some(kw => queryLower.includes(kw))
+      );
+
+      // Default fallback if no keyword matches
+      if (!matched) {
+        matched = {
+          keywords: [],
+          topik: 'Konseling & Bimbingan Umum',
+          pendekatan: 'Client-Centered Counseling (Pendekatan Berpusat pada Pribadi)',
+          langkah: [
+            'Bangun rasa nyaman dan penerimaan empati menyeluruh tanpa syarat bagi siswa.',
+            'Refleksikan perasaan dan pikiran yang diutarakan siswa secara aktif (Active Listening).',
+            'Bimbing siswa untuk mengenali potensi dirinya dalam menyelesaikan tantangan pribadinya.',
+            'Susun rencana aksi kecil yang realistis bersama siswa untuk dikerjakan minggu depan.'
+          ],
+          tindakLanjut: 'Agendakan sesi tindak lanjut (follow-up) dalam waktu 1 minggu untuk memantau kemajuan emosi dan perilaku positif siswa.',
+          kalimatEmpati: [
+            '“Ibu/Bapak ada di sini untuk mendengarkan ceritamu, tidak untuk menghakimi. Ambil waktumu perlahan-lahan.”',
+            '“Apa yang sedang kamu alami saat ini memang sangat berat. Wajar sekali jika kamu merasa sedih atau cemas.”',
+            '“Ibu/Bapak sangat menghargai kesediaanmu hadir ke sini hari ini untuk bercerita.”'
+          ],
+          output: 'Siswa merasa diringankan bebannya, merasakan kenyamanan empati, serta bersedia memikirkan opsi perubahan positif.',
+          deskripsi: 'Sesi bimbingan individual berpusat pada pribadi siswa (Client-Centered). Konselor memfasilitasi ekspresi emosi yang tersumbat, memperkuat motivasi intrinsik, serta merumuskan langkah perbaikan diri.'
+        };
+      }
+
+      setCounselingAdviceObj(matched);
+      setIsGenerating(false);
+    }, 1200); // realistic pleasant animation buffer
+  };
+
+  // Automatically apply advice content directly into form fields (Exceptional UX)
+  const handleApplyAdviceToForm = () => {
+    if (aiRecommendation) {
+      let narrativeText = '';
+      let outputText = 'Siswa memahami akar masalah dan siap mengimplementasikan rekomendasi strategi bimbingan.';
+      let followUpText = 'Pantau perkembangan sikap dan perilaku siswa dalam 1-2 minggu mendatang.';
+
+      if (typeof aiRecommendation === 'string') {
+        narrativeText = `[REKOMENDASI INTERVENSI BK]\n${aiRecommendation}\n\n[CATATAN SESI KONSELING]`;
+      } else {
+        const summary = aiRecommendation.summary || '';
+        const roots = (aiRecommendation.rootCauses || []).map((r, i) => `${i + 1}. ${r}`).join('\n');
+        const recs = (aiRecommendation.recommendations || []).map((r, i) => `${i + 1}. ${r}`).join('\n');
+        const plans = (aiRecommendation.actionPlan || []).map((p, i) => `${i + 1}. ${p}`).join('\n');
+
+        narrativeText = `[RINGKASAN & FOKUS KONSELING]\n${summary}${roots ? `\n\n[AKAR PERMASALAHAN / PENYEBAB]\n${roots}` : ''}${recs ? `\n\n[REKOMENDASI STRATEGI BK]\n${recs}` : ''}${plans ? `\n\n[RENCANA AKSI & TINDAK LANJUT]\n${plans}` : ''}`;
+
+        if (aiRecommendation.summary) {
+          outputText = `Siswa merefleksikan diri, menyepakati komitmen: ${aiRecommendation.summary}`;
+        }
+        if (aiRecommendation.actionPlan && aiRecommendation.actionPlan.length > 0) {
+          followUpText = `Tindak Lanjut Terjadwal: ${aiRecommendation.actionPlan[0]}`;
+        }
+      }
+
+      setDescription(narrativeText);
+      setOutput(outputText);
+      setFollowUp(followUpText);
+      setShowOptionalFields(true);
+      alert('Rekomendasi AI berhasil diterapkan ke seluruh kolom formulir!');
+    } else if (counselingAdviceObj) {
+      // If offline playbook matching applied
+      const play = counselingAdviceObj;
+      const adviceDescription = `[Pendekatan: ${play.pendekatan}]\n\nLangkah-langkah Penanganan Sesi:\n${play.langkah.map((l: string, i: number) => `${i+1}. ${l}`).join('\n')}\n\nLog Sesi:\n${play.deskripsi}`;
+      
+      setDescription(adviceDescription);
+      setOutput(play.output);
+      setFollowUp(play.tindakLanjut);
+      setShowOptionalFields(true);
+      alert('Formula Playbook Bimbingan berhasil diterapkan ke seluruh kolom draf!');
+    }
+  };
+
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (targetType === 'Individu' && selectedParticipants.length === 0) {
@@ -221,7 +545,8 @@ export default function TambahLayananForm({
       return;
     }
 
-    onSaveService({
+    const newService: CounselingService = {
+      id: Date.now().toString(),
       serviceType,
       students: selectedParticipants.map((p) => ({
         id: p.id,
@@ -241,9 +566,21 @@ export default function TambahLayananForm({
       targetType,
       proofPhotoUrl,
       proofPhotoName,
-    });
+    };
 
-    alert('Catatan rekam layanan BK berhasil didokumentasikan.');
+    onSaveService(newService);
+
+    showToast('Catatan rekam layanan BK berhasil didokumentasikan.', 'success');
+
+    if (status === 'Terjadwal') {
+      if (confirm('Layanan BK berstatus TERJADWAL.\n\nApakah Anda ingin langsung menambahkan sesi ini ke Google Calendar?')) {
+        addToGoogleCalendar(newService);
+      } else {
+        alert('Catatan rekam layanan BK berhasil didokumentasikan.');
+      }
+    } else {
+      alert('Catatan rekam layanan BK berhasil didokumentasikan.');
+    }
   };
 
   return (
@@ -275,6 +612,46 @@ export default function TambahLayananForm({
           </button>
         </div>
       </div>
+
+      {/* Contextual Banner if linked from Violation / Case */}
+      {presetServiceData && (
+        <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs animate-in fade-in duration-200">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-[#00685f] text-white flex items-center justify-center shadow-xs shrink-0 mt-0.5 sm:mt-0">
+              <HeartHandshake className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-black text-[#00685f] uppercase tracking-wide">
+                  Sesi Tindak Lanjut Pelanggaran Terhubung
+                </span>
+                {presetServiceData.violationContext?.category && (
+                  <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-extrabold text-[10px]">
+                    {presetServiceData.violationContext.category}
+                  </span>
+                )}
+                {presetServiceData.violationContext?.pointsAdded ? (
+                  <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-extrabold text-[10px]">
+                    +{presetServiceData.violationContext.pointsAdded} Poin
+                  </span>
+                ) : null}
+              </div>
+              <p className="text-xs text-[#3d4947] font-semibold mt-0.5">
+                Data siswa, topik permasalahan, dan ringkasan kasus telah terisi otomatis dari catatan pelanggaran.
+              </p>
+            </div>
+          </div>
+          {onClearPresetServiceData && (
+            <button
+              type="button"
+              onClick={onClearPresetServiceData}
+              className="px-3 py-1.5 text-xs font-bold text-gray-500 hover:text-red-600 hover:bg-white rounded-lg border border-transparent hover:border-gray-200 transition-all cursor-pointer self-start sm:self-auto shrink-0"
+            >
+              Reset Form
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Left Column: Form Core Details */}
@@ -369,69 +746,63 @@ export default function TambahLayananForm({
             </section>
           )}
 
-          {/* Participant Selector component */}
-          <section className="bg-white rounded-2xl p-6 shadow-sm border border-[#bcc9c6]/30">
-            <div className="flex justify-between items-center mb-4 border-b border-[#bcc9c6]/10 pb-3">
-              <h3 className="font-extrabold text-sm uppercase tracking-wider text-[#0b1c30] flex items-center gap-2">
-                <span className="w-1.5 h-3.5 bg-[#00685f] rounded-full"></span>
-                Peserta Layanan
-                <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
-                  targetType === 'Individu'
-                    ? 'bg-red-50 text-red-600 border border-red-100'
-                    : 'bg-emerald-50 text-emerald-600 border border-emerald-100'
-                }`}>
-                  {targetType === 'Individu' ? 'Wajib Diisi' : 'Opsional'}
-                </span>
-              </h3>
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setShowAddStudentPopover(!showAddStudentPopover)}
-                  className="text-[#00685f] hover:text-[#005049] text-xs font-bold flex items-center gap-1 hover:underline cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Tambah Siswa</span>
-                </button>
-
-                {/* Popover autocomplete search dialog */}
-                {showAddStudentPopover && (
-                  <div className="absolute right-0 mt-2 w-72 bg-white border border-[#bcc9c6]/40 rounded-xl shadow-xl z-50 p-3">
-                    <div className="flex items-center gap-2 border border-[#bcc9c6]/40 rounded-lg px-2.5 py-1.5 bg-[#f8f9ff]">
-                      <input
-                        type="text"
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Ketik nama atau NISN..."
-                        className="text-xs focus:outline-none bg-transparent w-full"
-                      />
-                    </div>
-                    {searchQuery && (
-                      <div className="mt-2 max-h-36 overflow-y-auto custom-scrollbar divide-y divide-[#bcc9c6]/10">
-                        {autocompleteList.length > 0 ? (
-                          autocompleteList.map((s) => (
-                            <div
-                              key={s.id}
-                              onClick={() => handleAddParticipant(s)}
-                              className="py-1.5 px-1 hover:bg-[#eff4ff] cursor-pointer text-xs font-medium flex justify-between items-center"
-                            >
-                              <div>
-                                <p className="font-bold text-[#0b1c30]">{s.name}</p>
-                                <p className="text-[10px] text-gray-500">{s.class}</p>
-                              </div>
-                              <span className="text-[10px] text-gray-400">NISN: {s.nis}</span>
-                            </div>
-                          ))
-                        ) : (
-                          <p className="text-[10px] text-center text-gray-500 py-2">
-                            Tidak ditemukan murid lain
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
+            {/* Participant Selector component */}
+            <section className="bg-white rounded-2xl p-6 shadow-sm border border-[#bcc9c6]/30 space-y-4">
+              <div className="flex justify-between items-center border-b border-[#bcc9c6]/10 pb-3">
+                <h3 className="font-extrabold text-sm uppercase tracking-wider text-[#0b1c30] flex items-center gap-2">
+                  <span className="w-1.5 h-3.5 bg-[#00685f] rounded-full"></span>
+                  Peserta Layanan
+                  <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
+                    targetType === 'Individu'
+                      ? 'bg-red-50 text-red-600 border border-red-100'
+                      : 'bg-emerald-50 text-emerald-600 border border-emerald-100'
+                  }`}>
+                    {targetType === 'Individu' ? 'Wajib Diisi' : 'Opsional'}
+                  </span>
+                </h3>
+                <div className="flex items-center gap-3">
+                  {/* Quick Class Selection Dropdown */}
+                  <select
+                    onChange={(e) => {
+                      const selectedClass = e.target.value;
+                      if (selectedClass) {
+                        const classStudents = (students || []).filter(s => s?.class === selectedClass);
+                        const newParticipants = [...selectedParticipants];
+                        let addedCount = 0;
+                        classStudents.forEach(cs => {
+                          if (cs && !newParticipants.some(p => p.id === cs.id)) {
+                            newParticipants.push(cs);
+                            addedCount++;
+                          }
+                        });
+                        setSelectedParticipants(newParticipants);
+                        if (targetType === 'Individu') {
+                          setTargetType('Klasikal');
+                        }
+                        alert(`Berhasil menambahkan ${addedCount} siswa dari ${selectedClass}.`);
+                        e.target.value = '';
+                      }
+                    }}
+                    className="text-xs bg-[#f4fffc] hover:bg-[#e6fff9] text-[#00685f] border border-[#00685f]/25 rounded-xl px-3 py-1.5 font-bold cursor-pointer focus:outline-none transition-all"
+                  >
+                    <option value="">+ Tambah Seluruh Kelas</option>
+                    {Array.from(new Set((students || []).map(s => s?.class))).filter(Boolean).sort().map(cls => (
+                      <option key={cls} value={cls}>{cls}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
-            </div>
+
+              {/* Student Combobox */}
+              <StudentCombobox
+                students={students}
+                onSelectStudent={(s) => {
+                  if (s && !selectedParticipants.some(p => p.id === s.id)) {
+                    setSelectedParticipants([...selectedParticipants, s]);
+                  }
+                }}
+                placeholder="Cari & Pilih Siswa (Nama, NISN, Kelas)..."
+              />
 
             {/* Selected List binder */}
             <div className="space-y-3">
@@ -489,17 +860,177 @@ export default function TambahLayananForm({
 
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-[#0b1c30]">
-                Masalah / Permintaan Layanan
+                Masalah / Permintaan Layanan <span className="text-red-500">*</span>
               </label>
-              <input
-                type="text"
-                value={problem}
-                onChange={(e) => setProblem(e.target.value)}
-                placeholder="Contoh: Kesulitan belajar di mata pelajaran Matematika atau konflik teman sebaya..."
-                required
-                className="w-full px-4 py-3 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 shadow-sm"
-              />
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={problem}
+                  onChange={(e) => setProblem(e.target.value)}
+                  placeholder="Contoh: Kesulitan belajar di mata pelajaran Matematika, konflik teman sebaya, sering membolos..."
+                  required
+                  className="flex-1 px-4 py-3 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-sm text-[#0b1c30] font-semibold focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 shadow-sm"
+                />
+                <button
+                  type="button"
+                  onClick={handleGetCounselingRecommendations}
+                  disabled={isGenerating || !problem.trim()}
+                  className={`px-4 py-3 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-97 transition-all ${
+                    problem.trim() 
+                      ? 'bg-[#6b38d4] hover:bg-[#6b38d4]/90 text-white animate-pulse' 
+                      : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  }`}
+                >
+                  {isGenerating ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5" />
+                  )}
+                  <span>Asisten AI</span>
+                </button>
+              </div>
             </div>
+
+            {/* DYNAMIC SMART RECOMMENDATIONS PANEL (Aesthetic, attractive & comprehensive data integration) */}
+            {(isGenerating || aiRecommendation || counselingAdviceObj) && (
+              <div className="p-5 bg-gradient-to-br from-indigo-50/50 to-teal-50/30 border border-[#6b38d4]/20 rounded-2xl space-y-3 shadow-xs relative overflow-hidden animate-in fade-in duration-200">
+                <div className="flex items-center justify-between border-b border-[#6b38d4]/10 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="p-1 bg-[#6b38d4]/10 text-[#6b38d4] rounded">
+                      <Sparkles className="w-4 h-4 animate-pulse" />
+                    </span>
+                    <h4 className="text-xs font-black text-[#6b38d4] uppercase tracking-wider">
+                      {aiRecommendation ? 'Rekomendasi Bimbingan (Gemini AI)' : 'Playbook Strategi Konseling BK'}
+                    </h4>
+                  </div>
+                  
+                  {!isGenerating && (
+                    <button
+                      type="button"
+                      onClick={handleApplyAdviceToForm}
+                      className="px-3 py-1 bg-[#6b38d4] hover:bg-[#6b38d4]/90 text-white text-[10px] font-extrabold rounded-lg transition-all active:scale-95 cursor-pointer flex items-center gap-1"
+                    >
+                      <Check className="w-3 h-3" /> Terapkan ke Kolom Draf
+                    </button>
+                  )}
+                </div>
+
+                {isGenerating ? (
+                  <div className="py-8 text-center space-y-2">
+                    <RefreshCw className="w-8 h-8 text-[#6b38d4] animate-spin mx-auto" />
+                    <p className="text-xs font-bold text-[#6b38d4] animate-pulse">
+                      Menganalisis permasalahan dan memformulasikan rencana bimbingan khusus...
+                    </p>
+                    <p className="text-[10px] text-gray-400 font-semibold italic">
+                      Menghubungkan ke asisten cerdas BK SMP N 2 Susukan
+                    </p>
+                  </div>
+                ) : aiRecommendation ? (
+                  <div className="space-y-3">
+                    {typeof aiRecommendation === 'string' ? (
+                      <div className="text-xs text-[#0b1c30] leading-relaxed max-h-64 overflow-y-auto custom-scrollbar font-semibold whitespace-pre-wrap select-text pr-2">
+                        {aiRecommendation}
+                      </div>
+                    ) : (
+                      <div className="space-y-3 max-h-72 overflow-y-auto custom-scrollbar pr-1.5">
+                        {aiRecommendation.summary && (
+                          <div className="bg-teal-50/70 border border-teal-100 p-3 rounded-xl">
+                            <h5 className="text-[10px] font-black uppercase text-[#00685f] tracking-wider mb-1">
+                              Ringkasan Analisis & Solusi
+                            </h5>
+                            <p className="text-xs font-bold text-[#0b1c30] leading-relaxed">
+                              {aiRecommendation.summary}
+                            </p>
+                          </div>
+                        )}
+
+                        {aiRecommendation.rootCauses && aiRecommendation.rootCauses.length > 0 && (
+                          <div>
+                            <h6 className="text-[10px] font-black uppercase text-gray-500 tracking-wider mb-1">
+                              Akar Masalah / Faktor Pemicu
+                            </h6>
+                            <ul className="space-y-1 text-xs font-semibold text-gray-700 list-disc pl-4 leading-normal">
+                              {aiRecommendation.rootCauses.map((rc, i) => (
+                                <li key={i}>{rc}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {aiRecommendation.recommendations && aiRecommendation.recommendations.length > 0 && (
+                          <div>
+                            <h6 className="text-[10px] font-black uppercase text-[#6b38d4] tracking-wider mb-1">
+                              Rekomendasi Tindakan Konseling
+                            </h6>
+                            <ul className="space-y-1 text-xs font-semibold text-[#0b1c30] list-disc pl-4 leading-normal">
+                              {aiRecommendation.recommendations.map((rec, i) => (
+                                <li key={i}>{rec}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {aiRecommendation.actionPlan && aiRecommendation.actionPlan.length > 0 && (
+                          <div className="bg-gray-50 p-2.5 rounded-xl border border-gray-200">
+                            <h6 className="text-[10px] font-black uppercase text-gray-700 tracking-wider mb-1">
+                              Rencana Aksi & Monitoring
+                            </h6>
+                            <ul className="space-y-1 text-[11px] font-semibold text-gray-600 list-disc pl-4 leading-normal">
+                              {aiRecommendation.actionPlan.map((ap, i) => (
+                                <li key={i}>{ap}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : counselingAdviceObj ? (
+                  <div className="space-y-3">
+                    <div>
+                      <span className="text-[9px] bg-[#6b38d4]/10 text-[#6b38d4] font-black px-2 py-0.5 rounded-full uppercase tracking-wider">
+                        Topik: {counselingAdviceObj.topik}
+                      </span>
+                      <h5 className="text-xs font-black text-[#0b1c30] mt-1.5">
+                        Rekomendasi Pendekatan Teoretis:
+                      </h5>
+                      <p className="text-[11px] font-bold text-[#00685f]">
+                        {counselingAdviceObj.pendekatan}
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+                      <div>
+                        <h6 className="text-[10px] font-black text-[#3d4947] uppercase tracking-widest mb-1.5">
+                          Langkah Penanganan Sesi BK
+                        </h6>
+                        <ul className="space-y-1 text-[11px] font-semibold text-gray-700 list-disc pl-4 leading-normal">
+                          {counselingAdviceObj.langkah.map((l: string, i: number) => (
+                            <li key={i}>{l}</li>
+                          ))}
+                        </ul>
+                      </div>
+
+                      <div>
+                        <h6 className="text-[10px] font-black text-[#3d4947] uppercase tracking-widest mb-1.5">
+                          Kalimat Empati Suportif BK
+                        </h6>
+                        <ul className="space-y-1.5 italic text-[11px] font-bold text-[#6b38d4] leading-normal pl-2 border-l-2 border-indigo-200">
+                          {counselingAdviceObj.kalimatEmpati.map((ke: string, i: number) => (
+                            <li key={i}>{ke}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-gray-100 flex justify-between items-center text-[10px] text-gray-500 font-bold">
+                      <span>Pemberitahuan: Berjalan lancar dalam mode offline.</span>
+                      <span className="text-[#00685f]">100% Siap Diterapkan</span>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            )}
 
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-[#0b1c30]">Deskripsi Kegiatan</label>
@@ -507,40 +1038,77 @@ export default function TambahLayananForm({
                 rows={4}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Jelaskan proses konseling atau bimbingan secara mendalam dan kronologis..."
+                placeholder="Jelaskan proses konseling atau bimbingan secara mendalam, kronologis, atau biarkan asisten AI BK di atas membantu merumuskannya..."
                 required
-                className="w-full px-4 py-3 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 resize-none shadow-sm"
+                className="w-full px-4 py-3 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 resize-none shadow-sm font-semibold"
               ></textarea>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-[#0b1c30]">
-                  Hasil / Output Layanan
-                </label>
-                <textarea
-                  rows={3}
-                  value={output}
-                  onChange={(e) => setOutput(e.target.value)}
-                  placeholder="Apa hasil akhir yang dicapai dalam sesi bimbingan ini?"
-                  required
-                  className="w-full px-4 py-3 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 resize-none shadow-sm"
-                ></textarea>
-              </div>
+            {/* Progressive Disclosure: Collapsible Section for Optional Fields */}
+            <div className="border border-[#bcc9c6]/30 rounded-2xl overflow-hidden bg-white shadow-2xs">
+              <button
+                type="button"
+                onClick={() => setShowOptionalFields(!showOptionalFields)}
+                className="w-full px-5 py-3.5 flex items-center justify-between bg-[#f8faf9] hover:bg-gray-100/70 text-left transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-2.5">
+                  <Sliders className="w-4 h-4 text-[#00685f]" />
+                  <div>
+                    <h4 className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                      Kolom Pendukung & Hasil (Opsional)
+                    </h4>
+                    <p className="text-[11px] text-gray-500 font-semibold mt-0.5">
+                      {showOptionalFields
+                        ? 'Klik untuk menyembunyikan kolom pendukung'
+                        : 'Hasil / output konseling dan rencana tindak lanjut'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {(output || followUp) && (
+                    <span className="text-[10px] bg-[#00685f]/10 text-[#00685f] font-bold px-2 py-0.5 rounded-full">
+                      Terisi
+                    </span>
+                  )}
+                  <ChevronDown
+                    className={`w-4 h-4 text-gray-500 transition-transform duration-200 ${
+                      showOptionalFields ? 'rotate-180' : ''
+                    }`}
+                  />
+                </div>
+              </button>
 
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-[#0b1c30]">
-                  Rencana Tindak Lanjut
-                </label>
-                <textarea
-                  rows={3}
-                  value={followUp}
-                  onChange={(e) => setFollowUp(e.target.value)}
-                  placeholder="Langkah strategis penanganan selanjutnya..."
-                  required
-                  className="w-full px-4 py-3 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 resize-none shadow-sm"
-                ></textarea>
-              </div>
+              {showOptionalFields && (
+                <div className="p-5 space-y-4 border-t border-[#bcc9c6]/20 bg-white animate-in slide-in-from-top-2 duration-200">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-[#0b1c30]">
+                        Hasil / Output Layanan
+                      </label>
+                      <textarea
+                        rows={3}
+                        value={output}
+                        onChange={(e) => setOutput(e.target.value)}
+                        placeholder="Apa hasil akhir yang dicapai dalam sesi bimbingan ini?"
+                        className="w-full px-3.5 py-2.5 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-xs text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 resize-none shadow-2xs font-semibold"
+                      ></textarea>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-[#0b1c30]">
+                        Rencana Tindak Lanjut
+                      </label>
+                      <textarea
+                        rows={3}
+                        value={followUp}
+                        onChange={(e) => setFollowUp(e.target.value)}
+                        placeholder="Langkah strategis penanganan selanjutnya..."
+                        className="w-full px-3.5 py-2.5 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-xs text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 resize-none shadow-2xs font-semibold"
+                      ></textarea>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </section>
         </div>

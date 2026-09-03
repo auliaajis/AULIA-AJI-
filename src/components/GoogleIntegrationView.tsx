@@ -17,18 +17,22 @@ import {
   CheckCircle2,
   AlertCircle,
   Download,
-  ShieldCheck
+  ShieldCheck,
+  ShieldAlert,
+  X
 } from 'lucide-react';
 import { 
   getSavedScriptUrl, 
   saveScriptUrl, 
   testConnection, 
   pushDataToGoogle, 
-  pullDataFromGoogle 
+  pullDataFromGoogle,
+  getLocalDatabaseData
 } from '../utils/googleSync';
 import {
   initAuth,
   googleSignIn,
+  googleSignInRedirect,
   logout,
   getAccessToken
 } from '../utils/firebaseAuth';
@@ -37,6 +41,7 @@ import {
   pushDataDirect,
   pullDataDirect
 } from '../utils/googleSheetsDirect';
+import { mergeFullDatabase } from '../utils/dataMerger';
 
 interface GoogleIntegrationViewProps {
   onDataImported: (data: {
@@ -44,6 +49,9 @@ interface GoogleIntegrationViewProps {
     violations?: any[];
     services?: any[];
     attendance?: any[];
+    journals?: any[];
+    homeVisits?: any[];
+    achievements?: any[];
   }) => void;
 }
 
@@ -70,15 +78,26 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
   const [user, setUser] = useState<any>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [showAccessBlockedModal, setShowAccessBlockedModal] = useState(false);
   const [spreadsheetId, setSpreadsheetId] = useState<string | null>(null);
   const [spreadsheetUrl, setSpreadsheetUrl] = useState<string | null>(null);
   const [directSyncStatus, setDirectSyncStatus] = useState<'idle' | 'connecting' | 'connected' | 'syncing' | 'success' | 'error'>('idle');
   const [directSyncMessage, setDirectSyncMessage] = useState('');
   const [downloadingHtml, setDownloadingHtml] = useState(false);
+  const [activeTab, setActiveTab] = useState<'webapp' | 'oauth' | 'custom_id'>('webapp');
   const [syncHistory, setSyncHistory] = useState<{ type: 'push' | 'pull'; time: string; status: 'success' | 'failed' }[]>(() => {
     const saved = localStorage.getItem('bk_google_direct_history');
     return saved ? JSON.parse(saved) : [];
   });
+
+  const handleShareDatabaseLink = () => {
+    const url = scriptUrl || spreadsheetUrl || '';
+    const id = spreadsheetId || '';
+    const text = `📌 LINK SINKRONISASI DATABASE BK SMPN 2 SUSUKAN\n\nHalo Bapak/Ibu Guru BK & Staf,\n\nBerikut link basis data Google Apps Script yang dapat Anda gunakan bersama untuk sinkronisasi data siswa, rekam pelanggaran, layanan BK, dan absensi di HP/Laptop masing-masing:\n\n🔗 Web App URL Database:\n${url || '(Belum diset - silakan buka menu Integrasi Google)'}\n\n📄 ID Spreadsheet (Opsional):\n${id || '-'}\n\nCARA PENGGUNAAN PADA HP / LAPTOP ANDA:\n1. Buka Portal BK SMPN 2 Susukan.\n2. Buka menu "Integrasi Google".\n3. Pilih "Mode 1: Apps Script (Multi-Guru / Beda Email)".\n4. Tempelkan Web App URL di atas, lalu klik "Simpan URL" & "Tarik via Apps Script".\n\nSeluruh data akan tersambung dan tersinkronisasi secara otomatis tanpa kendala otorisasi email!`;
+
+    navigator.clipboard.writeText(text);
+    alert('Pesan informasi Database berhasil disalin!\n\nSilakan tempel (paste) dan kirim pesan ini melalui WhatsApp ke rekan guru lain.');
+  };
 
   // Load configuration on mount
   useEffect(() => {
@@ -131,11 +150,68 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       if (result.spreadsheetUrl) {
         localStorage.setItem('bk_google_spreadsheet_url', result.spreadsheetUrl);
       }
+
+      // AUTO-PULL FOR MULTI-DEVICE PROTECTION:
+      // If this device hasn't been verified/synced yet, try to pull the data from Google Sheets automatically.
+      // This protects the user from overwriting their cloud data with local empty/mock data when logging in from a different device.
+      if (localStorage.getItem('bk_google_sync_verified') !== 'true') {
+        setDirectSyncStatus('syncing');
+        setDirectSyncMessage('Mendeteksi data di Google Sheets Anda. Sedang sinkronisasi data riwayat...');
+        try {
+          const pullResult = await pullDataDirect(token, result.spreadsheetId);
+          if (pullResult.success && pullResult.data) {
+            const d = pullResult.data;
+            const remoteStudentCount = d.students?.length || 0;
+            const remoteViolationCount = d.violations?.length || 0;
+            const remoteServiceCount = d.services?.length || 0;
+            const hasRemoteData = remoteStudentCount > 0 || remoteViolationCount > 0 || remoteServiceCount > 0;
+
+            if (hasRemoteData) {
+              onDataImported(d);
+              localStorage.setItem('bk_google_sync_verified', 'true');
+              window.dispatchEvent(new Event('storage'));
+              setDirectSyncStatus('success');
+              setDirectSyncMessage('Berhasil menyinkronkan data riwayat dari Google Sheets secara otomatis!');
+              alert('Koneksi Berhasil!\n\nKami mendeteksi adanya data riwayat Anda di Google Sheets. Data tersebut telah berhasil diunduh secara otomatis ke perangkat ini agar aman dan tidak tertimpa.');
+              return;
+            } else {
+              localStorage.setItem('bk_google_sync_verified', 'true');
+              window.dispatchEvent(new Event('storage'));
+              
+              const localData = getLocalDatabaseData();
+              await pushDataDirect(token, result.spreadsheetId, {
+                students: localData.students,
+                violations: localData.violations,
+                services: localData.services,
+                attendance: localData.attendance,
+                journals: localData.journals,
+                homeVisits: localData.homeVisits
+              }, true);
+            }
+          }
+        } catch (pullErr) {
+          console.error('Auto-pull error during setup:', pullErr);
+        }
+      }
+
       setDirectSyncStatus('connected');
       setDirectSyncMessage('Basis Data Terhubung langsung dengan Google Sheets!');
     } else {
       setDirectSyncStatus('error');
       setDirectSyncMessage(result.message || 'Gagal menyambungkan basis data Google Sheets.');
+    }
+  };
+
+  const handleSaveSpreadsheetCustomId = () => {
+    const input = prompt('Masukkan ID Spreadsheet Google Drive Anda (contoh: 1a2b3c4d5e...):\n\nAnda dapat menemukan ID ini di URL Google Spreadsheet di antara /d/ dan /edit.', spreadsheetId || '');
+    if (input && input.trim()) {
+      const cleanId = input.trim();
+      setSpreadsheetId(cleanId);
+      localStorage.setItem('bk_google_spreadsheet_id', cleanId);
+      const url = `https://docs.google.com/spreadsheets/d/${cleanId}/edit`;
+      setSpreadsheetUrl(url);
+      localStorage.setItem('bk_google_spreadsheet_url', url);
+      alert('ID Spreadsheet Custom berhasil disimpan!');
     }
   };
 
@@ -149,12 +225,49 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
         await handleAutoSetupSpreadsheet(result.accessToken);
       }
     } catch (error: any) {
-      if (error && error.message && (error.message.includes('popup-closed-by-user') || error.message.includes('auth/popup-closed-by-user'))) {
-        alert('Proses masuk dibatalkan karena jendela masuk Google ditutup sebelum selesai. Silakan coba klik masuk kembali dan selesaikan verifikasi.');
+      const errMsg = error?.message || String(error);
+      if (
+        errMsg.includes('403') || 
+        errMsg.includes('access_denied') || 
+        errMsg.includes('verification process') || 
+        errMsg.includes('developer-approved')
+      ) {
+        setShowAccessBlockedModal(true);
+      } else if (
+        errMsg.includes('popup-closed-by-user') || 
+        errMsg.includes('auth/popup-closed-by-user') || 
+        errMsg.includes('popup-blocked') || 
+        errMsg.includes('auth/popup-blocked') ||
+        errMsg.includes('cancelled-popup-request')
+      ) {
+        if (confirm('Jendela Pop-up ditutup atau diblokir oleh browser / HP Anda.\n\nIngin beralih ke mode "Login Redirect (Halaman Penuh)" yang pasti berhasil di semua perangkat?')) {
+          await handleGoogleRedirectLogin();
+          return;
+        }
       } else {
-        alert(`Gagal Masuk Google: ${error.message || error}`);
+        alert(`Gagal Masuk Google: ${errMsg}`);
       }
     } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleGoogleRedirectLogin = async () => {
+    setIsLoggingIn(true);
+    try {
+      await googleSignInRedirect();
+    } catch (error: any) {
+      const errMsg = error?.message || String(error);
+      if (
+        errMsg.includes('403') || 
+        errMsg.includes('access_denied') || 
+        errMsg.includes('verification process') || 
+        errMsg.includes('developer-approved')
+      ) {
+        setShowAccessBlockedModal(true);
+      } else {
+        alert(`Gagal Masuk via Redirect: ${errMsg}`);
+      }
       setIsLoggingIn(false);
     }
   };
@@ -228,45 +341,115 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       return;
     }
 
-    if (!confirm('Apakah Anda yakin ingin mengekspor seluruh data lokal aplikasi ini ke Google Spreadsheet? Semua data lama di lembar "Siswa", "Pelanggaran", "LayananBK", dan "Absensi" akan ditimpa.')) {
+    if (!confirm('Apakah Anda yakin ingin mengekspor data aplikasi ini? Sistem akan menyinkronkan data awan saat ini dengan data lokal Anda terlebih dahulu, lalu mengunggah hasil penggabungan yang aman (tanpa menghapus catatan dari perangkat lain).')) {
       return;
     }
 
     setDirectSyncStatus('syncing');
-    setDirectSyncMessage('Sedang menyinkronkan dan mengekspor data ke Google Sheets...');
+    setDirectSyncMessage('Sedang mengunduh data awan untuk digabungkan secara aman...');
+
+    const localData = getLocalDatabaseData();
+    let finalStudents = localData.students;
+    let finalViolations = localData.violations;
+    let finalServices = localData.services;
+    let finalAttendance = localData.attendance;
+    let finalJournals = localData.journals;
+    let finalHomeVisits = localData.homeVisits;
+    let finalAchievements = localData.achievements;
 
     try {
-      const students = JSON.parse(localStorage.getItem('bk_students') || '[]');
-      const violations = JSON.parse(localStorage.getItem('bk_violations') || '[]');
-      const services = JSON.parse(localStorage.getItem('bk_services') || '[]');
-      const attendance = JSON.parse(localStorage.getItem('bk_attendance_history') || '[]');
+      const pullRes = await pullDataDirect(token, spreadsheetId);
+      if (pullRes.success && pullRes.data) {
+        const d = pullRes.data;
+        const merged = mergeFullDatabase(
+          {
+            students: finalStudents,
+            violations: finalViolations,
+            services: finalServices,
+            attendance: finalAttendance,
+            journals: finalJournals,
+            homeVisits: finalHomeVisits,
+            achievements: finalAchievements
+          },
+          {
+            students: d.students || [],
+            violations: d.violations || [],
+            services: d.services || [],
+            attendance: d.attendance || [],
+            journals: d.journals || [],
+            homeVisits: d.homeVisits || [],
+            achievements: d.achievements || []
+          }
+        );
+        finalStudents = merged.students;
+        finalViolations = merged.violations;
+        finalServices = merged.services;
+        finalAttendance = merged.attendance;
+        finalJournals = merged.journals;
+        finalHomeVisits = merged.homeVisits;
+        finalAchievements = merged.achievements;
 
+        // Save merged data locally
+        localStorage.setItem('bk_students', JSON.stringify(finalStudents));
+        localStorage.setItem('bk_violations', JSON.stringify(finalViolations));
+        localStorage.setItem('bk_services', JSON.stringify(finalServices));
+        localStorage.setItem('bk_attendance_history', JSON.stringify(finalAttendance));
+        localStorage.setItem('bk_daily_journals', JSON.stringify(finalJournals));
+        localStorage.setItem('bk_home_visits', JSON.stringify(finalHomeVisits));
+        localStorage.setItem('bk_achievements', JSON.stringify(finalAchievements));
+        
+        // Pass merged data to App state
+        onDataImported({
+          students: finalStudents,
+          violations: finalViolations,
+          services: finalServices,
+          attendance: finalAttendance,
+          journals: finalJournals,
+          homeVisits: finalHomeVisits,
+          achievements: finalAchievements
+        });
+      }
+    } catch (err) {
+      console.warn('Ekspor: Gagal menarik data untuk penggabungan langsung:', err);
+    }
+
+    setDirectSyncMessage('Sedang menyinkronkan dan mengekspor data tergabung ke Google Sheets...');
+
+    try {
       let result = await pushDataDirect(token, spreadsheetId, {
-        students,
-        violations,
-        services,
-        attendance
+        students: finalStudents,
+        violations: finalViolations,
+        services: finalServices,
+        attendance: finalAttendance,
+        journals: finalJournals,
+        homeVisits: finalHomeVisits,
+        achievements: finalAchievements
       });
 
       if (!result.success && result.message.includes('OVERWRITE_PREVENTION')) {
-        const forceExport = confirm(
-          "⚠️ PERINGATAN OVERWRITE (PENIMPAAN DATA):\n\n" +
-          "Sistem mendeteksi ada data riwayat tersimpan di Google Sheets Anda, sementara perangkat ini belum di-sinkronisasi (belum pernah mengimpor data).\n\n" +
-          "SANGAT DIREKOMENDASIKAN: Klik 'Batal', lalu klik tombol 'Tarik Data dari Google Sheets' terlebih dahulu demi keamanan.\n\n" +
-          "Klik 'OK' HANYA jika Anda ingin memaksa menimpa data Google Sheets dengan data baru di perangkat ini (menghapus data lama di awan)."
+        const confirmationWord = prompt(
+          "⚠️ PERINGATAN KERAS: OVERWRITE DATABASE!\n\n" +
+          "Sistem mendeteksi ada data riwayat tersimpan di Google Sheets Anda, sementara perangkat ini belum disinkronisasi (belum mengimpor data).\n\n" +
+          "Jika Anda melanjutkan, SEMUA DATA LAMA DI GOOGLE SHEETS AKAN TERHAPUS DAN DIGANTI data di perangkat ini.\n\n" +
+          "Kami SANGAT MENYARANKAN untuk membatalkan dan melakukan 'Tarik Data dari Google Sheets' terlebih dahulu.\n\n" +
+          "Jika Anda tetap ingin memaksa menimpa data awan, ketik kata 'TIMPA' di bawah ini untuk mengonfirmasi:"
         );
-        if (forceExport) {
+        if (confirmationWord === 'TIMPA') {
           setDirectSyncStatus('syncing');
           setDirectSyncMessage('Memaksa menulis data ke Google Sheets...');
           result = await pushDataDirect(token, spreadsheetId, {
-            students,
-            violations,
-            services,
-            attendance
+            students: finalStudents,
+            violations: finalViolations,
+            services: finalServices,
+            attendance: finalAttendance,
+            journals: finalJournals,
+            homeVisits: finalHomeVisits,
+            achievements: finalAchievements
           }, true);
         } else {
           setDirectSyncStatus('idle');
-          setDirectSyncMessage('Sinkronisasi ditangguhkan demi perlindungan basis data.');
+          setDirectSyncMessage('Sinkronisasi dibatalkan demi perlindungan basis data.');
+          alert('Proses dibatalkan. Data awan Anda aman.');
           return;
         }
       }
@@ -298,7 +481,11 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       const updatedHistory = [newHistoryItem, ...syncHistory].slice(0, 10);
       setSyncHistory(updatedHistory);
       localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
-      alert(`Ekspor Gagal: ${err.message}`);
+      if (err.message === 'UNAUTHENTICATED_SESSION') {
+        alert('Sesi Google Anda telah berakhir demi keamanan (kedaluwarsa otomatis setiap 1 jam). Silakan klik tombol "Hubungkan Kembali & Segarkan Sesi" yang muncul di layar untuk memperbarui koneksi.');
+      } else {
+        alert(`Ekspor Gagal: ${err.message}`);
+      }
     }
   };
 
@@ -315,7 +502,7 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       return;
     }
 
-    if (!confirm('Peringatan Keras: Ini akan menimpa seluruh data lokal Siswa, Pelanggaran, Jurnal Layanan BK, dan Absensi di browser Anda dengan data yang ada di Google Spreadsheet. Lanjutkan?')) {
+    if (!confirm('Peringatan Keras: Ini akan menimpa seluruh data lokal Siswa, Pelanggaran, Jurnal Layanan BK, Absensi, Jurnal Harian, dan Dokumentasi Home Visit di browser Anda dengan data yang ada di Google Spreadsheet. Lanjutkan?')) {
       return;
     }
 
@@ -352,13 +539,50 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       const updatedHistory = [newHistoryItem, ...syncHistory].slice(0, 10);
       setSyncHistory(updatedHistory);
       localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
-      alert(`Impor Gagal: ${err.message}`);
+      if (err.message === 'UNAUTHENTICATED_SESSION') {
+        alert('Sesi Google Anda telah berakhir demi keamanan (kedaluwarsa otomatis setiap 1 jam). Silakan klik tombol "Hubungkan Kembali & Segarkan Sesi" yang muncul di layar untuk memperbarui koneksi.');
+      } else {
+        alert(`Impor Gagal: ${err.message}`);
+      }
     }
   };
 
   // Traditional Apps Script Handlers (Fallback)
-  const handleSaveUrl = () => {
-    saveScriptUrl(scriptUrl);
+  const handleSaveUrl = async () => {
+    const url = scriptUrl.trim();
+    if (!url) {
+      alert('Silakan masukkan URL Apps Script terlebih dahulu.');
+      return;
+    }
+    saveScriptUrl(url);
+    
+    // Auto-pull check for Apps Script URL
+    if (localStorage.getItem('bk_google_sync_verified') !== 'true') {
+      setConnectionStatus('testing');
+      setStatusMessage('Menguji koneksi dan mendeteksi data lama di Google Sheets Anda...');
+      const result = await testConnection(url);
+      if (result.success) {
+        const pullResult = await pullDataFromGoogle(url);
+        if (pullResult.success && pullResult.data) {
+          const d = pullResult.data;
+          const remoteStudentCount = d.students?.length || 0;
+          const remoteViolationCount = d.violations?.length || 0;
+          const remoteServiceCount = d.services?.length || 0;
+          const hasRemoteData = remoteStudentCount > 0 || remoteViolationCount > 0 || remoteServiceCount > 0;
+          
+          if (hasRemoteData) {
+            onDataImported(d);
+            localStorage.setItem('bk_google_sync_verified', 'true');
+            window.dispatchEvent(new Event('storage'));
+            setConnectionStatus('success');
+            setStatusMessage('Data berhasil disinkronkan secara otomatis!');
+            alert('Koneksi & Sinkronisasi Berhasil!\n\nKami mendeteksi adanya data riwayat Anda di Google Sheets. Data tersebut telah berhasil diunduh secara otomatis ke perangkat ini agar aman dan tidak tertimpa.');
+            return;
+          }
+        }
+      }
+    }
+    
     alert('URL Google Apps Script berhasil disimpan secara lokal!');
     setConnectionStatus('idle');
     setStatusMessage('');
@@ -528,17 +752,18 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
     
     if (!result.success && result.message.includes('OVERWRITE_PREVENTION')) {
       setIsSyncing(false);
-      const forceExport = confirm(
-        "⚠️ PERINGATAN OVERWRITE (PENIMPAAN DATA):\n\n" +
-        "Sistem mendeteksi ada data riwayat tersimpan di Google Sheets Anda, sementara perangkat ini belum di-sinkronisasi (belum pernah mengimpor data).\n\n" +
-        "SANGAT DIREKOMENDASIKAN: Klik 'Batal', lalu klik tombol 'Tarik via Apps Script' terlebih dahulu demi keamanan.\n\n" +
-        "Klik 'OK' HANYA jika Anda ingin memaksa menimpa data Google Sheets dengan data baru di perangkat ini (menghapus data lama di awan)."
+      const confirmationWord = prompt(
+        "⚠️ PERINGATAN KERAS: OVERWRITE DATABASE!\n\n" +
+        "Sistem mendeteksi ada data riwayat tersimpan di Google Sheets Anda, sementara perangkat ini belum disinkronisasi (belum mengimpor data).\n\n" +
+        "Jika Anda melanjutkan, SEMUA DATA LAMA DI GOOGLE SHEETS AKAN TERHAPUS DAN DIGANTI data di perangkat ini.\n\n" +
+        "Kami SANGAT MENYARANKAN untuk membatalkan dan melakukan 'Tarik via Apps Script' terlebih dahulu.\n\n" +
+        "Jika Anda tetap ingin memaksa menimpa data awan, ketik kata 'TIMPA' di bawah ini untuk mengonfirmasi:"
       );
-      if (forceExport) {
+      if (confirmationWord === 'TIMPA') {
         setIsSyncing(true);
         result = await pushDataToGoogle(url, true);
       } else {
-        alert('Ekspor ditangguhkan demi perlindungan basis data.');
+        alert('Ekspor dibatalkan. Data awan Anda aman.');
         return;
       }
     }
@@ -603,7 +828,10 @@ function doGet(e) {
         students: readTab(ss, "Siswa", ["id", "nis", "name", "class", "gender", "violationPoints", "bkServicesCount", "initials"]),
         violations: readTab(ss, "Pelanggaran", ["id", "ticketId", "studentId", "studentName", "studentClass", "category", "pointsAdded", "date", "time", "location", "notes", "reportedBy", "handledBy", "handlingProgress"]),
         services: readTab(ss, "LayananBK", ["id", "serviceType", "problem", "description", "output", "followUp", "status", "date", "startTime", "endTime", "students", "attachments", "notes"]),
-        attendance: readTab(ss, "Absensi", ["id", "class", "date", "records", "updatedAt", "submittedBy"])
+        attendance: readTab(ss, "Absensi", ["id", "class", "date", "records", "updatedAt", "submittedBy"]),
+        journals: readTab(ss, "JurnalHarian", ["id", "date", "startTime", "endTime", "activityType", "title", "description", "target", "status", "counselorId", "createdAt", "proofPhotoUrl", "proofPhotoName", "absentStudents"]),
+        homeVisits: readTab(ss, "HomeVisit", ["id", "reportNumber", "date", "studentId", "studentName", "studentClass", "studentNis", "parentNameMet", "address", "purpose", "result", "agreement", "photoUrl", "photoName", "parentSignature", "counselorSignature", "counselorName", "counselorId", "createdAt"]),
+        achievements: readTab(ss, "Apresiasi_Prestasi", ["id", "studentId", "studentName", "studentClass", "nis", "category", "achievementName", "pointsReward", "date", "time", "location", "recordedBy", "notes"])
       });
       return ContentService.createTextOutput(output).setMimeType(ContentService.MimeType.JSON);
     } else {
@@ -657,14 +885,37 @@ function doPost(e) {
   try {
     var payload = JSON.parse(e.postData.contents);
     if (payload.action === "sync") {
+      var pembinaanList = (payload.violations || []).filter(function(v) { return !v.handledBy || v.handledBy === "Belum Ditangani"; });
+      var restitusiList = (payload.violations || []).filter(function(v) { return (v.handledBy && v.handledBy !== "Belum Ditangani") || (v.handlingProgress && String(v.handlingProgress).trim() !== ""); });
+
       syncTab(ss, "Siswa", ["id", "nis", "name", "class", "gender", "violationPoints", "bkServicesCount", "initials"], payload.students || []);
-      syncTab(ss, "Pelanggaran", ["id", "ticketId", "studentId", "studentName", "studentClass", "category", "pointsAdded", "date", "time", "location", "notes", "reportedBy", "handledBy", "handlingProgress"], payload.violations || []);
+      syncTab(ss, "Pelanggaran", ["id", "ticketId", "studentId", "studentName", "studentClass", "category", "pointsAdded", "date", "time", "location", "notes", "reportedBy", "handledBy", "handlingProgress"], pembinaanList);
+      syncTab(ss, "Restitusi", ["id", "ticketId", "studentId", "studentName", "studentClass", "category", "pointsAdded", "date", "time", "location", "notes", "reportedBy", "handledBy", "handlingProgress"], restitusiList);
       syncTab(ss, "LayananBK", ["id", "serviceType", "problem", "description", "output", "followUp", "status", "date", "startTime", "endTime", "students", "attachments", "notes"], payload.services || []);
       syncTab(ss, "Absensi", ["id", "class", "date", "records", "updatedAt", "submittedBy"], payload.attendance || []);
+      syncTab(ss, "JurnalHarian", ["id", "date", "startTime", "endTime", "activityType", "title", "description", "target", "status", "counselorId", "createdAt", "proofPhotoUrl", "proofPhotoName", "absentStudents"], payload.journals || []);
+      syncTab(ss, "HomeVisit", ["id", "reportNumber", "date", "studentId", "studentName", "studentClass", "studentNis", "parentNameMet", "address", "purpose", "result", "agreement", "photoUrl", "photoName", "parentSignature", "counselorSignature", "counselorName", "counselorId", "createdAt"], payload.homeVisits || []);
+      syncTab(ss, "Apresiasi_Prestasi", ["id", "studentId", "studentName", "studentClass", "nis", "category", "achievementName", "pointsReward", "date", "time", "location", "recordedBy", "notes"], payload.achievements || []);
       
       output = JSON.stringify({ 
         status: "success", 
         message: "Sinkronisasi berhasil! Spreadsheet telah diperbarui." 
+      });
+    } else if (payload.action === "sendEmail") {
+      MailApp.sendEmail({
+        to: payload.to,
+        subject: payload.subject,
+        body: payload.body
+      });
+      output = JSON.stringify({ 
+        status: "success", 
+        message: "Email berhasil dikirim ke " + payload.to 
+      });
+    } else if (payload.action === "createDraft") {
+      GmailApp.createDraft(payload.to, payload.subject, payload.body);
+      output = JSON.stringify({ 
+        status: "success", 
+        message: "Draf email berhasil dibuat di folder Draf Gmail Anda!" 
       });
     } else {
       output = JSON.stringify({ status: "error", message: "Aksi POST tidak dikenal." });
@@ -746,462 +997,418 @@ function readTab(ss, tabName, headers) {
         </div>
       </div>
 
+      {/* Multi-Guru & Beda Email Mode Switcher Tabs */}
+      <div className="bg-[#f0f4f8] p-1.5 rounded-2xl border border-gray-200 flex flex-col md:flex-row items-stretch gap-2 shadow-inner">
+        <button
+          type="button"
+          onClick={() => setActiveTab('webapp')}
+          className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-extrabold text-xs transition-all cursor-pointer ${
+            activeTab === 'webapp'
+              ? 'bg-[#00685f] text-white shadow-md'
+              : 'text-gray-600 hover:text-gray-900 hover:bg-white/60'
+          }`}
+        >
+          <CloudLightning className="w-4 h-4 text-amber-300" />
+          <span>Mode 1: Apps Script (Beda Email / Bebas 403)</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('oauth')}
+          className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-extrabold text-xs transition-all cursor-pointer ${
+            activeTab === 'oauth'
+              ? 'bg-[#00685f] text-white shadow-md'
+              : 'text-gray-600 hover:text-gray-900 hover:bg-white/60'
+          }`}
+        >
+          <Database className="w-4 h-4 text-teal-300" />
+          <span>Mode 2: Login OAuth Google (Drive Per-Akun)</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('custom_id')}
+          className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-extrabold text-xs transition-all cursor-pointer ${
+            activeTab === 'custom_id'
+              ? 'bg-[#00685f] text-white shadow-md'
+              : 'text-gray-600 hover:text-gray-900 hover:bg-white/60'
+          }`}
+        >
+          <FileSpreadsheet className="w-4 h-4 text-emerald-300" />
+          <span>Mode 3: ID Spreadsheet Custom</span>
+        </button>
+      </div>
+
       {/* Main Container Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         
-        {/* RECOMMENDED DIRECT SYNC METHOD (COLUMN 1 & 2 SPAN) */}
+        {/* LEFT COLUMN (COLUMN 1 & 2 SPAN) */}
         <div className="lg:col-span-8 space-y-6">
           
-          <div className="bg-white rounded-2xl p-6 border-2 border-[#00685f]/30 shadow-md space-y-6 relative overflow-hidden">
-            {/* Recommendation badge */}
-            <div className="absolute top-0 right-0 bg-[#00685f] text-white text-[10px] font-extrabold px-3 py-1 rounded-bl-xl tracking-wider uppercase flex items-center gap-1">
-              <Sparkles className="w-3 h-3 animate-pulse" />
-              <span>Rekomendasi Utama</span>
-            </div>
-
-            <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2 pb-3 border-b border-[#bcc9c6]/20">
-              <Database className="w-5 h-5 text-[#00685f]" />
-              <span>Sinkronisasi Otomatis Google Sheets (OAuth 2.0)</span>
-            </h3>
-
-            {/* Auth check render */}
-            {!user ? (
-              <div className="py-6 flex flex-col items-center justify-center text-center space-y-4">
-                <div className="p-4 bg-teal-50 rounded-full border border-teal-100">
-                  <FileSpreadsheet className="w-12 h-12 text-[#00685f]" />
-                </div>
-                <div className="max-w-md space-y-2">
-                  <h4 className="font-extrabold text-sm text-[#0b1c30]">Sambungkan Akun Google Anda</h4>
-                  <p className="text-xs text-gray-500 leading-relaxed font-medium">
-                    Hubungkan portal BK SMP Negeri 2 Susukan ini secara langsung dengan Google Drive Anda. Kami akan secara otomatis mengelola spreadsheet <strong className="text-gray-700">"Database BK Sekolah"</strong> secara langsung dan instan tanpa perlu repot mengatur kode skrip!
-                  </p>
-                </div>
-
-                {/* Google Sign In Button */}
-                <button
-                  type="button"
-                  onClick={handleGoogleLogin}
-                  disabled={isLoggingIn}
-                  className="mt-2 flex items-center gap-3 bg-white hover:bg-gray-50 border border-gray-300 rounded-xl px-6 py-3 shadow-sm transition-all duration-150 cursor-pointer text-[#3c4043] font-bold text-sm select-none disabled:opacity-50 active:scale-98"
-                >
-                  {isLoggingIn ? (
-                    <RefreshCw className="w-5 h-5 animate-spin text-gray-400" />
-                  ) : (
-                    <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-5 h-5 block">
-                      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
-                      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
-                      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
-                      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
-                      <path fill="none" d="M0 0h48v48H0z"></path>
-                    </svg>
-                  )}
-                  <span>{isLoggingIn ? 'Menghubungkan...' : 'Masuk dengan Akun Google'}</span>
-                </button>
+          {/* TAB 1: MODE APPS SCRIPT WEB APP (SOLUSI BEDA EMAIL) */}
+          {activeTab === 'webapp' && (
+            <div className="bg-white rounded-2xl p-6 border-2 border-[#00685f]/30 shadow-md space-y-6 relative overflow-hidden animate-in fade-in duration-200">
+              <div className="absolute top-0 right-0 bg-[#00685f] text-white text-[10px] font-extrabold px-3 py-1 rounded-bl-xl tracking-wider uppercase flex items-center gap-1">
+                <Sparkles className="w-3 h-3 animate-pulse" />
+                <span>Disarankan untuk Multi-Guru & Beda Email</span>
               </div>
-            ) : (
-              <div className="space-y-6">
-                
-                {/* Active Connection Profile */}
-                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4.5 bg-gray-50 border border-gray-200 rounded-2xl">
-                  <div className="flex items-center gap-3">
-                    {user.photoURL ? (
-                      <img
-                        src={user.photoURL}
-                        alt={user.displayName || 'User'}
-                        className="w-11 h-11 rounded-full border border-gray-200"
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      <div className="w-11 h-11 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">
-                        <User className="w-6 h-6" />
-                      </div>
-                    )}
-                    <div>
-                      <h4 className="text-xs font-extrabold text-gray-500 uppercase tracking-wider">Terhubung Sebagai:</h4>
-                      <p className="font-bold text-[#0b1c30] text-sm leading-tight mt-0.5">{user.displayName || 'Akun Google Sekolah'}</p>
-                      <p className="text-xs text-gray-500 font-semibold">{user.email}</p>
-                    </div>
+
+              <div className="space-y-1">
+                <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2 pb-2 border-b border-[#bcc9c6]/20">
+                  <CloudLightning className="w-5 h-5 text-amber-500" />
+                  <span>Mode 1: Database Shared Apps Script (Multi-Guru / Beda Email)</span>
+                </h3>
+                <p className="text-xs text-gray-500 font-medium leading-relaxed pt-1">
+                  Metode ini menggunakan 1 URL Web App Google Apps Script. Cukup dikonfigurasi 1x oleh Admin BK Sekolah, lalu URL-nya dipakai oleh <strong>seluruh guru dengan email berbeda</strong> (guru.smp.belajar.id, gmail, dll.) tanpa dibatasi Otorisasi Google Cloud!
+                </p>
+              </div>
+
+              {/* URL Input Form */}
+              <div className="space-y-3 bg-gray-50 p-4 rounded-2xl border border-gray-200">
+                <label className="text-xs font-extrabold text-[#0b1c30] block">
+                  URL Aplikasi Web Apps Script Database Sekolah:
+                </label>
+                <div className="flex flex-col md:flex-row gap-3">
+                  <input
+                    type="url"
+                    value={scriptUrl}
+                    onChange={(e) => setScriptUrl(e.target.value)}
+                    placeholder="https://script.google.com/macros/s/.../exec"
+                    className="flex-1 bg-white border border-[#bcc9c6]/50 rounded-xl px-4 py-3 text-xs text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 font-mono"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={handleSaveUrl}
+                      className="px-4 py-3 bg-[#0b1c30] hover:bg-[#142e4d] text-white rounded-xl text-xs font-extrabold transition-colors cursor-pointer"
+                    >
+                      Simpan URL
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCheckConnection}
+                      disabled={checkStatus === 'checking'}
+                      className="px-4 py-3 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      {checkStatus === 'checking' && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                      <span>Uji Diagnostik</span>
+                    </button>
                   </div>
-                  
+                </div>
+
+                {/* Quick Share WhatsApp Button */}
+                <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-gray-200/80">
+                  <span className="text-[11px] font-semibold text-gray-500">
+                    Ingin mengirimkan koneksi database ini ke HP/Laptop guru lain?
+                  </span>
                   <button
-                    onClick={handleGoogleLogout}
-                    className="flex items-center gap-1 px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 hover:text-red-800 border border-red-100 rounded-xl text-xs font-bold transition-all cursor-pointer active:scale-95"
+                    type="button"
+                    onClick={handleShareDatabaseLink}
+                    className="inline-flex items-center gap-2 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-xl text-xs shadow-xs transition-colors cursor-pointer shrink-0"
                   >
-                    <LogOut className="w-3.5 h-3.5" />
-                    <span>Keluar Akun</span>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Bagikan Pesan ke WhatsApp Guru</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Push & Pull Action Buttons */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-4 border border-teal-100 bg-teal-50/50 rounded-2xl flex flex-col justify-between space-y-3">
+                  <div className="space-y-1">
+                    <span className="text-[9px] font-extrabold bg-[#00685f] text-white px-2 py-0.5 rounded uppercase tracking-wider">Kirim</span>
+                    <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">Kirim Data ke Apps Script</h4>
+                    <p className="text-xs text-gray-600 font-medium leading-relaxed">
+                      Unggah seluruh data lokal dari browser ini ke Google Spreadsheet sekolah.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleExportData}
+                    disabled={isSyncing}
+                    className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
+                  >
+                    {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
+                    <span>Kirim Data Ke Spreadsheet</span>
                   </button>
                 </div>
 
-                {/* Status Notice Indicator */}
-                {directSyncStatus !== 'idle' && (
-                  <div className={`p-4 rounded-xl border flex items-start gap-3 animate-in slide-in-from-top-3 ${
-                    directSyncStatus === 'connecting' || directSyncStatus === 'syncing' 
-                      ? 'bg-blue-50/70 border-blue-200 text-blue-800' :
-                    directSyncStatus === 'connected' || directSyncStatus === 'success' 
-                      ? 'bg-[#e6fcf5] border-[#00685f]/20 text-[#00685f]' :
-                    'bg-red-50 border-red-200 text-red-800'
-                  }`}>
-                    {directSyncStatus === 'connecting' || directSyncStatus === 'syncing' ? (
-                      <RefreshCw className="w-5 h-5 animate-spin mt-0.5 text-blue-600" />
-                    ) : directSyncStatus === 'connected' || directSyncStatus === 'success' ? (
-                      <div className="p-1 bg-[#00685f]/10 rounded-full shrink-0">
-                        <CheckCircle2 className="w-4 h-4 text-[#00685f]" />
-                      </div>
-                    ) : (
-                      <div className="p-1 bg-red-100 rounded-full shrink-0">
-                        <AlertCircle className="w-4 h-4 text-red-700" />
-                      </div>
-                    )}
-                    <div className="space-y-0.5">
-                      <h4 className="text-xs font-extrabold uppercase tracking-wider">
-                        {directSyncStatus === 'connecting' ? 'Menghubungkan Drive...' :
-                         directSyncStatus === 'syncing' ? 'Sedang Sinkronisasi...' :
-                         directSyncStatus === 'connected' ? 'Basis Data Terkoneksi' :
-                         directSyncStatus === 'success' ? 'Sinkronisasi Berhasil' : 'Koneksi Gagal'}
-                      </h4>
-                      <p className="text-xs font-semibold leading-relaxed opacity-95">{directSyncMessage}</p>
-                    </div>
+                <div className="p-4 border border-purple-100 bg-purple-50/50 rounded-2xl flex flex-col justify-between space-y-3">
+                  <div className="space-y-1">
+                    <span className="text-[9px] font-extrabold bg-purple-600 text-white px-2 py-0.5 rounded uppercase tracking-wider">Tarik</span>
+                    <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">Tarik Data dari Apps Script</h4>
+                    <p className="text-xs text-gray-600 font-medium leading-relaxed">
+                      Unduh dan sinkronkan data terbaru dari Google Spreadsheet sekolah ke browser ini.
+                    </p>
                   </div>
-                )}
+                  <button
+                    type="button"
+                    onClick={handleImportData}
+                    disabled={isSyncing}
+                    className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
+                  >
+                    {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                    <span>Tarik Data Dari Spreadsheet</span>
+                  </button>
+                </div>
+              </div>
 
-                {/* Active Spreadsheet Details */}
-                {spreadsheetId && (
-                  <div className="p-4 bg-emerald-50/40 border border-emerald-100 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="space-y-0.5">
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#00685f] inline-block"></span>
-                        <h5 className="font-extrabold text-[#0b1c30] text-xs uppercase tracking-wider">File Spreadsheet Terbuka:</h5>
-                      </div>
-                      <p className="text-sm font-bold text-emerald-800">Database BK Sekolah</p>
-                      <p className="text-[10px] text-gray-400 font-mono">ID: {spreadsheetId.substring(0, 24)}...</p>
+              {/* Diagnostics Results */}
+              {checkStatus !== 'idle' && (
+                <div className="p-5 rounded-2xl border bg-[#fbfdff] border-[#bcc9c6]/30 space-y-4 animate-in slide-in-from-top-3">
+                  <div className="flex items-center justify-between border-b border-[#bcc9c6]/20 pb-3">
+                    <h4 className="font-extrabold text-sm text-[#0b1c30] flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-[#00685f]" />
+                      <span>Hasil Diagnostik Koneksi Apps Script</span>
+                    </h4>
+                    <span className={`text-[10px] font-extrabold px-2.5 py-0.5 rounded-full ${
+                      diagnostics?.codeMatched ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
+                    }`}>
+                      {diagnostics?.codeMatched ? 'TERHUBUNG DENGAN BAIK' : 'PERLU PERBAIKAN'}
+                    </span>
+                  </div>
+
+                  {diagnostics && (
+                    <div className="space-y-3 text-xs">
+                      <p className="text-gray-700 font-semibold leading-relaxed">{diagnostics.details}</p>
+                      
+                      {diagnostics.actionItems.length > 0 && (
+                        <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3.5 space-y-2">
+                          <p className="font-extrabold text-amber-900 text-[11px] uppercase tracking-wider">Rekomendasi Langkah:</p>
+                          <ul className="list-disc list-inside space-y-1 text-amber-900/90 font-medium text-[11px] leading-relaxed">
+                            {diagnostics.actionItems.map((item, i) => (
+                              <li key={i}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 2: MODE OAUTH DIRECT DRIVE */}
+          {activeTab === 'oauth' && (
+            <div className="bg-white rounded-2xl p-6 border-2 border-[#00685f]/30 shadow-md space-y-6 relative overflow-hidden animate-in fade-in duration-200">
+              <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2 pb-3 border-b border-[#bcc9c6]/20">
+                <Database className="w-5 h-5 text-[#00685f]" />
+                <span>Mode 2: Sinkronisasi Google Drive Per-Akun (OAuth 2.0)</span>
+              </h3>
+
+              {!user ? (
+                <div className="py-6 flex flex-col items-center justify-center text-center space-y-5">
+                  <div className="p-4 bg-teal-50 rounded-full border border-teal-100">
+                    <FileSpreadsheet className="w-12 h-12 text-[#00685f]" />
+                  </div>
+                  <div className="max-w-md space-y-2">
+                    <h4 className="font-extrabold text-sm text-[#0b1c30]">Sambungkan Akun Google Anda</h4>
+                    <p className="text-xs text-gray-500 leading-relaxed font-medium">
+                      Hubungkan portal BK ini secara langsung dengan Google Drive pribadi Anda. Kami akan secara otomatis mengelola file <strong className="text-gray-700">"Database BK Sekolah"</strong> di Drive Anda.
+                    </p>
+                  </div>
+
+                  {/* Dual Google Sign In Buttons */}
+                  <div className="flex flex-col sm:flex-row items-center justify-center gap-3 w-full max-w-md pt-2">
+                    <button
+                      type="button"
+                      onClick={handleGoogleLogin}
+                      disabled={isLoggingIn}
+                      className="w-full sm:w-auto flex-1 flex items-center justify-center gap-2.5 bg-white hover:bg-gray-50 border border-gray-300 rounded-xl px-4 py-3 shadow-xs transition-all duration-150 cursor-pointer text-[#3c4043] font-extrabold text-xs select-none disabled:opacity-50 active:scale-98"
+                    >
+                      {isLoggingIn ? <RefreshCw className="w-4 h-4 animate-spin text-gray-400" /> : <LogIn className="w-4 h-4 text-emerald-600" />}
+                      <span>Masuk (Mode Pop-up)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleGoogleRedirectLogin}
+                      disabled={isLoggingIn}
+                      className="w-full sm:w-auto flex-1 flex items-center justify-center gap-2 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl px-4 py-3 shadow-xs transition-all duration-150 cursor-pointer font-extrabold text-xs select-none disabled:opacity-50 active:scale-98"
+                    >
+                      <LogIn className="w-4 h-4 text-amber-300" />
+                      <span>Masuk Redirect (HP / Mobil)</span>
+                    </button>
+                  </div>
+
+                  {/* Access Blocked Warning Box */}
+                  <div className="w-full max-w-xl mt-4 bg-amber-50/80 border border-amber-200/80 rounded-2xl p-4 text-left space-y-3 text-xs">
+                    <div className="flex items-center justify-between gap-2 border-b border-amber-200/80 pb-2">
+                      <div className="flex items-center gap-1.5 font-bold text-red-700 text-[11px]">
+                        <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+                        <span>Email Teman/Rekan Guru Belum Terdaftar?</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowAccessBlockedModal(true)}
+                        className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-extrabold rounded-lg text-[11px] cursor-pointer shadow-xs transition-colors shrink-0"
+                      >
+                        Solusi "Error 403: access_denied"
+                      </button>
+                    </div>
+                    <p className="text-amber-900/90 font-medium text-[11px] leading-relaxed">
+                      Atau gunakan <strong>"Mode 1: Apps Script"</strong> di tab atas yang dapat dipakai oleh semua email guru tanpa memerlukan izin Google Cloud Console!
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {/* Connected Profile */}
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4.5 bg-gray-50 border border-gray-200 rounded-2xl">
+                    <div className="flex items-center gap-3">
+                      {user.photoURL ? (
+                        <img
+                          src={user.photoURL}
+                          alt={user.displayName || 'User'}
+                          className="w-11 h-11 rounded-full border border-gray-200"
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : (
+                        <div className="w-11 h-11 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">
+                          <User className="w-6 h-6" />
+                        </div>
+                      )}
+                      <div>
+                        <h4 className="text-xs font-extrabold text-gray-500 uppercase tracking-wider">Terhubung Sebagai:</h4>
+                        <p className="font-bold text-[#0b1c30] text-sm leading-tight mt-0.5">{user.displayName || 'Akun Google Sekolah'}</p>
+                        <p className="text-xs text-gray-500 font-semibold">{user.email}</p>
+                      </div>
+                    </div>
+                    
+                    <button
+                      type="button"
+                      onClick={handleGoogleLogout}
+                      className="flex items-center gap-1 px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 hover:text-red-800 border border-red-100 rounded-xl text-xs font-bold transition-all cursor-pointer active:scale-95"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Keluar Akun</span>
+                    </button>
+                  </div>
+
+                  {/* Sync Status Notice */}
+                  {directSyncStatus !== 'idle' && (
+                    <div className={`p-4 rounded-xl border flex items-start gap-3 animate-in slide-in-from-top-3 ${
+                      directSyncStatus === 'connecting' || directSyncStatus === 'syncing' 
+                        ? 'bg-blue-50/70 border-blue-200 text-blue-800' :
+                      directSyncStatus === 'connected' || directSyncStatus === 'success' 
+                        ? 'bg-[#e6fcf5] border-[#00685f]/20 text-[#00685f]' :
+                      'bg-red-50 border-red-200 text-red-800'
+                    }`}>
+                      {directSyncStatus === 'connecting' || directSyncStatus === 'syncing' ? (
+                        <RefreshCw className="w-5 h-5 animate-spin mt-0.5 text-blue-600" />
+                      ) : (
+                        <CheckCircle2 className="w-4 h-4 text-[#00685f]" />
+                      )}
+                      <div className="space-y-0.5 flex-1">
+                        <h4 className="text-xs font-extrabold uppercase tracking-wider">
+                          {directSyncStatus === 'connecting' ? 'Menghubungkan Drive...' :
+                           directSyncStatus === 'syncing' ? 'Sedang Sinkronisasi...' :
+                           directSyncStatus === 'connected' ? 'Basis Data Terkoneksi' : 'Koneksi Berhasil'}
+                        </h4>
+                        <p className="text-xs font-semibold leading-relaxed opacity-95">{directSyncMessage}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Active Spreadsheet Details */}
+                  {spreadsheetId && (
+                    <div className="p-4 bg-emerald-50/40 border border-emerald-100 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="space-y-0.5">
+                        <h5 className="font-extrabold text-[#0b1c30] text-xs uppercase tracking-wider">File Spreadsheet Terbuka:</h5>
+                        <p className="text-sm font-bold text-emerald-800">Database BK Sekolah</p>
+                        <p className="text-[10px] text-gray-400 font-mono">ID: {spreadsheetId.substring(0, 24)}...</p>
+                      </div>
+
+                      {spreadsheetUrl && (
+                        <a
+                          href={spreadsheetUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1.5 px-4.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold shadow-sm transition-colors cursor-pointer"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>Buka Spreadsheet di Drive</span>
+                        </a>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Push & Pull Actions */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                    <button
+                      type="button"
+                      onClick={handleDirectExport}
+                      disabled={directSyncStatus === 'syncing' || !spreadsheetId}
+                      className="py-3 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <Database className="w-4 h-4" />
+                      <span>Ekspor & Cadangkan Data</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleDirectImport}
+                      disabled={directSyncStatus === 'syncing' || !spreadsheetId}
+                      className="py-3 px-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                      <span>Impor & Timpa Data Lokal</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 3: CUSTOM SPREADSHEET ID */}
+          {activeTab === 'custom_id' && (
+            <div className="bg-white rounded-2xl p-6 border-2 border-[#00685f]/30 shadow-md space-y-6 relative overflow-hidden animate-in fade-in duration-200">
+              <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2 pb-3 border-b border-[#bcc9c6]/20">
+                <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
+                <span>Mode 3: Pengaturan ID Google Spreadsheet Custom</span>
+              </h3>
+
+              <div className="space-y-4 text-xs text-gray-700 leading-relaxed font-medium">
+                <p>
+                  Jika Anda memiliki file Google Spreadsheet lain yang ingin dijadikan acuan basis data khusus, Anda dapat menyimpan ID Spreadsheet-nya di sini.
+                </p>
+
+                <div className="p-4 bg-emerald-50/60 border border-emerald-200 rounded-2xl space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-extrabold text-emerald-950 text-xs">ID Spreadsheet Terpasang Saat Ini:</span>
+                    <span className="text-[10px] bg-emerald-200 text-emerald-900 font-bold px-2 py-0.5 rounded">CUSTOM</span>
+                  </div>
+                  <p className="font-mono bg-white p-2.5 rounded-xl border border-emerald-200 text-gray-800 break-all select-all font-bold">
+                    {spreadsheetId || '(Belum ada ID diset)'}
+                  </p>
+
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleSaveSpreadsheetCustomId}
+                      className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-extrabold transition-colors cursor-pointer shadow-xs"
+                    >
+                      Ubah / Masukkan ID Spreadsheet Baru
+                    </button>
 
                     {spreadsheetUrl && (
                       <a
                         href={spreadsheetUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex items-center gap-1.5 px-4.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold shadow-sm transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-white border border-emerald-300 text-emerald-800 hover:bg-emerald-100/50 rounded-xl text-xs font-extrabold transition-colors cursor-pointer"
                       >
                         <ExternalLink className="w-3.5 h-3.5" />
                         <span>Buka Spreadsheet di Drive</span>
                       </a>
                     )}
                   </div>
-                )}
-
-                {/* Action Controls */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4.5 pt-4 border-t border-[#bcc9c6]/20">
-                  {/* Export */}
-                  <div className="p-4 border border-[#bcc9c6]/30 bg-[#fbfdff] rounded-xl flex flex-col justify-between space-y-3">
-                    <div className="space-y-1">
-                      <span className="text-[9px] font-extrabold bg-[#00685f]/15 text-[#00685f] px-2.5 py-0.5 rounded-full uppercase tracking-wider">Cadangkan</span>
-                      <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">Ekspor Instan ke Google Sheets</h4>
-                      <p className="text-xs text-[#3d4947]/75 font-semibold leading-relaxed">
-                        Kirim data lokal browser saat ini (Siswa, Pelanggaran, Jurnal Layanan, Absensi) langsung ke sheet bersangkutan di awan.
-                      </p>
-                    </div>
-                    <button
-                      onClick={handleDirectExport}
-                      disabled={directSyncStatus === 'syncing' || !spreadsheetId}
-                      className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {directSyncStatus === 'syncing' ? (
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Database className="w-4 h-4" />
-                      )}
-                      <span>Ekspor &amp; Cadangkan Data</span>
-                    </button>
-                  </div>
-
-                  {/* Import */}
-                  <div className="p-4 border border-[#bcc9c6]/30 bg-[#fbfdff] rounded-xl flex flex-col justify-between space-y-3">
-                    <div className="space-y-1">
-                      <span className="text-[9px] font-extrabold bg-purple-100 text-purple-700 px-2.5 py-0.5 rounded-full uppercase tracking-wider">Unduh</span>
-                      <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">Impor Instan dari Google Sheets</h4>
-                      <p className="text-xs text-[#3d4947]/75 font-semibold leading-relaxed">
-                        Tarik data awan Google Spreadsheet Anda saat ini untuk menggantikan seluruh data lokal browser secara keseluruhan.
-                      </p>
-                    </div>
-                    <button
-                      onClick={handleDirectImport}
-                      disabled={directSyncStatus === 'syncing' || !spreadsheetId}
-                      className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {directSyncStatus === 'syncing' ? (
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <RefreshCw className="w-4 h-4" />
-                      )}
-                      <span>Impor &amp; Timpa Data Lokal</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Local direct sync logs */}
-                {syncHistory.length > 0 && (
-                  <div className="pt-4 border-t border-[#bcc9c6]/10">
-                    <h4 className="text-[10px] font-extrabold text-[#0b1c30] uppercase tracking-wider mb-2 flex items-center gap-1">
-                      <span>Log Aktivitas Sinkronisasi Langsung Terakhir</span>
-                    </h4>
-                    <div className="bg-[#f8f9ff] border border-gray-100 rounded-xl divide-y divide-gray-100 text-[11px] font-semibold">
-                      {syncHistory.map((item, idx) => (
-                        <div key={idx} className="flex justify-between items-center p-2.5">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`w-1.5 h-1.5 rounded-full ${item.type === 'push' ? 'bg-[#00685f]' : 'bg-purple-500'}`}></span>
-                            <span className="text-gray-700">
-                              {item.type === 'push' ? 'Ekspor Data (Push)' : 'Impor Data (Pull)'}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2 text-gray-500 font-medium">
-                            <span>{item.time}</span>
-                            <span className={`text-[9px] font-extrabold px-1.5 py-0.2 rounded border uppercase ${
-                              item.status === 'success' 
-                                ? 'bg-emerald-50 text-emerald-700 border-emerald-100' 
-                                : 'bg-red-50 text-red-700 border-red-100'
-                            }`}>
-                              {item.status === 'success' ? 'Sukses' : 'Gagal'}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-              </div>
-            )}
-          </div>
-
-          {/* ADVANCED METHOD: MANUAL APPS SCRIPT WEB APP */}
-          <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-6">
-            <div className="flex items-center justify-between border-b border-[#bcc9c6]/20 pb-3">
-              <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2">
-                <CloudLightning className="w-5 h-5 text-gray-500" />
-                <span>Metode Aplikasi Web Apps Script (Alternatif/Lanjutan)</span>
-              </h3>
-              <span className="text-[9px] font-extrabold bg-gray-100 text-gray-500 border border-gray-200 px-2 py-0.5 rounded">OPSIONAL</span>
-            </div>
-
-            <p className="text-xs text-gray-500 leading-relaxed font-semibold">
-              Anda juga bisa menyambungkan data via webhook deployment Google Apps Script (GAS) jika ingin mengizinkan API eksternal pihak ketiga memanggil basis data secara otonom.
-            </p>
-
-            {/* URL Input Form */}
-            <div className="space-y-3">
-              <label className="text-xs font-bold text-[#0b1c30] block">
-                URL Aplikasi Web Google Apps Script (GAS)
-              </label>
-              <div className="flex flex-col md:flex-row gap-3">
-                <input
-                  type="url"
-                  value={scriptUrl}
-                  onChange={(e) => setScriptUrl(e.target.value)}
-                  placeholder="https://script.google.com/macros/s/.../exec"
-                  className="flex-1 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-4 py-3 text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 font-mono"
-                />
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={handleSaveUrl}
-                    className="px-4 py-3 bg-[#0b1c30] hover:bg-[#142e4d] text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
-                  >
-                    Simpan URL
-                  </button>
-                  <button
-                    onClick={handleCheckConnection}
-                    disabled={checkStatus === 'checking'}
-                    className="px-4 py-3 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                  >
-                    {checkStatus === 'checking' && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                    <span>Check Connection</span>
-                  </button>
-                  <button
-                    onClick={handleTestConnection}
-                    disabled={connectionStatus === 'testing'}
-                    className="px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                  >
-                    {connectionStatus === 'testing' && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                    <span>Uji Koneksi Singkat</span>
-                  </button>
                 </div>
               </div>
             </div>
+          )}
 
-            {/* Detailed Connection Diagnostics Display */}
-            {checkStatus !== 'idle' && (
-              <div className="p-5 rounded-2xl border bg-[#fbfdff] border-[#bcc9c6]/30 space-y-4 animate-in slide-in-from-top-3">
-                <div className="flex items-center justify-between border-b border-[#bcc9c6]/10 pb-2.5">
-                  <h4 className="text-xs font-extrabold uppercase tracking-wider text-[#0b1c30] flex items-center gap-1.5">
-                    <CloudLightning className="w-4 h-4 text-[#00685f] animate-pulse" />
-                    <span>Hasil Diagnostik Koneksi Browser</span>
-                  </h4>
-                  <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded border uppercase ${
-                    checkStatus === 'checking' ? 'bg-blue-50 text-blue-700 border-blue-100' :
-                    (diagnostics?.codeMatched ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-100')
-                  }`}>
-                    {checkStatus === 'checking' ? 'Menganalisis...' : (diagnostics?.codeMatched ? 'Sempurna' : 'Perlu Tindakan')}
-                  </span>
-                </div>
-
-                {/* Steps checklist */}
-                <div className="space-y-2.5 text-xs">
-                  {/* Step 1: URL Format */}
-                  <div className="flex items-center justify-between p-2 rounded-lg bg-gray-50/50">
-                    <span className="font-semibold text-gray-700">1. Validasi Format URL</span>
-                    {checkStatus === 'checking' ? (
-                      <RefreshCw className="w-4 h-4 text-blue-500 animate-spin" />
-                    ) : diagnostics?.urlValid ? (
-                      <span className="text-emerald-600 font-extrabold flex items-center gap-1">✔ Benar</span>
-                    ) : (
-                      <span className="text-red-500 font-extrabold flex items-center gap-1">❌ Salah</span>
-                    )}
-                  </div>
-
-                  {/* Step 2: Reachability */}
-                  <div className="flex items-center justify-between p-2 rounded-lg bg-gray-50/50">
-                    <span className="font-semibold text-gray-700">2. Jangkauan Server (Ping Jaringan)</span>
-                    {checkStatus === 'checking' ? (
-                      <RefreshCw className="w-4 h-4 text-blue-500 animate-spin" />
-                    ) : diagnostics?.reachable ? (
-                      <span className="text-emerald-600 font-extrabold flex items-center gap-1">✔ Terhubung</span>
-                    ) : (
-                      <span className="text-red-500 font-extrabold flex items-center gap-1">❌ Terputus</span>
-                    )}
-                  </div>
-
-                  {/* Step 3: CORS security */}
-                  <div className="flex items-center justify-between p-2 rounded-lg bg-gray-50/50">
-                    <span className="font-semibold text-gray-700">3. Izin Keamanan CORS Browser</span>
-                    {checkStatus === 'checking' ? (
-                      <RefreshCw className="w-4 h-4 text-blue-500 animate-spin" />
-                    ) : diagnostics?.corsPassed ? (
-                      <span className="text-emerald-600 font-extrabold flex items-center gap-1">✔ Lolos</span>
-                    ) : diagnostics?.reachable ? (
-                      <span className="text-amber-500 font-extrabold flex items-center gap-1">⚠️ Terblokir</span>
-                    ) : (
-                      <span className="text-gray-400 font-extrabold flex items-center gap-1">-</span>
-                    )}
-                  </div>
-
-                  {/* Step 4: Code matching */}
-                  <div className="flex items-center justify-between p-2 rounded-lg bg-gray-50/50">
-                    <span className="font-semibold text-gray-700">4. Kesesuaian Versi Kode Apps Script</span>
-                    {checkStatus === 'checking' ? (
-                      <RefreshCw className="w-4 h-4 text-blue-500 animate-spin" />
-                    ) : diagnostics?.codeMatched ? (
-                      <span className="text-emerald-600 font-extrabold flex items-center gap-1">✔ Sesuai (Aktif)</span>
-                    ) : diagnostics?.corsPassed ? (
-                      <span className="text-red-500 font-extrabold flex items-center gap-1">❌ Outdated / Salah</span>
-                    ) : (
-                      <span className="text-gray-400 font-extrabold flex items-center gap-1">-</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Narrative Diagnostic Message */}
-                {checkStatus === 'completed' && diagnostics && (
-                  <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-100 text-xs leading-relaxed space-y-3">
-                    <div>
-                      <h5 className="font-extrabold text-gray-800 mb-1">Hasil Analisis:</h5>
-                      <p className="text-gray-600 font-semibold">{diagnostics.details}</p>
-                    </div>
-
-                    {diagnostics.actionItems.length > 0 && (
-                      <div className="pt-2.5 border-t border-gray-200/50">
-                        <h5 className="font-extrabold text-[#00685f] mb-1.5">Langkah Penyelesaian:</h5>
-                        <ul className="list-disc pl-4.5 space-y-1.5 text-gray-600 font-medium">
-                          {diagnostics.actionItems.map((item, idx) => (
-                            <li key={idx}>{item}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Traditional Status Display Banner */}
-            {connectionStatus !== 'idle' && (
-              <div className={`p-4 rounded-xl border flex items-start gap-3 animate-in slide-in-from-top-3 ${
-                connectionStatus === 'testing' ? 'bg-[#f8f9ff] border-blue-200 text-blue-700' :
-                connectionStatus === 'success' ? 'bg-[#e6fcf5] border-[#00685f]/20 text-[#00685f]' :
-                'bg-red-50 border-red-200 text-red-700'
-              }`}>
-                {connectionStatus === 'testing' ? (
-                  <RefreshCw className="w-5 h-5 animate-spin mt-0.5" />
-                ) : connectionStatus === 'success' ? (
-                  <div className="p-1 bg-[#00685f]/10 rounded-full shrink-0">
-                    <Check className="w-4 h-4 text-[#00685f]" />
-                  </div>
-                ) : (
-                  <div className="p-1 bg-red-100 rounded-full shrink-0">
-                    <AlertTriangle className="w-4 h-4 text-red-700" />
-                  </div>
-                )}
-                <div className="space-y-1">
-                  <h4 className="text-xs font-bold uppercase tracking-wider">
-                    {connectionStatus === 'testing' ? 'Menguji Koneksi' :
-                     connectionStatus === 'success' ? 'Koneksi Berhasil' : 'Koneksi Gagal'}
-                  </h4>
-                  <p className="text-xs font-medium leading-relaxed opacity-90">{statusMessage}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Sync Trigger Panel */}
-            <div className="pt-4 border-t border-[#bcc9c6]/20">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Push Box */}
-                <div className="p-4 bg-[#f8f9ff] border border-[#bcc9c6]/20 rounded-xl space-y-3 flex flex-col justify-between">
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-bold bg-[#00685f]/10 text-[#00685f] px-2 py-0.5 rounded-full uppercase">Kirim via GAS</span>
-                    <h5 className="font-bold text-[#0b1c30] text-sm mt-1">Ekspor ke Spreadsheet</h5>
-                    <p className="text-xs text-[#3d4947]/75 font-medium leading-relaxed">
-                      Kirim data lokal browser ke Web App Apps Script Anda.
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleExportData}
-                    disabled={isSyncing}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-gray-800 hover:bg-gray-900 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
-                  >
-                    {isSyncing ? (
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Database className="w-4 h-4" />
-                    )}
-                    <span>Kirim via Apps Script</span>
-                  </button>
-                </div>
-
-                {/* Pull Box */}
-                <div className="p-4 bg-[#f8f9ff] border border-[#bcc9c6]/20 rounded-xl space-y-3 flex flex-col justify-between">
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-bold bg-purple-50 text-purple-600 px-2 py-0.5 rounded-full uppercase">Tarik via GAS</span>
-                    <h5 className="font-bold text-[#0b1c30] text-sm mt-1">Impor dari Spreadsheet</h5>
-                    <p className="text-xs text-[#3d4947]/75 font-medium leading-relaxed">
-                      Tarik data terbaru dari Spreadsheet via Web App Apps Script.
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleImportData}
-                    disabled={isSyncing}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-purple-500 hover:bg-purple-600 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
-                  >
-                    {isSyncing ? (
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-4 h-4" />
-                    )}
-                    <span>Tarik via Apps Script</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-          
         </div>
 
         {/* INSTRUCTIONS COLUMN (SPAN 4) */}
@@ -1210,7 +1417,7 @@ function readTab(ss, tabName, headers) {
           <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-6">
             <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2 pb-3 border-b border-[#bcc9c6]/20">
               <HelpCircle className="w-5 h-5 text-[#00685f]" />
-              <span>Panduan &amp; Informasi</span>
+              <span>Panduan & Informasi</span>
             </h3>
 
             <div className="space-y-5 text-xs text-[#3d4947] font-semibold leading-relaxed">
@@ -1223,7 +1430,7 @@ function readTab(ss, tabName, headers) {
                   Cukup masuk menggunakan akun Google Anda. Sistem akan mencari file bernama <strong>"Database BK Sekolah"</strong> di Drive Anda atau membuatnya secara otomatis jika belum ada.
                 </p>
                 <p className="text-[#3d4947]/90 text-[11px] font-bold">
-                  Siswa, Pelanggaran, Jurnal Layanan BK, dan Absensi akan langsung diorganisasikan ke dalam tab-tab spreadsheet bersangkutan secara otomatis!
+                  Siswa, Pelanggaran, Jurnal Layanan BK, Absensi, Jurnal Harian, dan Home Visit akan langsung diorganisasikan ke dalam tab-tab spreadsheet bersangkutan secara otomatis!
                 </p>
               </div>
 
@@ -1311,6 +1518,109 @@ function readTab(ss, tabName, headers) {
         </div>
 
       </div>
+
+      {/* Modal Panduan Solusi Access Blocked / Error 403 */}
+      {showAccessBlockedModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto border border-gray-100 text-left">
+            <div className="flex items-start justify-between gap-4 border-b border-gray-100 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-3 bg-red-100 rounded-2xl text-red-600">
+                  <ShieldAlert className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-base text-gray-900">Solusi "Access blocked: Error 403: access_denied"</h3>
+                  <p className="text-xs text-gray-500 font-medium">Panduan Mendaftarkan Email Guru / Staf di Google Cloud Console</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAccessBlockedModal(false)}
+                className="p-2 text-gray-400 hover:text-gray-600 rounded-xl hover:bg-gray-100 cursor-pointer transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs leading-relaxed text-gray-700">
+              <div className="p-4 bg-red-50 border border-red-200 rounded-2xl text-red-900 space-y-1.5 font-medium">
+                <p className="font-bold text-sm">Mengapa Pesan Ini Muncul?</p>
+                <p>
+                  Google memblokir login karena project Google Cloud (<code>gen-lang-client-0064829073</code>) masih berstatus <strong>"Testing" (Pengujian)</strong>. Dalam status ini, Google hanya mengizinkan email yang sudah didaftarkan secara khusus di daftar <strong>Test Users</strong>.
+                </p>
+              </div>
+
+              <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 space-y-1 text-[11px] font-medium">
+                <p className="font-bold text-xs text-amber-950 flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Mengapa Tombol "+ Add User" di Identity Platform (Layar Anda) Tidak Bisa Diklik?</span>
+                </p>
+                <p>
+                  Menu <em>Identity Platform / Users</em> di Google Cloud Console digunakan untuk registrasi email/password manual bawaan Firebase. Tombol tersebut mati/disabled untuk Google Sign-In.
+                </p>
+                <p className="font-bold text-amber-950">
+                  Tombol yang benar untuk menambah Test User Google OAuth ada di menu: <strong>APIs & Services &rarr; OAuth consent screen &rarr; Test users &rarr; + ADD USERS</strong>.
+                </p>
+              </div>
+
+              <div className="space-y-3 bg-gray-50 p-4 rounded-2xl border border-gray-200">
+                <h4 className="font-extrabold text-gray-900 text-xs uppercase tracking-wider text-[#00685f]">
+                  Langkah Tepat Membuka Akses (Step-by-Step):
+                </h4>
+                
+                <ol className="space-y-2.5 list-decimal list-inside font-medium text-gray-800 leading-relaxed">
+                  <li className="pl-1">
+                    Klik atau buka link berikut: <a href="https://console.cloud.google.com/apis/credentials/consent?project=gen-lang-client-0064829073" target="_blank" rel="noreferrer" className="text-teal-700 underline font-bold">Google Cloud Console - OAuth Consent Screen</a>.
+                  </li>
+                  <li className="pl-1">
+                    Pastikan nama project di bagian atas layar menunjukkan: <code className="bg-emerald-100 text-emerald-900 px-1.5 py-0.5 rounded font-mono font-bold">Default Gemini Project (gen-lang-client-0064829073)</code>.
+                  </li>
+                  <li className="pl-1">
+                    Scroll ke bawah sampai menemukan bagian berlabel <strong>Test users</strong>.
+                  </li>
+                  <li className="pl-1">
+                    Klik tombol biru <strong className="text-teal-800 bg-teal-100 px-2 py-0.5 rounded">+ ADD USERS</strong> yang aktif di bagian Test users tersebut.
+                  </li>
+                  <li className="pl-1">
+                    Ketikkan alamat email: <code className="bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-mono font-bold">binasaptarina58@guru.sma.belajar.id</code> lalu klik <strong>SAVE</strong>.
+                  </li>
+                </ol>
+              </div>
+
+              <div className="p-4 bg-teal-50 border border-teal-200 rounded-2xl space-y-2 text-teal-950">
+                <div className="flex items-center gap-2 font-extrabold text-teal-900">
+                  <Check className="w-4 h-4 text-teal-600 shrink-0" />
+                  <span>Aplikasi Tetap Bisa Digunakan Tanpa Login Google!</span>
+                </div>
+                <p className="font-medium text-[11px] leading-relaxed">
+                  Jika belum sempat menambah email di Google Cloud Console, teman Anda <strong>tetap dapat langsung menggunakan seluruh fitur portal BK SMPN 2 Susukan</strong> (input konseling, catat pelanggaran, survey AKPD, cetak laporan PDF) karena data aplikasi tersimpan otomatis di memori lokal browser.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('webapp');
+                  setShowAccessBlockedModal(false);
+                }}
+                className="px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-extrabold rounded-xl text-xs cursor-pointer shadow-xs transition-colors flex items-center gap-1.5"
+              >
+                <CloudLightning className="w-4 h-4" />
+                <span>Beralih ke Mode Apps Script (Beda Email)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAccessBlockedModal(false)}
+                className="px-5 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white font-extrabold rounded-xl text-xs cursor-pointer shadow-xs transition-colors"
+              >
+                Saya Mengerti
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

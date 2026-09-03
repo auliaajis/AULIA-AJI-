@@ -20,6 +20,10 @@ import {
 } from 'lucide-react';
 import { Student, Counselor, HomeVisitRecord } from '../types';
 import { drawLetterhead, getSchoolConfig } from '../utils/pdfGenerator';
+import { triggerBackgroundAutoSync } from '../utils/googleSync';
+import { registerDeletedId } from '../utils/deletionTracker';
+import { autoPushToJournal } from '../utils/journalAutoLink';
+import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore } from '../utils/firestoreSync';
 
 interface SignaturePadProps {
   label: string;
@@ -160,17 +164,11 @@ interface HomeVisitViewProps {
 }
 
 export default function HomeVisitView({ students, activeCounselor }: HomeVisitViewProps) {
+  const isInitialMount = useRef(true);
+
   // Core states
   const [visits, setVisits] = useState<HomeVisitRecord[]>(() => {
-    const saved = localStorage.getItem('bk_home_visits');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        return [];
-      }
-    }
-    return [];
+    return loadSchoolData('bk_home_visits', []);
   });
 
   // Navigation / Modal States
@@ -206,10 +204,40 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
   const [cameraError, setCameraError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Sync to localStorage
+  // Sync to localStorage and Firestore
   useEffect(() => {
-    localStorage.setItem('bk_home_visits', JSON.stringify(visits));
+    saveSchoolData('bk_home_visits', visits);
+    saveBulkToFirestore('bk_home_visits', visits);
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    triggerBackgroundAutoSync();
   }, [visits]);
+
+  // Realtime subscriber for remote changes
+  useEffect(() => {
+    const handleRealtimeUpdate = (e: any) => {
+      if (e.detail?.key === 'bk_home_visits') {
+        if (Array.isArray(e.detail.data)) {
+          setVisits(e.detail.data);
+        } else {
+          setVisits(loadSchoolData('bk_home_visits', []));
+        }
+      }
+    };
+
+    window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
+    window.addEventListener('storage', (e) => {
+      if (e.key === 'bk_home_visits') {
+        handleRealtimeUpdate({ detail: { key: e.key } });
+      }
+    });
+
+    return () => {
+      window.removeEventListener('bk_realtime_sync', handleRealtimeUpdate);
+    };
+  }, []);
 
   // Handle student selection from autocomplete
   const handleSelectStudent = (student: Student) => {
@@ -226,12 +254,14 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
   const studentSuggestions = React.useMemo(() => {
     const query = studentSearch.toLowerCase().trim();
     if (!query) return [];
-    return students.filter(
-      (s) =>
-        s.name.toLowerCase().includes(query) ||
-        s.nis.includes(query) ||
-        s.class.toLowerCase().includes(query)
-    );
+    return students
+      .filter(
+        (s) =>
+          s.name.toLowerCase().includes(query) ||
+          s.nis.includes(query) ||
+          s.class.toLowerCase().includes(query)
+      )
+      .sort((a, b) => a.name.localeCompare(b.name, 'id'));
   }, [studentSearch, students]);
 
   // Handle local file selection / drop
@@ -380,6 +410,22 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
     };
     localStorage.setItem('bk_logs', JSON.stringify([newLog, ...existingLogs]));
 
+    // Automatically push entry directly to Jurnal Harian
+    autoPushToJournal({
+      sourceType: 'summon_visit',
+      date: visitDate,
+      startTime: '09:00',
+      endTime: '10:30',
+      activityType: 'Konsultasi Orang Tua',
+      title: `Kunjungan Rumah (Home Visit) - No: ${reportNumber}`,
+      description: `Laporan Kunjungan Rumah ke kediaman ${selectedStudent.name} (${selectedStudent.class}). Alamat: ${address}. Ditemui: ${parentNameMet}. Tujuan: ${purpose}. Hasil: ${result}. Kesepakatan: ${agreement}`,
+      target: `Siswa ${selectedStudent.name} (${selectedStudent.class}) & Ortu/Wali (${parentNameMet})`,
+      status: 'Selesai',
+      counselorId: activeCounselor.id,
+      proofPhotoUrl: photoUrl,
+      proofPhotoName: photoName
+    });
+
     // Close form and reset fields
     setShowAddForm(false);
     resetFormFields();
@@ -405,6 +451,8 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
   const handleDeleteVisit = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (confirm('Apakah Anda yakin ingin menghapus arsip bukti Home Visit ini?')) {
+      registerDeletedId(id);
+      deleteFromFirestore('bk_home_visits', id);
       setVisits(visits.filter((v) => v.id !== id));
       if (selectedVisit?.id === id) {
         setSelectedVisit(null);
@@ -591,7 +639,13 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
     }
 
     // 6. IV. SIGNATURES
-    contentY = Math.max(contentY, 210); // push signatures to clean area
+    if (contentY + 45 > 275) {
+      doc.addPage();
+      drawLetterhead(doc, primaryColor);
+      contentY = 45;
+    } else {
+      contentY = Math.max(contentY, 215);
+    }
     
     const schoolConfig = getSchoolConfig();
     doc.setFont('Helvetica', 'normal');
@@ -697,7 +751,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
               {/* Autocomplete Student Search */}
               <div className="space-y-1.5 md:col-span-2 relative">
                 <label className="text-xs font-bold text-[#0b1c30] uppercase tracking-wide block">
-                  Cari &amp; Pilih Siswa Target <span className="text-red-500">*</span>
+                  Cari & Pilih Siswa Target <span className="text-red-500">*</span>
                 </label>
                 <div className="relative">
                   <input
@@ -814,7 +868,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
               {/* Purpose / Objective */}
               <div className="space-y-1.5 md:col-span-2">
                 <label className="text-xs font-bold text-[#0b1c30] uppercase tracking-wide block">
-                  Maksud &amp; Tujuan Kunjungan <span className="text-red-500">*</span>
+                  Maksud & Tujuan Kunjungan <span className="text-red-500">*</span>
                 </label>
                 <textarea
                   value={purpose}
@@ -969,7 +1023,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                     <div className="flex flex-col items-center justify-center py-2 text-gray-400">
                       <ImageIcon className="w-8 h-8 mb-1.5 opacity-60" />
                       <p className="text-[11px] font-bold text-gray-500">
-                        Seret &amp; letakkan foto di sini untuk melampirkan secara instan
+                        Seret & letakkan foto di sini untuk melampirkan secara instan
                       </p>
                       <p className="text-[9px] text-gray-400 mt-0.5">
                         Format file: PNG, JPG, JPEG (Max 5MB)
@@ -1015,7 +1069,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                 type="submit"
                 className="flex-1 py-2.5 px-4 rounded-xl bg-[#00685f] hover:bg-[#005049] text-white text-xs font-bold transition-all shadow-md cursor-pointer"
               >
-                Simpan &amp; Terbitkan Laporan
+                Simpan & Terbitkan Laporan
               </button>
             </div>
           </form>

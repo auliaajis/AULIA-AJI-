@@ -30,6 +30,9 @@ export async function getOrCreateSpreadsheet(accessToken: string): Promise<Googl
     });
 
     if (!searchRes.ok) {
+      if (searchRes.status === 401) {
+        throw new Error("UNAUTHENTICATED_SESSION");
+      }
       const errorText = await searchRes.text();
       throw new Error(`Gagal mencari file di Drive: ${errorText}`);
     }
@@ -61,6 +64,9 @@ export async function getOrCreateSpreadsheet(accessToken: string): Promise<Googl
     });
 
     if (!createRes.ok) {
+      if (createRes.status === 401) {
+        throw new Error("UNAUTHENTICATED_SESSION");
+      }
       const errorText = await createRes.text();
       throw new Error(`Gagal membuat Spreadsheet baru: ${errorText}`);
     }
@@ -79,7 +85,25 @@ export async function getOrCreateSpreadsheet(accessToken: string): Promise<Googl
       spreadsheetUrl
     };
   } catch (error: any) {
-    console.error('getOrCreateSpreadsheet Error:', error);
+    const isUnauthenticated = error && error.message && (
+      error.message.includes('invalid authentication credentials') ||
+      error.message.includes('UNAUTHENTICATED') ||
+      error.message.includes('401') ||
+      error.message === 'UNAUTHENTICATED_SESSION'
+    );
+    if (isUnauthenticated) {
+      console.warn('getOrCreateSpreadsheet: Sesi Google Drive/Sheets kedaluwarsa atau tidak sah.', error.message || error);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('bk_google_access_token');
+        window.dispatchEvent(new Event('storage'));
+      }
+      return {
+        success: false,
+        message: 'UNAUTHENTICATED_SESSION'
+      };
+    } else {
+      console.error('getOrCreateSpreadsheet Error:', error);
+    }
     return {
       success: false,
       message: error.message || 'Terjadi kesalahan saat menyiapkan Google Spreadsheet.'
@@ -100,12 +124,30 @@ export async function ensureTabsExist(accessToken: string, spreadsheetId: string
   });
 
   if (!res.ok) {
-    throw new Error('Gagal memeriksa tab spreadsheet.');
+    let detailMsg = '';
+    let isUnauthorized = res.status === 401;
+    try {
+      const errJson = await res.json().catch(() => ({}));
+      detailMsg = errJson?.error?.message || '';
+      if (errJson?.error?.status === 'UNAUTHENTICATED' || errJson?.error?.code === 401) {
+        isUnauthorized = true;
+      }
+    } catch (e) {}
+
+    if (isUnauthorized) {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('bk_google_access_token');
+        window.dispatchEvent(new Event('storage'));
+      }
+      throw new Error("UNAUTHENTICATED_SESSION");
+    }
+
+    throw new Error(`Gagal memeriksa tab spreadsheet. ${detailMsg ? `Detail: ${detailMsg}.` : `Status: ${res.statusText || res.status}.`} Pastikan Anda telah keluar akun (Log Out), masuk kembali (Log In) dengan Google, dan pastikan mencentang/menyetujui seluruh izin Google Sheets dan Google Drive yang diminta.`);
   }
 
   const sheetInfo = await res.json();
   const currentTabs: string[] = sheetInfo.sheets.map((s: any) => s.properties.title);
-  const requiredTabs = ['Siswa', 'Pelanggaran', 'LayananBK', 'Absensi'];
+  const requiredTabs = ['Siswa', 'Pelanggaran', 'Restitusi', 'LayananBK', 'Absensi', 'JurnalHarian', 'HomeVisit', 'Apresiasi_Prestasi'];
   const missingTabs = requiredTabs.filter(tab => !currentTabs.includes(tab));
 
   if (missingTabs.length === 0) return;
@@ -146,6 +188,9 @@ export async function pushDataDirect(
     violations: any[];
     services: any[];
     attendance: any[];
+    journals?: any[];
+    homeVisits?: any[];
+    achievements?: any[];
   },
   force: boolean = false
 ): Promise<{ success: boolean; message: string }> {
@@ -177,27 +222,80 @@ export async function pushDataDirect(
       }
     }
 
+    let students = data.students || [];
+    let violations = data.violations || [];
+    let services = data.services || [];
+    let attendance = data.attendance || [];
+    let journals = data.journals || [];
+    let homeVisits = data.homeVisits || [];
+    let achievements = data.achievements || [];
+
+    if ((!students || students.length === 0) && typeof localStorage !== 'undefined') {
+      const rawS = localStorage.getItem('bk_students');
+      if (rawS) { try { students = JSON.parse(rawS); } catch (e) {} }
+    }
+    if ((!violations || violations.length === 0) && typeof localStorage !== 'undefined') {
+      const rawV = localStorage.getItem('bk_violations');
+      if (rawV) { try { violations = JSON.parse(rawV); } catch (e) {} }
+    }
+    if ((!services || services.length === 0) && typeof localStorage !== 'undefined') {
+      const rawSvc = localStorage.getItem('bk_services');
+      if (rawSvc) { try { services = JSON.parse(rawSvc); } catch (e) {} }
+    }
+    if ((!achievements || achievements.length === 0) && typeof localStorage !== 'undefined') {
+      const rawAch = localStorage.getItem('bk_achievements');
+      if (rawAch) { try { achievements = JSON.parse(rawAch); } catch (e) {} }
+    }
+
+    // Filter data pembinaan (pelanggaran belum/perlu ditangani) dan data restitusi (telah ditangani/dalam proses restitusi)
+    const pembinaanItems = (violations || []).filter((v: any) => !v.handledBy || v.handledBy === 'Belum Ditangani');
+    const restitusiItems = (violations || []).filter((v: any) => (v.handledBy && v.handledBy !== 'Belum Ditangani') || (v.handlingProgress && v.handlingProgress.trim() !== ''));
+
     // 2. Define structures & headers
     const structures = [
       {
         tab: 'Siswa',
         headers: ['id', 'nis', 'name', 'class', 'gender', 'violationPoints', 'bkServicesCount', 'initials'],
-        items: data.students
+        items: students
       },
       {
         tab: 'Pelanggaran',
         headers: ['id', 'ticketId', 'studentId', 'studentName', 'studentClass', 'category', 'pointsAdded', 'date', 'time', 'location', 'notes', 'reportedBy', 'handledBy', 'handlingProgress'],
-        items: data.violations
+        items: pembinaanItems
+      },
+      {
+        tab: 'Restitusi',
+        headers: ['id', 'ticketId', 'studentId', 'studentName', 'studentClass', 'category', 'pointsAdded', 'date', 'time', 'location', 'notes', 'reportedBy', 'handledBy', 'handlingProgress'],
+        items: restitusiItems
       },
       {
         tab: 'LayananBK',
         headers: ['id', 'serviceType', 'problem', 'description', 'output', 'followUp', 'status', 'date', 'startTime', 'endTime', 'students', 'attachments', 'notes'],
-        items: data.services
+        items: services
       },
       {
         tab: 'Absensi',
         headers: ['id', 'class', 'date', 'records', 'updatedAt', 'submittedBy'],
-        items: data.attendance
+        items: attendance
+      },
+      {
+        tab: 'JurnalHarian',
+        headers: ['id', 'date', 'startTime', 'endTime', 'activityType', 'title', 'description', 'target', 'status', 'counselorId', 'createdAt', 'proofPhotoUrl', 'proofPhotoName', 'absentStudents'],
+        items: journals
+      },
+      {
+        tab: 'HomeVisit',
+        headers: [
+          'id', 'reportNumber', 'date', 'studentId', 'studentName', 'studentClass', 'studentNis', 
+          'parentNameMet', 'address', 'purpose', 'result', 'agreement', 'photoUrl', 'photoName', 
+          'parentSignature', 'counselorSignature', 'counselorName', 'counselorId', 'createdAt'
+        ],
+        items: homeVisits
+      },
+      {
+        tab: 'Apresiasi_Prestasi',
+        headers: ['id', 'studentId', 'studentName', 'studentClass', 'nis', 'category', 'achievementName', 'pointsReward', 'date', 'time', 'location', 'recordedBy', 'notes'],
+        items: achievements
       }
     ];
 
@@ -215,6 +313,9 @@ export async function pushDataDirect(
     });
 
     if (!clearRes.ok) {
+      if (clearRes.status === 401) {
+        throw new Error("UNAUTHENTICATED_SESSION");
+      }
       const errText = await clearRes.text();
       throw new Error(`Gagal membersihkan lembar spreadsheet lama: ${errText}`);
     }
@@ -232,11 +333,22 @@ export async function pushDataDirect(
             // Serialize complex objects or arrays as JSON strings
             if (typeof val === 'object') {
               try {
-                return JSON.stringify(val);
+                val = JSON.stringify(val);
               } catch (e) {
                 return '';
               }
             }
+
+            // Safe guard against Google Sheets 50,000 character limit per cell
+            if (typeof val === 'string' && val.length > 45000) {
+              if (val.startsWith('data:')) {
+                // It's a base64 resource (image/signature/file)
+                return `[Data Base64 terlalu besar untuk Google Sheets (Ukuran: ${(val.length / 1024).toFixed(1)} KB)]`;
+              } else {
+                return val.slice(0, 44000) + '... [Teks dipotong karena melebihi batas 50.000 karakter Google Sheets]';
+              }
+            }
+
             return val;
           });
           rows.push(row);
@@ -265,6 +377,9 @@ export async function pushDataDirect(
     });
 
     if (!updateRes.ok) {
+      if (updateRes.status === 401) {
+        throw new Error("UNAUTHENTICATED_SESSION");
+      }
       const errText = await updateRes.text();
       throw new Error(`Gagal menulis data ke Spreadsheet: ${errText}`);
     }
@@ -277,7 +392,25 @@ export async function pushDataDirect(
       message: `Data berhasil diekspor langsung ke Google Sheets!\nSiswa: ${data.students.length}, Pelanggaran: ${data.violations.length}, Layanan: ${data.services.length}, Absensi: ${data.attendance.length}`
     };
   } catch (error: any) {
-    console.error('pushDataDirect Error:', error);
+    const isUnauthenticated = error && error.message && (
+      error.message.includes('invalid authentication credentials') ||
+      error.message.includes('UNAUTHENTICATED') ||
+      error.message.includes('401') ||
+      error.message === 'UNAUTHENTICATED_SESSION'
+    );
+    if (isUnauthenticated) {
+      console.warn('pushDataDirect: Sesi Google Sheets kedaluwarsa atau belum login.', error.message || error);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('bk_google_access_token');
+        window.dispatchEvent(new Event('storage'));
+      }
+      return {
+        success: false,
+        message: 'UNAUTHENTICATED_SESSION'
+      };
+    } else {
+      console.error('pushDataDirect Error:', error);
+    }
     return {
       success: false,
       message: error.message || 'Gagal mengekspor data secara langsung ke Google Sheets.'
@@ -296,7 +429,7 @@ export async function pullDataDirect(
     // 1. Ensure sheets exist before trying to read them
     await ensureTabsExist(accessToken, spreadsheetId);
 
-    const tabs = ['Siswa', 'Pelanggaran', 'LayananBK', 'Absensi'];
+    const tabs = ['Siswa', 'Pelanggaran', 'Restitusi', 'LayananBK', 'Absensi', 'JurnalHarian', 'HomeVisit', 'Apresiasi_Prestasi'];
     const ranges = tabs.map(tab => `${tab}!A:Z`);
     
     // Create query parameters for multiple ranges
@@ -311,6 +444,9 @@ export async function pullDataDirect(
     });
 
     if (!getRes.ok) {
+      if (getRes.status === 401) {
+        throw new Error("UNAUTHENTICATED_SESSION");
+      }
       const errText = await getRes.text();
       throw new Error(`Gagal membaca data dari spreadsheet: ${errText}`);
     }
@@ -322,7 +458,10 @@ export async function pullDataDirect(
       students: [],
       violations: [],
       services: [],
-      attendance: []
+      attendance: [],
+      journals: [],
+      homeVisits: [],
+      achievements: []
     };
 
     // Helper to parse Sheet values to JSON arrays
@@ -368,12 +507,27 @@ export async function pullDataDirect(
 
       if (range.includes('Siswa')) {
         result.students = parseValueRange(values, ['id', 'nis', 'name', 'class', 'gender', 'violationPoints', 'bkServicesCount', 'initials']);
-      } else if (range.includes('Pelanggaran')) {
-        result.violations = parseValueRange(values, ['id', 'ticketId', 'studentId', 'studentName', 'studentClass', 'category', 'pointsAdded', 'date', 'time', 'location', 'notes', 'reportedBy', 'handledBy', 'handlingProgress']);
+      } else if (range.includes('Pelanggaran') || range.includes('Restitusi')) {
+        const parsed = parseValueRange(values, ['id', 'ticketId', 'studentId', 'studentName', 'studentClass', 'category', 'pointsAdded', 'date', 'time', 'location', 'notes', 'reportedBy', 'handledBy', 'handlingProgress']);
+        parsed.forEach((item: any) => {
+          if (item.id && !result.violations.some((v: any) => v.id === item.id)) {
+            result.violations.push(item);
+          }
+        });
       } else if (range.includes('LayananBK')) {
         result.services = parseValueRange(values, ['id', 'serviceType', 'problem', 'description', 'output', 'followUp', 'status', 'date', 'startTime', 'endTime', 'students', 'attachments', 'notes']);
       } else if (range.includes('Absensi')) {
         result.attendance = parseValueRange(values, ['id', 'class', 'date', 'records', 'updatedAt', 'submittedBy']);
+      } else if (range.includes('JurnalHarian')) {
+        result.journals = parseValueRange(values, ['id', 'date', 'startTime', 'endTime', 'activityType', 'title', 'description', 'target', 'status', 'counselorId', 'createdAt', 'proofPhotoUrl', 'proofPhotoName', 'absentStudents']);
+      } else if (range.includes('HomeVisit')) {
+        result.homeVisits = parseValueRange(values, [
+          'id', 'reportNumber', 'date', 'studentId', 'studentName', 'studentClass', 'studentNis', 
+          'parentNameMet', 'address', 'purpose', 'result', 'agreement', 'photoUrl', 'photoName', 
+          'parentSignature', 'counselorSignature', 'counselorName', 'counselorId', 'createdAt'
+        ]);
+      } else if (range.includes('Apresiasi_Prestasi')) {
+        result.achievements = parseValueRange(values, ['id', 'studentId', 'studentName', 'studentClass', 'nis', 'category', 'achievementName', 'pointsReward', 'date', 'time', 'location', 'recordedBy', 'notes']);
       }
     });
 
@@ -383,7 +537,25 @@ export async function pullDataDirect(
       message: 'Sinkronisasi dari Google Sheets berhasil!'
     };
   } catch (error: any) {
-    console.error('pullDataDirect Error:', error);
+    const isUnauthenticated = error && error.message && (
+      error.message.includes('invalid authentication credentials') ||
+      error.message.includes('UNAUTHENTICATED') ||
+      error.message.includes('401') ||
+      error.message === 'UNAUTHENTICATED_SESSION'
+    );
+    if (isUnauthenticated) {
+      console.warn('pullDataDirect: Sesi Google Sheets kedaluwarsa atau belum login.', error.message || error);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('bk_google_access_token');
+        window.dispatchEvent(new Event('storage'));
+      }
+      return {
+        success: false,
+        message: 'UNAUTHENTICATED_SESSION'
+      };
+    } else {
+      console.error('pullDataDirect Error:', error);
+    }
     return {
       success: false,
       message: error.message || 'Gagal menarik data dari Google Sheets.'

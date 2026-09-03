@@ -60,3 +60,14 @@ export function filterLogs(logs: ActivityLog[], counselor: Counselor): ActivityL
   }
   return logs.filter(log => isClassAllowed(log.studentClass, counselor.allowedClasses));
 }
+
+/**
+ * Determines whether a counselor has full Administrator privileges.
+ */
+export function isAdministrator(counselor?: Counselor): boolean {
+  if (!counselor) return false;
+  if (counselor.id === 'admin' || counselor.id === 'c1') return true;
+  if (counselor.username?.toLowerCase() === 'admin' || counselor.username?.toLowerCase() === 'aulia') return true;
+  if (counselor.role?.toLowerCase().includes('admin') || counselor.role?.toLowerCase().includes('administrator') || counselor.role?.toLowerCase().includes('koordinator')) return true;
+  return false;
+}

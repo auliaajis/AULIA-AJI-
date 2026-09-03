@@ -1,0 +1,77 @@
+{
+  "entities": {
+    "students": {
+      "title": "Data Siswa",
+      "description": "Daftar data siswa bimbingan konseling",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "class": { "type": "string" }
+      }
+    },
+    "violations": {
+      "title": "Pelanggaran Siswa",
+      "description": "Catatan pelanggaran dan pendampingan disiplin",
+      "properties": {
+        "id": { "type": "string" },
+        "studentId": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    },
+    "services": {
+      "title": "Layanan Konseling",
+      "description": "Catatan layanan bimbingan konseling",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    },
+    "daily_journals": {
+      "title": "Jurnal Harian BK",
+      "description": "Jurnal harian aktivitas guru BK",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    },
+    "home_visits": {
+      "title": "Home Visit",
+      "description": "Laporan kunjungan rumah siswa",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    },
+    "parent_summons": {
+      "title": "Pemanggilan Orang Tua",
+      "description": "Catatan surat panggilan & notulen kehadiran orang tua",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    },
+    "attendance_history": {
+      "title": "Kehadiran Siswa",
+      "description": "Rekapitulasi kehadiran harian siswa",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    },
+    "student_achievements": {
+      "title": "Prestasi Siswa",
+      "description": "Apresiasi dan poin prestasi siswa",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    },
+    "app_config": {
+      "title": "Pengaturan Sekolah",
+      "description": "Metadata dan konfigurasi sekolah",
+      "properties": {
+        "id": { "type": "string" }
+      }
+    }
+  }
+}

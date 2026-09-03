@@ -128,6 +128,17 @@ function doPost(e) {
         status: "success", 
         message: "Sinkronisasi berhasil! Spreadsheet telah diperbarui." 
       });
+    } else if (payload.action === "sendEmail") {
+      // Mengirimkan email otomatis secara langsung dari email database (pemilik script)
+      MailApp.sendEmail({
+        to: payload.to,
+        subject: payload.subject,
+        body: payload.body
+      });
+      output = JSON.stringify({
+        status: "success",
+        message: "Email otomatis berhasil dikirim ke Wali Kelas!"
+      });
     } else {
       output = JSON.stringify({ status: "error", message: "Aksi POST tidak dikenal." });
     }
