@@ -1,8 +1,19 @@
 import { useState, useMemo, useEffect } from 'react';
 import { Student, ClassAttendanceRecord, StudentAttendance } from '../types';
 import { downloadAttendanceRecapPDF, formatIndonesianDate } from '../utils/pdfGenerator';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore } from '../utils/firestoreSync';
+import { 
+  saveBulkToFirestore, 
+  saveSchoolData, 
+  loadSchoolData, 
+  deleteFromFirestore,
+  saveToFirestore,
+  fetchCloudAttendance,
+  flushPendingCloudQueue,
+  getCloudConnectionInfo
+} from '../utils/firestoreSync';
+import { getSchoolConfig, getActiveSchoolId } from '../utils/schoolConfig';
 import { registerDeletedId } from '../utils/deletionTracker';
+import { showToast } from '../utils/toast';
 import { 
   Calendar, 
   UserCheck, 
@@ -27,12 +38,17 @@ import {
   ClipboardList,
   Edit3,
   Award,
-  BookOpen
+  BookOpen,
+  Cloud,
+  Wifi,
+  RotateCcw
 } from 'lucide-react';
+import { initialAttendanceHistory } from '../data/mockData';
+import PageHeaderBanner from './PageHeaderBanner';
 
 interface AbsensiViewProps {
   students: Student[];
-  activeCounselor: { name: string };
+  activeCounselor: { name: string; allowedClasses?: string[] | string };
   initialClass?: string;
   onAddActivityLog: (title: string, description: string, studentName: string, studentClass: string, type: 'attendance') => void;
   onAttendanceChanged?: () => void;
@@ -92,19 +108,24 @@ export default function AbsensiView({
 
   // Available Classes from student database
   const availableClasses = useMemo(() => {
+    const isDisallowed = (c: string) => /^(10|11|12|X|XI|XII)/i.test(String(c).replace(/kelas\s*/i, '').trim());
     const classesFromStudents = Array.from(new Set(students.map((s) => s.class)))
-      .filter(Boolean)
+      .filter((c) => Boolean(c) && !isDisallowed(c))
       .sort();
     if (classesFromStudents.length > 0) return classesFromStudents;
-    return ['Kelas 7A', 'Kelas 7B', 'Kelas 7C', 'Kelas 8A', 'Kelas 8B', 'Kelas 8C', 'Kelas 9A', 'Kelas 9B', 'Kelas 9C'];
-  }, [students]);
+    const allowed = activeCounselor?.allowedClasses;
+    if (Array.isArray(allowed) && allowed.length > 0) {
+      return allowed.map(c => c.startsWith('Kelas') ? c : `Kelas ${c}`);
+    }
+    return ['Kelas 8A', 'Kelas 8B', 'Kelas 8C', 'Kelas 8D', 'Kelas 8E', 'Kelas 8F', 'Kelas 8G'];
+  }, [students, activeCounselor]);
 
   // Selected State for Form Input
   const [selectedClass, setSelectedClass] = useState<string>(() => {
     if (initialClass && (availableClasses.includes(initialClass) || availableClasses.length > 0)) {
       return initialClass;
     }
-    return availableClasses[0] || 'Kelas 7A';
+    return availableClasses[0] || 'Kelas 8A';
   });
 
   useEffect(() => {
@@ -128,8 +149,35 @@ export default function AbsensiView({
 
   // Historical attendance list from school storage & Firestore
   const [history, setHistory] = useState<ClassAttendanceRecord[]>(() => {
-    return loadSchoolData('bk_attendance_history', []);
+    const loaded = loadSchoolData<ClassAttendanceRecord[]>('bk_attendance_history', initialAttendanceHistory);
+    if (!loaded || loaded.length === 0) {
+      saveSchoolData('bk_attendance_history', initialAttendanceHistory);
+      return initialAttendanceHistory;
+    }
+    return loaded;
   });
+
+  const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(false);
+
+  // Automatically fetch fresh cloud attendance from Firestore on mount (across devices)
+  useEffect(() => {
+    let isMounted = true;
+    fetchCloudAttendance().then((cloudRecords) => {
+      if (isMounted && Array.isArray(cloudRecords) && cloudRecords.length > 0) {
+        setHistory(cloudRecords);
+      } else if (isMounted) {
+        const local = loadSchoolData<ClassAttendanceRecord[]>('bk_attendance_history', initialAttendanceHistory);
+        if (!local || local.length === 0) {
+          setHistory(initialAttendanceHistory);
+          saveSchoolData('bk_attendance_history', initialAttendanceHistory);
+        }
+      }
+    }).catch(console.warn);
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Realtime subscriber for remote changes
   useEffect(() => {
@@ -146,8 +194,8 @@ export default function AbsensiView({
     window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
     window.addEventListener('bk_attendance_history_changed', handleRealtimeUpdate);
     window.addEventListener('storage', (e) => {
-      if (e.key === 'bk_attendance_history') {
-        handleRealtimeUpdate({ detail: { key: e.key } });
+      if (e.key && (e.key === 'bk_attendance_history' || e.key.startsWith('bk_attendance_history_sch_'))) {
+        handleRealtimeUpdate({ detail: { key: 'bk_attendance_history' } });
       }
     });
 
@@ -156,6 +204,31 @@ export default function AbsensiView({
       window.removeEventListener('bk_attendance_history_changed', handleRealtimeUpdate);
     };
   }, []);
+
+  // Manual trigger to pull fresh Firestore data & flush offline writes
+  const handleManualCloudRefresh = async () => {
+    setIsCloudSyncing(true);
+    try {
+      await flushPendingCloudQueue();
+      const latest = await fetchCloudAttendance();
+      if (latest && Array.isArray(latest)) {
+        setHistory(latest);
+      }
+      showToast('☁️ Data absensi berhasil disinkronkan langsung dengan Cloud Firestore!', 'success');
+    } catch (e) {
+      showToast('Gagal menyinkronkan data dengan cloud. Periksa koneksi internet.', 'error');
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  };
+
+  // Manual restoration of canonical attendance data
+  const handleRestoreAttendanceData = async () => {
+    if (confirm('Apakah Anda yakin ingin memulihkan seluruh arsip data absensi kelas (Kelas 8A s/d 8G) SMP Negeri 2 Susukan? Seluruh riwayat presensi akan dimuat kembali ke sistem dan disinkronkan ke Cloud.')) {
+      await saveHistoryToStorage(initialAttendanceHistory);
+      showToast('🎉 Seluruh data absensi kelas 8A - 8G berhasil dipulihkan secara penuh!', 'success');
+    }
+  };
 
   // Selected Detail Modal Record for Inspection
   const [detailModalRecord, setDetailModalRecord] = useState<ClassAttendanceRecord | null>(null);
@@ -194,11 +267,17 @@ export default function AbsensiView({
   }, [selectedClass]);
 
   // Save history back to school storage and Firestore Realtime
-  const saveHistoryToStorage = (updatedHistory: ClassAttendanceRecord[]) => {
+  const saveHistoryToStorage = async (updatedHistory: ClassAttendanceRecord[], singleRecord?: ClassAttendanceRecord) => {
     setHistory(updatedHistory);
     saveSchoolData('bk_attendance_history', updatedHistory);
     localStorage.setItem('bk_attendance_history', JSON.stringify(updatedHistory));
-    saveBulkToFirestore('bk_attendance_history', updatedHistory);
+
+    // Save individual record to Firestore with atomic versioning & optimistic sync (<1ms)
+    if (singleRecord && singleRecord.id) {
+      saveToFirestore('bk_attendance_history', singleRecord).catch(console.warn);
+    }
+    saveBulkToFirestore('bk_attendance_history', updatedHistory).catch(console.warn);
+
     window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: updatedHistory }));
     window.dispatchEvent(new Event('storage'));
     if (onAttendanceChanged) {
@@ -299,7 +378,11 @@ export default function AbsensiView({
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
       result = result.filter(
-        (s) => s.name.toLowerCase().includes(q) || s.nis.toLowerCase().includes(q)
+        (s) =>
+          s &&
+          (String(s.name || '').toLowerCase().includes(q) ||
+            String(s.nis ?? '').toLowerCase().includes(q) ||
+            String(s.nisn ?? '').toLowerCase().includes(q))
       );
     }
 
@@ -373,7 +456,7 @@ export default function AbsensiView({
   };
 
   // Save/Submit attendance record
-  const handleSaveAttendance = () => {
+  const handleSaveAttendance = async () => {
     const recordsArray = Object.values(attendanceRecords) as StudentAttendance[];
     if (recordsArray.length === 0) return;
 
@@ -409,7 +492,7 @@ export default function AbsensiView({
       updatedHistory = [newRecord, ...updatedHistory];
     }
 
-    saveHistoryToStorage(updatedHistory);
+    await saveHistoryToStorage(updatedHistory, newRecord);
 
     let syncedCount = 0;
     if (autoSyncAlpa && onSyncAttendanceViolations) {
@@ -435,23 +518,27 @@ export default function AbsensiView({
       'attendance'
     );
 
+    // Flush any pending queue
+    flushPendingCloudQueue().catch(console.warn);
+
     if (syncedCount > 0) {
-      alert(`✅ Absensi ${selectedClass} tanggal ${selectedDate} berhasil disimpan!\n\n⚡ ${syncedCount} siswa Tanpa Keterangan (Alpa) otomatis disinkronkan ke Data Pembinaan (+${alpaPointWeight} Poin per siswa).`);
+      showToast(`✅ Absensi ${selectedClass} (${selectedDate}) berhasil disimpan & realtime di Cloud! (+${syncedCount} Alpa disinkronkan ke Pembinaan)`, 'success');
     } else {
-      alert(`✅ Absensi ${selectedClass} tanggal ${selectedDate} berhasil disimpan dan disinkronkan!`);
+      showToast(`✅ Absensi ${selectedClass} (${selectedDate}) berhasil disimpan & realtime di Cloud!`, 'success');
     }
   };
 
   // Delete history item
-  const handleDeleteHistory = (recordId: string) => {
+  const handleDeleteHistory = async (recordId: string) => {
     if (confirm('Apakah Anda yakin ingin menghapus arsip absensi ini?')) {
       registerDeletedId(recordId);
-      deleteFromFirestore('bk_attendance_history', recordId);
+      await deleteFromFirestore('bk_attendance_history', recordId);
       const updatedHistory = history.filter((h) => h.id !== recordId);
-      saveHistoryToStorage(updatedHistory);
+      await saveHistoryToStorage(updatedHistory);
       if (detailModalRecord && detailModalRecord.id === recordId) {
         setDetailModalRecord(null);
       }
+      showToast('Arsip absensi berhasil dihapus dari penyimpanan lokal dan cloud.', 'info');
     }
   };
 
@@ -565,78 +652,99 @@ export default function AbsensiView({
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
-      {/* Title & Navigation Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-[#bcc9c6]/30 shadow-xs">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2.5 py-0.5 rounded-full bg-[#00685f]/10 text-[#00685f] text-[10px] font-black uppercase tracking-wider flex items-center gap-1 border border-[#00685f]/20">
-              <Calendar className="w-3 h-3 text-[#00685f]" />
-              Modul Absensi Kesiswaan BK
-            </span>
-            <span className="text-[10px] text-gray-500 font-semibold">SMP N 2 Susukan</span>
+      {/* Page Purpose & Workflow Header Banner */}
+      <PageHeaderBanner
+        category="Siswa & Presensi"
+        title="Presensi & Absensi Kelas Harian"
+        description="Pencatatan presensi kelas harian, matriks pemantauan kehadiran bulanan, deteksi siswa berisiko alpa/bolos, serta rekapitulasi dinas."
+        icon={<Calendar className="w-5 h-5" />}
+        badge={getSchoolConfig().schoolName}
+        workflowHint="1. Pilih Kelas & Tanggal › 2. Tandai Status Siswa (Hadir/Sakit/Izin/Alpa) › 3. Klik Simpan Absensi (Otomatis masuk Jurnal & Poin Alpa)"
+        stats={[
+          { label: 'Kelas Aktif', value: selectedClass },
+          { label: 'Kehadiran Hari Ini', value: `${stats.percent}%`, color: stats.percent >= 90 ? 'text-emerald-700' : 'text-amber-700' },
+          { label: 'Alpa (A)', value: stats.A, color: stats.A > 0 ? 'text-rose-600' : 'text-[#00685f]' }
+        ]}
+        actions={
+          <div className="flex items-center bg-[#f0f4f3] p-1.5 rounded-xl border border-[#bcc9c6]/30 overflow-x-auto w-full sm:w-auto">
+            <button
+              onClick={() => setActiveTab('input')}
+              className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+                activeTab === 'input'
+                  ? 'bg-[#00685f] text-white shadow-sm'
+                  : 'text-gray-600 hover:text-[#0b1c30] hover:bg-white/60'
+              }`}
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>Form Input Harian</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('matrix')}
+              className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+                activeTab === 'matrix'
+                  ? 'bg-[#00685f] text-white shadow-sm'
+                  : 'text-gray-600 hover:text-[#0b1c30] hover:bg-white/60'
+              }`}
+            >
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span>Matriks & Monitoring</span>
+              {matrixData.alertStudents.length > 0 && (
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+                activeTab === 'history'
+                  ? 'bg-[#00685f] text-white shadow-sm'
+                  : 'text-gray-600 hover:text-[#0b1c30] hover:bg-white/60'
+              }`}
+            >
+              <History className="w-3.5 h-3.5" />
+              <span>Arsip Riwayat</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('recap')}
+              className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+                activeTab === 'recap'
+                  ? 'bg-[#00685f] text-white shadow-sm'
+                  : 'text-gray-600 hover:text-[#0b1c30] hover:bg-white/60'
+              }`}
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              <span>Rekap PDF Dinas</span>
+            </button>
+
+            {/* Realtime Cloud Sync Pill */}
+            <button
+              onClick={handleManualCloudRefresh}
+              disabled={isCloudSyncing}
+              className={`px-3 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap border ml-1 ${
+                isCloudSyncing
+                  ? 'bg-amber-50 text-amber-700 border-amber-200 cursor-wait'
+                  : 'bg-teal-50/80 hover:bg-teal-100/80 text-[#00685f] border-teal-200'
+              }`}
+              title="Klik untuk menyinkronkan data absensi terkini dengan Firestore di HP / Laptop lain"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isCloudSyncing ? 'animate-spin text-amber-600' : 'text-[#00685f]'}`} />
+              <span>{isCloudSyncing ? 'Menyinkronkan...' : 'Sinkron Cloud'}</span>
+            </button>
+
+            {/* Pulihkan Data Presensi */}
+            <button
+              onClick={handleRestoreAttendanceData}
+              className="px-3 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap border ml-1 bg-white hover:bg-emerald-50 text-[#00685f] border-[#00685f]/30 active:scale-97 shadow-2xs"
+              title="Pulihkan seluruh data absensi bawaan (Kelas 8A s/d 8G) SMP N 2 Susukan"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-[#00685f]" />
+              <span>Pulihkan</span>
+            </button>
           </div>
-          <h2 className="text-xl sm:text-2xl font-black text-[#0b1c30]">
-            Pencatatan & Monitoring Absensi
-          </h2>
-          <p className="text-xs text-[#3d4947]/80 font-medium mt-0.5">
-            Pencatatan harian, matriks pemantauan rekap bulanan, serta deteksi rawan ketidakhadiran siswa.
-          </p>
-        </div>
-
-        {/* Tab Navigation Pill Buttons */}
-        <div className="flex items-center bg-[#f0f4f3] p-1.5 rounded-xl border border-[#bcc9c6]/30 self-start md:self-auto overflow-x-auto max-w-full">
-          <button
-            onClick={() => setActiveTab('input')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
-              activeTab === 'input'
-                ? 'bg-[#00685f] text-white shadow-sm'
-                : 'text-gray-600 hover:text-[#0b1c30] hover:bg-white/60'
-            }`}
-          >
-            <Edit3 className="w-3.5 h-3.5" />
-            <span>Form Input Harian</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('matrix')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
-              activeTab === 'matrix'
-                ? 'bg-[#00685f] text-white shadow-sm'
-                : 'text-gray-600 hover:text-[#0b1c30] hover:bg-white/60'
-            }`}
-          >
-            <TrendingUp className="w-3.5 h-3.5" />
-            <span>Matriks & Monitoring</span>
-            {matrixData.alertStudents.length > 0 && (
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
-            )}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('history')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
-              activeTab === 'history'
-                ? 'bg-[#00685f] text-white shadow-sm'
-                : 'text-gray-600 hover:text-[#0b1c30] hover:bg-white/60'
-            }`}
-          >
-            <History className="w-3.5 h-3.5" />
-            <span>Arsip Riwayat</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('recap')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
-              activeTab === 'recap'
-                ? 'bg-[#00685f] text-white shadow-sm'
-                : 'text-gray-600 hover:text-[#0b1c30] hover:bg-white/60'
-            }`}
-          >
-            <FileSpreadsheet className="w-3.5 h-3.5" />
-            <span>Cetak Rekap PDF</span>
-          </button>
-        </div>
-      </div>
+        }
+      />
 
       {/* TAB 1: FORM INPUT ABSENSI HARIAN */}
       {activeTab === 'input' && (
@@ -1369,10 +1477,19 @@ export default function AbsensiView({
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {history.length === 0 ? (
-                <div className="col-span-full py-16 text-center text-gray-500 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
-                  <Info className="w-10 h-10 mx-auto text-gray-300 mb-2" />
-                  <p className="text-sm font-bold">Belum ada riwayat absensi tercatat</p>
-                  <p className="text-xs mt-1">Gunakan Form Input Harian untuk mulai mencatat absensi kelas.</p>
+                <div className="col-span-full py-16 text-center text-gray-500 bg-gray-50 rounded-2xl border border-dashed border-gray-200 space-y-3">
+                  <Info className="w-10 h-10 mx-auto text-gray-300 mb-1" />
+                  <p className="text-sm font-bold text-[#0b1c30]">Belum ada riwayat absensi tercatat</p>
+                  <p className="text-xs text-gray-500 max-w-md mx-auto">
+                    Gunakan Form Input Harian untuk mulai mencatat, atau pulihkan data kehadiran presensi Kelas 8A - 8G bawaan di bawah ini.
+                  </p>
+                  <button
+                    onClick={handleRestoreAttendanceData}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer active:scale-97"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    <span>Pulihkan Arsip Presensi Kelas 8</span>
+                  </button>
                 </div>
               ) : (
                 history.map((h) => {

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TeachingScheduleItem, ClassTeachingProgress } from '../types';
-import { saveBulkToFirestore } from '../utils/firestoreSync';
+import { TeachingScheduleItem, ClassTeachingProgress, Counselor } from '../types';
+import { saveBulkToFirestore, loadSchoolData, saveSchoolData } from '../utils/firestoreSync';
+import { getActiveSchoolId } from '../utils/schoolConfig';
 import {
   Calendar,
   Clock,
@@ -20,66 +21,6 @@ import {
 
 const DAYS = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'] as const;
 
-const DEFAULT_SCHEDULE: TeachingScheduleItem[] = [
-  {
-    id: 'sch-1',
-    day: 'Senin',
-    period: 'Jam ke 1-2',
-    timeRange: '07:30 - 08:50',
-    className: 'Kelas 7A',
-    subject: 'Bimbingan Klasikal (Etika & Tata Tertib)',
-  },
-  {
-    id: 'sch-2',
-    day: 'Selasa',
-    period: 'Jam ke 3-4',
-    timeRange: '09:05 - 10:25',
-    className: 'Kelas 8B',
-    subject: 'Bimbingan Klasikal (Manajemen Waktu Belajar)',
-  },
-  {
-    id: 'sch-3',
-    day: 'Rabu',
-    period: 'Jam ke 1-2',
-    timeRange: '07:30 - 08:50',
-    className: 'Kelas 9A',
-    subject: 'Bimbingan Klasikal (Orientasi Karir & SMA/SMK)',
-  },
-  {
-    id: 'sch-4',
-    day: 'Kamis',
-    period: 'Jam ke 5-6',
-    timeRange: '10:40 - 12:00',
-    className: 'Kelas 7C',
-    subject: 'Bimbingan Klasikal (Penyesuaian Diri di SMP)',
-  },
-  {
-    id: 'sch-5',
-    day: 'Jumat',
-    period: 'Jam ke 1-2',
-    timeRange: '07:30 - 08:30',
-    className: 'Kelas 8E',
-    subject: 'Bimbingan Klasikal (Stop Bullying & Cyberbullying)',
-  },
-];
-
-const DEFAULT_PROGRESS: Record<string, ClassTeachingProgress> = {
-  'Kelas 7A': {
-    className: 'Kelas 7A',
-    lastDate: '2026-08-04',
-    lastTopic: 'Bab 1: Pengenalan Budaya & Tata Tertib Sekolah (s.d Hal 15)',
-    nextTopicPlan: 'Bab 2: Membangun Etika Bermedia Sosial yang Bijak',
-    updatedAt: '2026-08-04T10:00:00.000Z',
-  },
-  'Kelas 8B': {
-    className: 'Kelas 8B',
-    lastDate: '2026-08-05',
-    lastTopic: 'Bab 2: Mengelola Stress Menjelang Asesmen Lingkungan Belajar',
-    nextTopicPlan: 'Bab 3: Teknik Membagi Waktu & Gaya Belajar VAK',
-    updatedAt: '2026-08-05T10:00:00.000Z',
-  },
-};
-
 interface JadwalMengajarWidgetProps {
   onFillJournalForClass: (
     className: string,
@@ -90,6 +31,7 @@ interface JadwalMengajarWidgetProps {
     period?: string
   ) => void;
   classList?: string[];
+  activeCounselor?: Counselor;
 }
 
 const parseTimeRange = (timeRange?: string) => {
@@ -104,7 +46,13 @@ const parseTimeRange = (timeRange?: string) => {
 export const JadwalMengajarWidget: React.FC<JadwalMengajarWidgetProps> = ({
   onFillJournalForClass,
   classList = [],
+  activeCounselor,
 }) => {
+  const counselorId = activeCounselor?.id || 'default';
+  const schoolId = getActiveSchoolId();
+  const scheduleStorageKey = `bk_teaching_schedule_${counselorId}`;
+  const progressStorageKey = `bk_class_teaching_progress_${counselorId}`;
+
   // Get current day in Indonesian name
   const getCurrentDayName = (): (typeof DAYS)[number] => {
     const dayIdx = new Date().getDay(); // 0 is Sunday, 1 is Monday...
@@ -122,34 +70,46 @@ export const JadwalMengajarWidget: React.FC<JadwalMengajarWidgetProps> = ({
 
   const [selectedDay, setSelectedDay] = useState<(typeof DAYS)[number]>(getCurrentDayName());
 
-  // Schedule state
-  const [schedule, setSchedule] = useState<TeachingScheduleItem[]>(() => {
-    const saved = localStorage.getItem('bk_teaching_schedule');
-    if (saved) {
+  const loadSchedule = (): TeachingScheduleItem[] => {
+    const raw = loadSchoolData<TeachingScheduleItem[]>(scheduleStorageKey, [], schoolId);
+    if (Array.isArray(raw) && raw.length > 0) {
+      return raw.filter((s: any) => !String(s.id).startsWith('sch-'));
+    }
+    const legacy = localStorage.getItem('bk_teaching_schedule');
+    if (legacy && (counselorId === 'default' || counselorId === 'c1' || counselorId === 'admin')) {
       try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((s: any) => !String(s.id).startsWith('sch-'));
-        }
-      } catch (e) {
-        return [];
-      }
+        const parsed = JSON.parse(legacy);
+        if (Array.isArray(parsed)) return parsed.filter((s: any) => !String(s.id).startsWith('sch-'));
+      } catch (e) {}
     }
     return [];
-  });
+  };
 
-  // Class Progress state
-  const [progressMap, setProgressMap] = useState<Record<string, ClassTeachingProgress>>(() => {
-    const saved = localStorage.getItem('bk_class_teaching_progress');
-    if (saved) {
+  const loadProgress = (): Record<string, ClassTeachingProgress> => {
+    const raw = loadSchoolData<Record<string, ClassTeachingProgress>>(progressStorageKey, {}, schoolId);
+    if (raw && typeof raw === 'object' && Object.keys(raw).length > 0) {
+      return raw;
+    }
+    const legacy = localStorage.getItem('bk_class_teaching_progress');
+    if (legacy && (counselorId === 'default' || counselorId === 'c1' || counselorId === 'admin')) {
       try {
-        return JSON.parse(saved);
-      } catch (e) {
-        return {};
-      }
+        return JSON.parse(legacy);
+      } catch (e) {}
     }
     return {};
-  });
+  };
+
+  // Schedule state
+  const [schedule, setSchedule] = useState<TeachingScheduleItem[]>(() => loadSchedule());
+
+  // Class Progress state
+  const [progressMap, setProgressMap] = useState<Record<string, ClassTeachingProgress>>(() => loadProgress());
+
+  // Reload when counselor or school changes
+  useEffect(() => {
+    setSchedule(loadSchedule());
+    setProgressMap(loadProgress());
+  }, [counselorId, schoolId]);
 
   // Modal States
   const [isManagingSchedule, setIsManagingSchedule] = useState(false);
@@ -167,58 +127,40 @@ export const JadwalMengajarWidget: React.FC<JadwalMengajarWidgetProps> = ({
   const [schSubject, setSchSubject] = useState('Bimbingan Klasikal / KBM');
 
   useEffect(() => {
-    localStorage.setItem('bk_teaching_schedule', JSON.stringify(schedule));
-    saveBulkToFirestore('bk_teaching_schedule', schedule);
-  }, [schedule]);
+    saveSchoolData(scheduleStorageKey, schedule, schoolId);
+    saveBulkToFirestore(scheduleStorageKey, schedule, schoolId);
+  }, [schedule, scheduleStorageKey, schoolId]);
 
   useEffect(() => {
-    localStorage.setItem('bk_class_teaching_progress', JSON.stringify(progressMap));
+    saveSchoolData(progressStorageKey, progressMap, schoolId);
     const progressList = Object.values(progressMap).map((p: ClassTeachingProgress) => ({
       ...p,
       id: p.className || `prog-${Math.random()}`
     }));
-    saveBulkToFirestore('bk_class_teaching_progress', progressList);
-  }, [progressMap]);
+    saveBulkToFirestore(progressStorageKey, progressList, schoolId);
+  }, [progressMap, progressStorageKey, schoolId]);
 
   // Realtime Cloud Firestore Listener across devices
   useEffect(() => {
     const handleSync = (e: any) => {
       const key = e.detail?.key;
-      if (!key || key === 'bk_teaching_schedule' || key === 'all') {
-        const saved = localStorage.getItem('bk_teaching_schedule');
-        if (saved) {
-          try {
-            const parsed = JSON.parse(saved);
-            if (Array.isArray(parsed)) setSchedule(parsed);
-          } catch (err) {}
-        }
+      if (!key || key === scheduleStorageKey || key === 'bk_teaching_schedule' || key === 'all') {
+        setSchedule(loadSchedule());
       }
-      if (!key || key === 'bk_class_teaching_progress' || key === 'all') {
-        const saved = localStorage.getItem('bk_class_teaching_progress');
-        if (saved) {
-          try {
-            const parsed = JSON.parse(saved);
-            if (Array.isArray(parsed)) {
-              const mapObj: Record<string, ClassTeachingProgress> = {};
-              parsed.forEach((item: any) => {
-                if (item.className) mapObj[item.className] = item;
-              });
-              setProgressMap(mapObj);
-            } else if (typeof parsed === 'object') {
-              setProgressMap(parsed);
-            }
-          } catch (err) {}
-        }
+      if (!key || key === progressStorageKey || key === 'bk_class_teaching_progress' || key === 'all') {
+        setProgressMap(loadProgress());
       }
     };
 
     window.addEventListener('bk_realtime_sync', handleSync);
     window.addEventListener('storage', handleSync);
+    window.addEventListener('bk_school_changed', handleSync);
     return () => {
       window.removeEventListener('bk_realtime_sync', handleSync);
       window.removeEventListener('storage', handleSync);
+      window.removeEventListener('bk_school_changed', handleSync);
     };
-  }, []);
+  }, [scheduleStorageKey, progressStorageKey, counselorId, schoolId]);
 
   // Scheduled items for selected day
   const currentDaySchedule = schedule.filter((s) => s.day === selectedDay);

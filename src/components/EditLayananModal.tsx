@@ -1,6 +1,30 @@
-import React, { useState, useEffect } from 'react';
-import { Student, CounselingService, BKServiceType } from '../types';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Student, CounselingService, BKServiceType, BKComponentType, ServiceSpecificDetails, BidangBimbinganType } from '../types';
 import { addToGoogleCalendar } from '../utils/calendarSync';
+import GoogleDrivePhotoUploader from './GoogleDrivePhotoUploader';
+import ServiceSpecificFields from './ServiceSpecificFields';
+import {
+  BK_COMPONENTS_DATA,
+  FOKUS_ISU_LIST,
+  BIDANG_BIMBINGAN_OPTIONS,
+  isBidangBimbinganApplicable,
+  getBKComponentForService,
+  getComponentColorConfig,
+  getServiceFormConfig
+} from '../utils/bkKomprehensif';
+import { TemplatePicker } from './TemplatePicker';
+import {
+  DEFAULT_PROBLEM_TEMPLATES,
+  DEFAULT_FOLLOWUP_TEMPLATES,
+  getCustomProblemTemplates,
+  saveCustomProblemTemplate,
+  deleteCustomProblemTemplate,
+  getCustomFollowUpTemplates,
+  saveCustomFollowUpTemplate,
+  deleteCustomFollowUpTemplate,
+  LayananTemplateItem
+} from '../utils/layananTemplates';
+import { showToast } from '../utils/toast';
 import {
   X,
   HeartHandshake,
@@ -18,7 +42,9 @@ import {
   Search,
   Sparkles,
   ChevronDown,
-  SlidersHorizontal as Sliders
+  SlidersHorizontal as Sliders,
+  Layers,
+  Check
 } from 'lucide-react';
 
 interface EditLayananModalProps {
@@ -29,18 +55,6 @@ interface EditLayananModalProps {
   onClose: () => void;
 }
 
-const ALL_SERVICE_TYPES: BKServiceType[] = [
-  'Layanan Orientasi',
-  'Layanan Informasi',
-  'Layanan Penempatan dan Penyaluran',
-  'Layanan Penguasaan Konten',
-  'Layanan Konseling Perorangan (Individual)',
-  'Layanan Bimbingan Kelompok',
-  'Layanan Konseling Kelompok',
-  'Layanan Konsultasi',
-  'Layanan Mediasi'
-];
-
 export default function EditLayananModal({
   service,
   students,
@@ -50,7 +64,13 @@ export default function EditLayananModal({
 }: EditLayananModalProps) {
   if (!service) return null;
 
+  const initialComponent = service.bkComponent || getBKComponentForService(service.serviceType);
+  const [bkComponent, setBkComponent] = useState<BKComponentType>(initialComponent);
   const [serviceType, setServiceType] = useState<BKServiceType>(service.serviceType);
+  const [bidangBimbingan, setBidangBimbingan] = useState<BidangBimbinganType>(
+    service.bidangBimbingan || (service.specificDetails?.bidangBimbingan as any) || 'Pribadi'
+  );
+  const [focusIssue, setFocusIssue] = useState<string>(service.focusIssue || '');
   const [targetType, setTargetType] = useState<'Individu' | 'Kelompok' | 'Klasikal'>(
     service.targetType || 'Individu'
   );
@@ -69,16 +89,51 @@ export default function EditLayananModal({
   const [description, setDescription] = useState(service.description || '');
   const [output, setOutput] = useState(service.output || '');
   const [followUp, setFollowUp] = useState(service.followUp || '');
+  const [specificDetails, setSpecificDetails] = useState<ServiceSpecificDetails>(service.specificDetails || {});
   const [showOptionalFields, setShowOptionalFields] = useState(
     Boolean(service.output || service.followUp || service.proofPhotoUrl)
   );
 
+  const formConfig = useMemo(() => {
+    return getServiceFormConfig(serviceType, bkComponent);
+  }, [serviceType, bkComponent]);
+
   const [proofPhotoUrl, setProofPhotoUrl] = useState<string>(service.proofPhotoUrl || '');
   const [proofPhotoName, setProofPhotoName] = useState<string>(service.proofPhotoName || '');
+  const [driveFileId, setDriveFileId] = useState<string | undefined>(service.driveFileId);
+  const [driveViewUrl, setDriveViewUrl] = useState<string | undefined>(service.driveViewUrl);
 
   // Student search/selection popover state
   const [showAddStudentPopover, setShowAddStudentPopover] = useState(false);
   const [studentSearchQuery, setStudentSearchQuery] = useState('');
+
+  // Quick Problem & Follow-Up Templates State
+  const [customProblemTemplates, setCustomProblemTemplates] = useState<LayananTemplateItem[]>(() => getCustomProblemTemplates());
+  const [customFollowUpTemplates, setCustomFollowUpTemplates] = useState<LayananTemplateItem[]>(() => getCustomFollowUpTemplates());
+
+  const handleSaveCustomProblem = (name: string, text: string) => {
+    const updated = saveCustomProblemTemplate(name, text);
+    setCustomProblemTemplates(updated);
+    showToast('Template masalah berhasil disimpan', 'success');
+  };
+
+  const handleDeleteCustomProblem = (id: string) => {
+    const updated = deleteCustomProblemTemplate(id);
+    setCustomProblemTemplates(updated);
+    showToast('Template masalah telah dihapus', 'info');
+  };
+
+  const handleSaveCustomFollowUp = (name: string, text: string) => {
+    const updated = saveCustomFollowUpTemplate(name, text);
+    setCustomFollowUpTemplates(updated);
+    showToast('Template tindak lanjut berhasil disimpan', 'success');
+  };
+
+  const handleDeleteCustomFollowUp = (id: string) => {
+    const updated = deleteCustomFollowUpTemplate(id);
+    setCustomFollowUpTemplates(updated);
+    showToast('Template tindak lanjut telah dihapus', 'info');
+  };
 
   // Handle photo upload (converts image file to base64)
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -120,10 +175,12 @@ export default function EditLayananModal({
 
   const filteredAvailableStudents = students.filter(
     (st) =>
+      st &&
       !selectedStudents.some((s) => s.id === st.id) &&
-      (st.name.toLowerCase().includes(studentSearchQuery.toLowerCase()) ||
-        st.class.toLowerCase().includes(studentSearchQuery.toLowerCase()) ||
-        st.nis.includes(studentSearchQuery))
+      (String(st.name || '').toLowerCase().includes(studentSearchQuery.toLowerCase().trim()) ||
+        String(st.class || '').toLowerCase().includes(studentSearchQuery.toLowerCase().trim()) ||
+        String(st.nis ?? '').toLowerCase().includes(studentSearchQuery.toLowerCase().trim()) ||
+        String(st.nisn ?? '').toLowerCase().includes(studentSearchQuery.toLowerCase().trim()))
   );
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -148,7 +205,10 @@ export default function EditLayananModal({
 
     const updated: CounselingService = {
       ...service,
+      bkComponent,
       serviceType,
+      bidangBimbingan: isBidangBimbinganApplicable(bkComponent) ? bidangBimbingan : 'Non-Bidang (Dukungan Sistem)',
+      focusIssue: focusIssue.trim() || undefined,
       targetType,
       students: selectedStudents,
       date,
@@ -159,8 +219,14 @@ export default function EditLayananModal({
       description,
       output,
       followUp,
+      specificDetails: {
+        ...specificDetails,
+        bidangBimbingan: isBidangBimbinganApplicable(bkComponent) ? bidangBimbingan : 'Non-Bidang (Dukungan Sistem)',
+      },
       proofPhotoUrl: proofPhotoUrl || undefined,
-      proofPhotoName: proofPhotoName || undefined
+      proofPhotoName: proofPhotoName || undefined,
+      driveFileId: driveFileId || undefined,
+      driveViewUrl: driveViewUrl || undefined,
     };
 
     onSave(updated);
@@ -181,7 +247,7 @@ export default function EditLayananModal({
                 Edit & Kelola Layanan BK
               </h3>
               <p className="text-xs text-[#3d4947]/70 font-semibold mt-0.5">
-                Perbarui status, waktu, pembahasan, atau peserta sesi bimbingan.
+                Perbarui status, pilar bimbingan, fokus isu, waktu, pembahasan, atau peserta sesi.
               </p>
             </div>
           </div>
@@ -243,39 +309,166 @@ export default function EditLayananModal({
             </div>
           </div>
 
-          {/* Service Type & Target Type */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-[#64748b] block">
-                Jenis Layanan BK
-              </label>
-              <select
-                value={serviceType}
-                onChange={(e) => setServiceType(e.target.value as BKServiceType)}
-                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] cursor-pointer"
-              >
-                {ALL_SERVICE_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
+          {/* 4 Pillars & Service Type Selection */}
+          <div className="bg-gray-50/80 p-4 rounded-2xl border border-gray-200 space-y-3">
+            <label className="text-xs font-bold text-[#0b1c30] flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-[#00685f]" />
+                Komponen Pilar BK Komprehensif
+              </span>
+              <span className="text-[10px] font-black text-[#00685f] bg-[#00685f]/10 px-2 py-0.5 rounded-full">
+                {bkComponent}
+              </span>
+            </label>
+
+            {/* Pillar Selector Pills */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+              {BK_COMPONENTS_DATA.map((comp) => {
+                const isActive = bkComponent === comp.id;
+                return (
+                  <button
+                    key={comp.id}
+                    type="button"
+                    onClick={() => {
+                      setBkComponent(comp.id);
+                      if (!comp.services.some(s => s.type === serviceType)) {
+                        setServiceType(comp.services[0].type);
+                      }
+                    }}
+                    className={`px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold text-left border transition-all cursor-pointer ${
+                      isActive
+                        ? 'bg-[#00685f] text-white border-[#00685f] shadow-2xs'
+                        : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-100'
+                    }`}
+                  >
+                    <div className="text-[9px] opacity-80 font-bold">Pilar {comp.pilarNumber}</div>
+                    <div className="truncate">{comp.name}</div>
+                  </button>
+                );
+              })}
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-[#64748b] block">
-                Format Sasaran
-              </label>
-              <select
-                value={targetType}
-                onChange={(e) => setTargetType(e.target.value as any)}
-                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] cursor-pointer"
-              >
-                <option value="Individu">Individu (Perorangan)</option>
-                <option value="Kelompok">Kelompok (Beberapa Siswa)</option>
-                <option value="Klasikal">Klasikal (Satu Kelas)</option>
-              </select>
+            {/* Service & Format Row */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-gray-600 block">
+                  Jenis Layanan Spesifik
+                </label>
+                <select
+                  value={serviceType}
+                  onChange={(e) => {
+                    const newType = e.target.value as BKServiceType;
+                    setServiceType(newType);
+                    const comp = getBKComponentForService(newType);
+                    setBkComponent(comp);
+                  }}
+                  className="w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] cursor-pointer"
+                >
+                  {BK_COMPONENTS_DATA.map((comp) => (
+                    <optgroup key={comp.id} label={`Pilar ${comp.pilarNumber}: ${comp.name}`}>
+                      {comp.services.map((s) => (
+                        <option key={s.type} value={s.type}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-gray-600 block">
+                  Format Sasaran
+                </label>
+                <select
+                  value={targetType}
+                  onChange={(e) => setTargetType(e.target.value as any)}
+                  className="w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] cursor-pointer"
+                >
+                  <option value="Individu">Individu (Perorangan)</option>
+                  <option value="Kelompok">Kelompok (Beberapa Siswa)</option>
+                  <option value="Klasikal">Klasikal (Satu Kelas)</option>
+                </select>
+              </div>
             </div>
+
+            {/* Fokus Isu Selection */}
+            <div className="pt-2 border-t border-gray-200/60">
+              <label className="text-[11px] font-bold text-gray-600 block mb-1.5">
+                Fokus Isu / Tema Bimbingan
+              </label>
+              <div className="flex flex-wrap gap-1 mb-2">
+                {FOKUS_ISU_LIST.map((isu) => {
+                  const isPicked = focusIssue === isu.id;
+                  return (
+                    <button
+                      key={isu.id}
+                      type="button"
+                      onClick={() => setFocusIssue(isPicked ? '' : isu.id)}
+                      className={`px-2 py-0.5 rounded-md text-[10px] font-bold transition-all cursor-pointer border ${
+                        isPicked
+                          ? 'bg-[#00685f] text-white border-[#00685f]'
+                          : 'bg-white text-gray-600 border-gray-200 hover:border-[#00685f]/40'
+                      }`}
+                    >
+                      {isu.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <input
+                type="text"
+                value={focusIssue}
+                onChange={(e) => setFocusIssue(e.target.value)}
+                placeholder="Fokus isu (contoh: Anti-Bullying, Hambatan Belajar)..."
+                className="w-full bg-white border border-gray-200 rounded-xl px-3 py-1.5 text-xs font-medium text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
+              />
+            </div>
+
+            {/* Bidang Bimbingan Standar Isi (Pribadi, Sosial, Belajar, Karier, Lintas Bidang) */}
+            {isBidangBimbinganApplicable(bkComponent) ? (
+              <div className="pt-2 border-t border-gray-200/60">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-[11px] font-bold text-gray-700 block">
+                    Bidang Bimbingan Konseling <span className="text-[#00685f]">(Standar Isi BK)</span>
+                  </label>
+                  <span className="text-[10px] text-gray-400 font-semibold">4 Bidang Utama + Lintas Bidang</span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                  {BIDANG_BIMBINGAN_OPTIONS.map((bid) => {
+                    const isSelected = bidangBimbingan === bid.id || (bid.id === 'Karier' && (bidangBimbingan as string) === 'Karir');
+                    return (
+                      <button
+                        key={bid.id}
+                        type="button"
+                        onClick={() => setBidangBimbingan(bid.id as BidangBimbinganType)}
+                        className={`p-2 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
+                          isSelected
+                            ? 'border-[#00685f] bg-[#f4fffc] ring-2 ring-[#00685f]/25 shadow-2xs'
+                            : 'border-gray-200 bg-white hover:bg-gray-50'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className={`text-[11px] font-extrabold ${isSelected ? 'text-[#00685f]' : 'text-[#0b1c30]'}`}>
+                            {bid.label}
+                          </span>
+                          {isSelected && <Check className="w-3 h-3 text-[#00685f]" />}
+                        </div>
+                        <span className="text-[9px] text-gray-500 font-medium line-clamp-1 mt-0.5">
+                          {bid.desc}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="pt-2 border-t border-gray-200/60">
+                <div className="p-2.5 bg-purple-50/70 border border-purple-200 rounded-xl text-[11px] font-medium text-purple-900">
+                  <span className="font-extrabold">Kategori Non-Bidang Siswa:</span> Layanan Dukungan Sistem berfokus pada manajerial, keprofesian (MGBK), kemitraan, dan supervisi.
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Date and Time Schedule */}
@@ -415,31 +608,54 @@ export default function EditLayananModal({
             )}
           </div>
 
-          {/* Problem / Topic */}
+          {/* Problem / Topic with contextual label */}
           <div className="space-y-1.5">
             <label className="text-xs font-bold text-[#64748b] block">
-              Pokok Masalah / Topik Pembahasan <span className="text-red-500">*</span>
+              {formConfig.problemLabel} <span className="text-red-500">*</span>
             </label>
+
+            {/* Template Cepat Masalah */}
+            <TemplatePicker
+              label="Masalah"
+              defaultTemplates={DEFAULT_PROBLEM_TEMPLATES}
+              customTemplates={customProblemTemplates}
+              currentValue={problem}
+              onSelect={(templateText) => {
+                setProblem(templateText);
+                showToast('Template masalah diterapkan', 'info');
+              }}
+              onSaveCustom={handleSaveCustomProblem}
+              onDeleteCustom={handleDeleteCustomProblem}
+            />
+
             <input
               type="text"
               required
               value={problem}
               onChange={(e) => setProblem(e.target.value)}
-              placeholder="Contoh: Kesulitan Konsentrasi Belajar & Manajemen Waktu Game"
+              placeholder={formConfig.problemPlaceholder}
               className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
             />
           </div>
 
+          {/* Contextual Specific Fields according to Pillar & Service */}
+          <ServiceSpecificFields
+            serviceType={serviceType}
+            bkComponent={bkComponent}
+            details={specificDetails}
+            onChange={setSpecificDetails}
+          />
+
           {/* Description */}
           <div className="space-y-1.5">
             <label className="text-xs font-bold text-[#64748b] block">
-              Deskripsi Kasus & Catatan Pembahasan
+              {formConfig.descriptionLabel}
             </label>
             <textarea
               rows={3}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Detail percakapan konseling, amatan perilaku, atau dinamika emosi siswa..."
+              placeholder={formConfig.descriptionPlaceholder}
               className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3.5 text-xs font-medium text-[#3d4947] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] leading-relaxed"
             />
           </div>
@@ -483,13 +699,13 @@ export default function EditLayananModal({
                 {/* Output / Solution */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-bold text-[#64748b] block">
-                    Hasil / Rekomendasi Konseling (Output)
+                    {formConfig.outputLabel}
                   </label>
                   <textarea
                     rows={2}
                     value={output}
                     onChange={(e) => setOutput(e.target.value)}
-                    placeholder="Contoh: Siswa menyadari pentingnya disiplin belajar dan berkomitmen membatasi penggunaan HP."
+                    placeholder={formConfig.outputPlaceholder}
                     className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3.5 text-xs font-medium text-[#3d4947] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] leading-relaxed"
                   />
                 </div>
@@ -497,70 +713,50 @@ export default function EditLayananModal({
                 {/* Follow Up Plan */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-bold text-[#00685f] block">
-                    Rencana Tindak Lanjut
+                    {formConfig.followUpLabel}
                   </label>
+
+                  {/* Template Cepat Tindak Lanjut */}
+                  <TemplatePicker
+                    label="Tindak Lanjut"
+                    defaultTemplates={DEFAULT_FOLLOWUP_TEMPLATES}
+                    customTemplates={customFollowUpTemplates}
+                    currentValue={followUp}
+                    onSelect={(templateText) => {
+                      setFollowUp(templateText);
+                      showToast('Template tindak lanjut diterapkan', 'info');
+                    }}
+                    onSaveCustom={handleSaveCustomFollowUp}
+                    onDeleteCustom={handleDeleteCustomFollowUp}
+                  />
+
                   <textarea
                     rows={2}
                     value={followUp}
                     onChange={(e) => setFollowUp(e.target.value)}
-                    placeholder="Contoh: Evaluasi perkembangan belajar 1 minggu mendatang bersama wali kelas."
+                    placeholder={formConfig.followUpPlaceholder}
                     className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3.5 text-xs font-medium text-[#3d4947] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] leading-relaxed"
                   />
                 </div>
 
-                {/* Proof Photo Upload */}
-                <div className="space-y-1.5 border-t border-gray-100 pt-3">
-                  <label className="text-[10px] font-extrabold text-gray-500 uppercase tracking-wider flex items-center gap-1">
-                    <ImageIcon className="w-3.5 h-3.5 text-[#00685f]" />
-                    Foto Bukti Sesi (Opsional)
-                  </label>
-
-                  {proofPhotoUrl ? (
-                    <div className="relative rounded-2xl overflow-hidden border border-gray-200 bg-gray-50 p-2 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <img
-                          src={proofPhotoUrl}
-                          alt="Bukti Sesi"
-                          className="w-14 h-14 object-cover rounded-xl border"
-                          referrerPolicy="no-referrer"
-                        />
-                        <div>
-                          <p className="font-bold text-gray-800 text-xs line-clamp-1">
-                            {proofPhotoName || 'Foto Sesi Layanan'}
-                          </p>
-                          <p className="text-[10px] text-emerald-600 font-bold flex items-center gap-1 mt-0.5">
-                            <CheckCircle2 className="w-3 h-3" /> Foto Bukti Terlampir
-                          </p>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setProofPhotoUrl('');
-                          setProofPhotoName('');
-                        }}
-                        className="px-2.5 py-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-xl text-xs font-bold transition-colors cursor-pointer"
-                      >
-                        Hapus Foto
-                      </button>
-                    </div>
-                  ) : (
-                    <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-gray-300 hover:border-[#00685f] rounded-2xl bg-gray-50/50 hover:bg-[#00685f]/5 transition-all cursor-pointer">
-                      <Upload className="w-5 h-5 text-gray-400 mb-1" />
-                      <span className="text-xs font-bold text-[#00685f]">
-                        Unggah Foto Sesi Bimbingan
-                      </span>
-                      <span className="text-[10px] text-gray-400 mt-0.5">
-                        Format JPG, PNG (Maks 5 MB)
-                      </span>
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={handlePhotoUpload}
-                        className="hidden"
-                      />
-                    </label>
-                  )}
+                {/* Proof Photo Upload via Google Drive */}
+                <div className="border-t border-gray-100 pt-3">
+                  <GoogleDrivePhotoUploader
+                    photoUrl={proofPhotoUrl}
+                    photoName={proofPhotoName}
+                    driveFileId={driveFileId}
+                    driveViewUrl={driveViewUrl}
+                    category="sesi"
+                    studentName={selectedStudents.map(s => s.name).join(', ')}
+                    date={date}
+                    label="Bukti Foto Sesi (Google Drive)"
+                    onPhotoChange={({ photoUrl, photoName, driveFileId, driveViewUrl }) => {
+                      setProofPhotoUrl(photoUrl || '');
+                      setProofPhotoName(photoName || '');
+                      setDriveFileId(driveFileId);
+                      setDriveViewUrl(driveViewUrl);
+                    }}
+                  />
                 </div>
               </div>
             )}

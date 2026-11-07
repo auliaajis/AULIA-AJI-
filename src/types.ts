@@ -10,6 +10,8 @@ export interface Student {
   achievementPoints?: number; // Bobot penghargaan / apresiasi yang diperoleh siswa
   avatarUrl?: string;
   initials: string;
+  schoolId?: string;
+  counselorId?: string;
 }
 
 export interface ViolationCategory {
@@ -35,22 +37,93 @@ export interface ViolationRecord {
   handlingProgress?: string; // Penanganan sejauh apa
   proofPhotoUrl?: string;
   proofPhotoName?: string;
+  schoolId?: string;
+  counselorId?: string;
 }
 
+export type BKComponentType =
+  | 'Layanan Dasar'
+  | 'Peminatan & Perencanaan Individual'
+  | 'Layanan Responsif'
+  | 'Layanan Dukungan Sistem';
+
 export type BKServiceType =
+  // Pilar 1: Layanan Dasar
+  | 'Bimbingan Klasikal'
+  | 'Bimbingan Kelompok'
+  | 'Papan Bimbingan & Media BK'
   | 'Layanan Orientasi'
   | 'Layanan Informasi'
-  | 'Layanan Penempatan dan Penyaluran'
   | 'Layanan Penguasaan Konten'
+  | 'Asesmen Kebutuhan (Need Assessment)'
+  // Pilar 2: Peminatan & Perencanaan Individual
+  | 'Layanan Penempatan dan Penyaluran'
+  | 'Peminatan Studi & Ekstrakurikuler'
+  | 'Perencanaan Karir & Studi Lanjut'
+  | 'Konseling Perencanaan Individual'
+  | 'Eksplorasi Bakat & Potensi'
+  | 'Portofolio & Rekam Jejak Siswa'
+  // Pilar 3: Layanan Responsif
   | 'Layanan Konseling Perorangan (Individual)'
-  | 'Layanan Bimbingan Kelompok'
   | 'Layanan Konseling Kelompok'
+  | 'Konferensi Kasus (Case Conference)'
+  | 'Kunjungan Rumah (Home Visit)'
+  | 'Layanan Mediasi'
   | 'Layanan Konsultasi'
-  | 'Layanan Mediasi';
+  | 'Alih Tangan Kasus (Referral)'
+  // Pilar 4: Layanan Dukungan Sistem
+  | 'Kolaborasi Guru & Wali Kelas'
+  | 'Kemitraan (Puskesmas/Psikolog/Mitra)'
+  | 'Manajemen & Administrasi BK'
+  | 'Pengembangan Keprofesian (MGBK/PKB)'
+  | 'Evaluasi & Supervisi Program';
+
+export type BidangBimbinganType = 'Pribadi' | 'Sosial' | 'Belajar' | 'Karier' | 'Karir' | 'Lintas Bidang' | 'Non-Bidang (Dukungan Sistem)';
+
+export interface ServiceSpecificDetails {
+  // Pilar 1: Layanan Dasar
+  bidangBimbingan?: BidangBimbinganType;
+  aspekSkkpd?: string; // Standar Kompetensi Kemandirian Peserta Didik (11 Aspek)
+  tahapCapaian?: 'Pengenalan' | 'Akomodasi' | 'Tindakan' | string; // Tahap Internalization Kemandirian
+  metodeLayanan?: string; // e.g., Diskusi, Ceramah Interaktif, Role Playing, dsb.
+  mediaLayanan?: string; // e.g., LCD Proyektor, PPT, LKS/LKPD, Video
+  evaluasiProses?: string; // Keaktifan & dinamika peserta didik
+  evaluasiHasil?: string; // Understanding, Comfort, Action (Laiseg)
+
+  // Pilar 2: Peminatan & Perencanaan Individual
+  bidangPeminatan?: string; // e.g., Studi Lanjut SMA/SMK, Jurusan, Profesi
+  dasarAsesmen?: string; // Nilai Rapor, Hasil Tes Minat Bakat, Angket AKPD
+  potensiKekuatan?: string; // Potensi dominan siswa
+  rencanaAksiSiswa?: string; // Langkah konkret / action plan siswa
+
+  // Pilar 3: Layanan Responsif
+  akarMasalah?: string; // Faktor pemicu internal/eksternal
+  pendekatanKonseling?: string; // CBT, Realitas (WDEP), SFBC, dsb.
+  komitmenKonseli?: string; // Komitmen tindakan perubahan diri
+  pihakBersengketa?: string; // Untuk Mediasi
+  kesepakatanDamai?: string; // Untuk Mediasi
+  pesertaKonferensi?: string; // Untuk Konferensi Kasus
+  alamatKunjungan?: string; // Untuk Home Visit
+  pihakDitemui?: string; // Untuk Home Visit
+  hasilObservasiKeluarga?: string; // Untuk Home Visit
+  lembagaRujukan?: string; // Untuk Referral
+  alasanRujukan?: string; // Untuk Referral
+  pihakKonsulti?: string; // Untuk Konsultasi
+  rekomendasiKonsultasi?: string; // Untuk Konsultasi
+
+  // Pilar 4: Dukungan Sistem (Kegiatan Manajerial, Keprofesian & Kemitraan Non-Bidang Siswa)
+  subAktivitasSistem?: string; // Manajemen Program, PKB/MGBK, Kolaborasi Guru, Kemitraan, Supervisi
+  bentukKegiatan?: string; // Rapat Koordinasi, Workshop MGBK, dsb.
+  mitraTerlibat?: string; // Pihak/Mitra yang terlibat
+  dokumenOutput?: string; // Notulen, MoU, RPL, Laporan
+}
 
 export interface CounselingService {
   id: string;
   serviceType: BKServiceType;
+  bkComponent?: BKComponentType;
+  bidangBimbingan?: BidangBimbinganType;
+  focusIssue?: string;
   students: { id: string; name: string; class: string; nis: string }[];
   problem: string;
   description: string;
@@ -62,14 +135,27 @@ export interface CounselingService {
   endTime: string;
   attachments: { name: string; size: string }[];
   targetType?: 'Individu' | 'Kelompok' | 'Klasikal';
+  specificDetails?: ServiceSpecificDetails;
   proofPhotoUrl?: string;
   proofPhotoName?: string;
+  driveFileId?: string;
+  driveViewUrl?: string;
+  driveThumbnailUrl?: string;
+  counselorId?: string;
+  counselorName?: string;
+  schoolId?: string;
+  linkedViolationId?: string;
+  linkedTicketId?: string;
 }
 
 export interface PresetServiceData {
   studentIds?: string[];
   serviceType?: BKServiceType;
+  bkComponent?: BKComponentType;
+  bidangBimbingan?: BidangBimbinganType;
+  focusIssue?: string;
   targetType?: 'Individu' | 'Kelompok' | 'Klasikal';
+  specificDetails?: ServiceSpecificDetails;
   problem?: string;
   description?: string;
   output?: string;
@@ -78,12 +164,15 @@ export interface PresetServiceData {
   scheduleDate?: string;
   startTime?: string;
   endTime?: string;
+  linkedViolationId?: string;
+  linkedTicketId?: string;
   violationContext?: {
     category: string;
     pointsAdded: number;
     date: string;
     notes?: string;
     ticketId?: string;
+    violationId?: string;
   };
 }
 
@@ -96,6 +185,8 @@ export interface ActivityLog {
   studentName: string;
   studentClass: string;
   timestamp: Date;
+  schoolId?: string;
+  counselorId?: string;
 }
 
 export interface StudentAttendance {
@@ -113,6 +204,7 @@ export interface ClassAttendanceRecord {
   records: StudentAttendance[];
   updatedAt: string;
   submittedBy: string; // Counselor name
+  schoolId?: string;
 }
 
 export interface Counselor {
@@ -157,6 +249,8 @@ export interface BKJournalEntry {
 export interface ParentAttendanceDetails {
   actualDate: string;
   actualTime: string;
+  meetingPlace?: string;
+  documentNumber?: string;
   attendeeName: string;
   attendeeRelation: string; // e.g. Ibu Kandung, Ayah Kandung, Wali
   phone?: string;
@@ -186,6 +280,7 @@ export interface ParentSummon {
   summonPlace: string;
   agenda: string;
   counselorId: string;
+  bidangBimbingan?: BidangBimbinganType;
   status: 'Terkirim' | 'Hadir' | 'Batal' | 'Penjadwalan Ulang';
   createdAt: string;
   attendanceDetails?: ParentAttendanceDetails;
@@ -201,11 +296,15 @@ export interface HomeVisitRecord {
   studentNis: string;
   parentNameMet: string;
   address: string;
+  bidangBimbingan?: BidangBimbinganType;
   purpose: string;
   result: string;
   agreement: string;
-  photoUrl?: string; // Base64 or Unsplash fallback or loaded image
+  photoUrl?: string; // Base64 or Drive URL or loaded image
   photoName?: string;
+  driveFileId?: string;
+  driveViewUrl?: string;
+  driveThumbnailUrl?: string;
   parentSignature?: string; // Base64 signature image
   counselorSignature?: string; // Base64 signature image
   counselorName: string;

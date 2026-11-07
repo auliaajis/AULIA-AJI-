@@ -1,166 +1,145 @@
 import { registerDeletedId } from './deletionTracker';
-import { deleteFromFirestore } from './firestoreSync';
+import { deleteFromFirestore, saveSchoolData, loadSchoolData, saveBulkToFirestore, broadcastRealtimeChange } from './firestoreSync';
+import { getActiveSchoolId } from './schoolConfig';
+import { CANONICAL_AULIA_STUDENTS } from '../data/canonicalStudents';
+import { Student } from '../types';
 
-// List of known dummy student IDs, NIS, and Names
-const DUMMY_STUDENT_IDS = new Set([
-  's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's10', 's11', 's12'
-]);
-
-const DUMMY_STUDENT_NIS = new Set([
-  '21221001', '21221042', '21221088', '21221015', '21221024', '21221057',
-  '21221063', '21221033', '21221094', '21221040', '21221102', '21221145'
-]);
-
-const DUMMY_STUDENT_NAMES = new Set([
-  'Aditya Saputra', 'Bela Mahendra', 'Raka Kurniawan', 'Aditya Pratama',
-  'Siti Aminah', 'Rizky Ramadhan', 'Rangga Wijaya', 'Bagas Saputra',
-  'Lina Marlina', 'Siti Nurhaliza', 'Bagus Nugroho', 'Dimas Setiawan'
-]);
-
-const DUMMY_VIOLATION_IDS = new Set(['v1', 'v2', 'v3']);
-const DUMMY_VIOLATION_TICKETS = new Set(['PLG-2023-089', 'PLG-2023-090', 'PLG-2023-087']);
-
-const DUMMY_SERVICE_IDS = new Set(['srv1']);
-const DUMMY_JOURNAL_IDS = new Set(['j-mock-1', 'j-mock-2', 'j-mock-3']);
-const DUMMY_SUMMON_IDS = new Set(['ps-demo-1', 'ps-demo-2']);
-const DUMMY_LOG_IDS = new Set(['log1', 'log2', 'log3', 'log4', 'log5']);
-const DUMMY_NOTE_IDS = new Set(['note-1', 'note-2']);
-const DUMMY_SCHEDULE_IDS = new Set(['sch-1', 'sch-2', 'sch-3', 'sch-4', 'sch-5']);
+// Known dummy violation / service IDs from ancient mock templates
+const DUMMY_VIOLATION_IDS = new Set(['v-dummy-test-1', 'v-dummy-test-2']);
+const DUMMY_SERVICE_IDS = new Set(['srv-dummy-test-1']);
 
 /**
- * Checks if a record is identified as dummy data
+ * Checks if a student record is identified as a dummy/sample student.
+ * NOTE: CANONICAL_AULIA_STUDENTS (194 Siswa SMP Negeri 2 Susukan) are REAL genuine student records!
+ * They are NEVER dummy data.
+ */
+export function isDummyStudent(item: any): boolean {
+  if (!item || typeof item !== 'object') return false;
+  if (item.__isExplicitPurgeableDummy === true) return true;
+  
+  const name = String(item.name || '').toLowerCase().trim();
+  if (name.includes('dummy') || name.includes('uji coba data') || name === 'test student') {
+    return true;
+  }
+  
+  // Non-SMP classes in SMP Negeri 2 Susukan (e.g. leftover 10A, 11B from old SMA templates)
+  const cls = String(item.class || '').replace(/kelas\s*/i, '').trim().toUpperCase();
+  if (/^(10|11|12|X|XI|XII)/i.test(cls)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Checks if a record is identified as dummy data.
  */
 export function isDummyRecord(item: any, collectionKey: string): boolean {
   if (!item || typeof item !== 'object') return false;
+  if (item.__isExplicitPurgeableDummy === true) return true;
 
-  const id = String(item.id || '');
-
-  switch (collectionKey) {
-    case 'bk_students':
-      // Only purge exact initial mock student IDs (s1..s12)
-      return DUMMY_STUDENT_IDS.has(id);
-
-    case 'bk_violations':
-      return DUMMY_VIOLATION_IDS.has(id) ||
-        DUMMY_VIOLATION_TICKETS.has(String(item.ticketId || '')) ||
-        DUMMY_STUDENT_IDS.has(String(item.studentId || ''));
-
-    case 'bk_services':
-      if (DUMMY_SERVICE_IDS.has(id) || id.startsWith('srv-mock')) return true;
-      if (Array.isArray(item.students)) {
-        return item.students.some((s: any) => DUMMY_STUDENT_IDS.has(String(s.id || '')));
-      }
-      return false;
-
-    case 'bk_daily_journals':
-      return DUMMY_JOURNAL_IDS.has(id) || id.startsWith('j-mock-');
-
-    case 'bk_parent_summons':
-      return DUMMY_SUMMON_IDS.has(id) || id.startsWith('ps-demo-');
-
-    case 'bk_attendance_history':
-      if (id.startsWith('att-kelas-7a-') || id.startsWith('att-kelas-8a-') || id.startsWith('att-kelas-7b-')) {
-        return true;
-      }
-      if (Array.isArray(item.records)) {
-        return item.records.some((r: any) => DUMMY_STUDENT_IDS.has(String(r.studentId || '')));
-      }
-      return false;
-
-    case 'bk_logs':
-      return DUMMY_LOG_IDS.has(id) || id.startsWith('log-mock');
-
-    case 'bk_sticky_notes':
-      return DUMMY_NOTE_IDS.has(id);
-
-    case 'bk_teaching_schedule':
-    case 'bk_jadwal_mengajar':
-      return DUMMY_SCHEDULE_IDS.has(id);
-
-    default:
-      return false;
+  if (collectionKey === 'bk_students' || collectionKey === 'students') {
+    return isDummyStudent(item);
   }
+  if (collectionKey === 'bk_violations' || collectionKey === 'violations') {
+    const id = String(item.id || '').trim();
+    if (DUMMY_VIOLATION_IDS.has(id)) return true;
+    const cat = String(item.category || '').toLowerCase();
+    if (cat.includes('dummy')) return true;
+  }
+  if (collectionKey === 'bk_services' || collectionKey === 'services') {
+    const id = String(item.id || '').trim();
+    if (DUMMY_SERVICE_IDS.has(id)) return true;
+  }
+  return false;
+}
+
+/**
+ * Purges all dummy student records from LocalStorage and Firestore.
+ * Preserves genuine students (non-dummy).
+ */
+export async function purgeDummyStudents(targetSchoolId?: string): Promise<{ totalPurged: number; remainingCount: number }> {
+  const schoolId = targetSchoolId || getActiveSchoolId();
+  const currentStudents = loadSchoolData<Student[]>('bk_students', [], schoolId);
+
+  // Collect only real dummy students
+  const dummyStudents = Array.isArray(currentStudents) ? currentStudents.filter(isDummyStudent) : [];
+  const realStudents = Array.isArray(currentStudents) ? currentStudents.filter(s => !isDummyStudent(s)) : [];
+
+  // Register only actual dummy IDs in deletion tracker and delete from Firestore
+  for (const st of dummyStudents) {
+    registerDeletedId(st.id);
+    deleteFromFirestore('bk_students', st.id, schoolId).catch(() => {});
+  }
+
+  // Persist the real students
+  saveSchoolData('bk_students', realStudents, schoolId);
+
+  if (realStudents.length > 0) {
+    saveBulkToFirestore('bk_students', realStudents, schoolId).catch(() => {});
+  }
+
+  // Broadcast change
+  broadcastRealtimeChange({
+    type: 'sync',
+    key: 'bk_students',
+    data: realStudents,
+    schoolId
+  });
+  window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+    detail: { key: 'bk_students', data: realStudents, schoolId }
+  }));
+  window.dispatchEvent(new Event('storage'));
+
+  return {
+    totalPurged: dummyStudents.length,
+    remainingCount: realStudents.length
+  };
 }
 
 /**
  * Scans LocalStorage and Firestore, purges all dummy records, and returns stats.
  */
-export async function purgeDummyData(): Promise<{ totalPurged: number; details: Record<string, number> }> {
-  const collectionsToScan = [
-    'bk_students',
-    'bk_violations',
-    'bk_services',
-    'bk_daily_journals',
-    'bk_parent_summons',
-    'bk_attendance_history',
-    'bk_logs',
-    'bk_sticky_notes',
-    'bk_teaching_schedule',
-    'bk_jadwal_mengajar'
-  ];
+export async function purgeDummyData(targetSchoolId?: string): Promise<{ totalPurged: number; details: Record<string, number> }> {
+  const schoolId = targetSchoolId || getActiveSchoolId();
+  const studentResult = await purgeDummyStudents(schoolId);
 
-  let totalPurged = 0;
-  const details: Record<string, number> = {};
-
-  for (const key of collectionsToScan) {
-    let countForKey = 0;
-    const raw = localStorage.getItem(key);
-    if (!raw) continue;
-
-    try {
-      const items = JSON.parse(raw);
-      if (!Array.isArray(items)) continue;
-
-      const validItems: any[] = [];
-      for (const item of items) {
-        if (isDummyRecord(item, key)) {
-          countForKey++;
-          const itemId = String(item.id || '');
-          if (itemId) {
-            registerDeletedId(itemId);
-            // Delete from Firestore Realtime Database
-            deleteFromFirestore(key, itemId).catch(() => {});
-          }
-        } else {
-          validItems.push(item);
-        }
+  // Also clean dummy violations that reference dummy students
+  const currentViolations = loadSchoolData<any[]>('bk_violations', [], schoolId);
+  let purgedViolations = 0;
+  if (Array.isArray(currentViolations)) {
+    const realViolations = currentViolations.filter(v => {
+      const isDummy = isDummyRecord(v, 'bk_violations');
+      if (isDummy) {
+        registerDeletedId(v.id);
+        deleteFromFirestore('bk_violations', v.id, schoolId).catch(() => {});
+        purgedViolations++;
+        return false;
       }
-
-      if (countForKey > 0) {
-        localStorage.setItem(key, JSON.stringify(validItems));
-        details[key] = countForKey;
-        totalPurged += countForKey;
-      }
-    } catch (err) {
-      console.error(`Error purging dummy data for ${key}:`, err);
+      return true;
+    });
+    if (purgedViolations > 0) {
+      saveSchoolData('bk_violations', realViolations, schoolId);
+      saveBulkToFirestore('bk_violations', realViolations, schoolId).catch(() => {});
+      broadcastRealtimeChange({
+        type: 'sync',
+        key: 'bk_violations',
+        data: realViolations,
+        schoolId
+      });
+      window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+        detail: { key: 'bk_violations', data: realViolations, schoolId }
+      }));
     }
   }
 
-  // Handle bk_akpd_class_sessions if present
-  try {
-    const rawAkpd = localStorage.getItem('bk_akpd_class_sessions');
-    if (rawAkpd) {
-      const parsed = JSON.parse(rawAkpd);
-      if (parsed && typeof parsed === 'object') {
-        if (parsed['7A'] && parsed['7A'].submissions) {
-          const subs = parsed['7A'].submissions;
-          if (Array.isArray(subs) && subs.some((s: any) => DUMMY_STUDENT_IDS.has(String(s.studentId || '')))) {
-            delete parsed['7A'];
-            localStorage.setItem('bk_akpd_class_sessions', JSON.stringify(parsed));
-            totalPurged += 1;
-            details['bk_akpd_class_sessions'] = 1;
-          }
-        }
-      }
+  const totalPurged = studentResult.totalPurged + purgedViolations;
+
+  return {
+    totalPurged,
+    details: {
+      students: studentResult.totalPurged,
+      violations: purgedViolations
     }
-  } catch (err) {
-    console.error('Error purging dummy AKPD data:', err);
-  }
-
-  if (totalPurged > 0) {
-    window.dispatchEvent(new Event('storage'));
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', { detail: { key: 'all' } }));
-  }
-
-  return { totalPurged, details };
+  };
 }

@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { StickyNote } from '../types';
-import { saveBulkToFirestore } from '../utils/firestoreSync';
+import { StickyNote, Counselor } from '../types';
+import { saveBulkToFirestore, loadSchoolData, saveSchoolData } from '../utils/firestoreSync';
+import { getActiveSchoolId } from '../utils/schoolConfig';
 import { Pin, Plus, Trash2, CheckCircle2, Circle, Edit3, X, StickyNote as StickyNoteIcon, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
 
 const COLOR_MAP = {
@@ -42,43 +43,37 @@ const COLOR_MAP = {
   },
 };
 
-const DEFAULT_NOTES: StickyNote[] = [
-  {
-    id: 'note-1',
-    title: 'Konseling Lanjutan Ahmad (8B)',
-    content: 'Jadwalkan sesi tindak lanjut mengenai grafik kehadiran minggu lalu bersama wali kelas.',
-    color: 'teal',
-    isPinned: true,
-    isCompleted: false,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'note-2',
-    title: 'Persiapan AKPD',
-    content: 'Cetak lembar kuesioner AKPD Bimbingan Klasikal Kelas 7A.',
-    color: 'yellow',
-    isPinned: false,
-    isCompleted: false,
-    createdAt: new Date().toISOString(),
-  },
-];
+interface StickyNotesWidgetProps {
+  activeCounselor?: Counselor;
+}
 
-export const StickyNotesWidget: React.FC = () => {
-  const [notes, setNotes] = useState<StickyNote[]>(() => {
-    const saved = localStorage.getItem('bk_sticky_notes');
-    if (saved) {
+export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCounselor }) => {
+  const counselorId = activeCounselor?.id || 'default';
+  const schoolId = getActiveSchoolId();
+  const storageKey = `bk_sticky_notes_${counselorId}`;
+
+  const loadNotes = (): StickyNote[] => {
+    const raw = loadSchoolData<StickyNote[]>(storageKey, [], schoolId);
+    if (Array.isArray(raw) && raw.length > 0) {
+      return raw.filter((n: any) => n.id !== 'note-1' && n.id !== 'note-2');
+    }
+    // Fallback check for default/legacy notes
+    const legacy = localStorage.getItem('bk_sticky_notes');
+    if (legacy && counselorId === 'default' || counselorId === 'c1' || counselorId === 'admin') {
       try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          // Filter out dummy notes
-          return parsed.filter((n: any) => n.id !== 'note-1' && n.id !== 'note-2');
-        }
-      } catch (e) {
-        return [];
-      }
+        const parsed = JSON.parse(legacy);
+        if (Array.isArray(parsed)) return parsed.filter((n: any) => n.id !== 'note-1' && n.id !== 'note-2');
+      } catch (e) {}
     }
     return [];
-  });
+  };
+
+  const [notes, setNotes] = useState<StickyNote[]>(() => loadNotes());
+
+  // Reload notes when counselor changes
+  useEffect(() => {
+    setNotes(loadNotes());
+  }, [counselorId, schoolId]);
 
   const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
     return localStorage.getItem('bk_sticky_notes_collapsed') === 'true';
@@ -94,31 +89,28 @@ export const StickyNotesWidget: React.FC = () => {
   const [isPinnedInput, setIsPinnedInput] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem('bk_sticky_notes', JSON.stringify(notes));
-    saveBulkToFirestore('bk_sticky_notes', notes);
-  }, [notes]);
+    saveSchoolData(storageKey, notes, schoolId);
+    saveBulkToFirestore(storageKey, notes, schoolId);
+  }, [notes, storageKey, schoolId]);
 
   useEffect(() => {
     const handleSync = (e: any) => {
       const key = e.detail?.key;
-      if (!key || key === 'bk_sticky_notes' || key === 'all') {
-        const saved = localStorage.getItem('bk_sticky_notes');
-        if (saved) {
-          try {
-            const parsed = JSON.parse(saved);
-            if (Array.isArray(parsed)) setNotes(parsed);
-          } catch (err) {}
-        }
+      if (!key || key === storageKey || key === 'bk_sticky_notes' || key === 'all') {
+        const updated = loadNotes();
+        setNotes(updated);
       }
     };
 
     window.addEventListener('bk_realtime_sync', handleSync);
     window.addEventListener('storage', handleSync);
+    window.addEventListener('bk_school_changed', handleSync);
     return () => {
       window.removeEventListener('bk_realtime_sync', handleSync);
       window.removeEventListener('storage', handleSync);
+      window.removeEventListener('bk_school_changed', handleSync);
     };
-  }, []);
+  }, [storageKey, counselorId, schoolId]);
 
   useEffect(() => {
     localStorage.setItem('bk_sticky_notes_collapsed', String(isCollapsed));

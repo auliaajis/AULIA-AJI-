@@ -35,7 +35,8 @@ import {
 import { downloadJournalPDF, downloadJournalRangePDF, formatIndonesianDate } from '../utils/pdfGenerator';
 import { triggerBackgroundAutoSync } from '../utils/googleSync';
 import { registerDeletedId } from '../utils/deletionTracker';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore } from '../utils/firestoreSync';
+import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import PageHeaderBanner from './PageHeaderBanner';
 
 interface JurnalHarianViewProps {
   activeCounselor: Counselor;
@@ -574,10 +575,9 @@ export default function JurnalHarianView({
     reader.readAsDataURL(file);
   };
 
-  // Sync to localStorage and Firestore
+  // Sync to local cache
   useEffect(() => {
     localStorage.setItem('bk_daily_journals', JSON.stringify(journalEntries));
-    saveBulkToFirestore('bk_daily_journals', journalEntries);
     if (isInitialMountJournal.current) {
       isInitialMountJournal.current = false;
       return;
@@ -653,25 +653,22 @@ export default function JurnalHarianView({
 
     if (editingEntry) {
       // Edit
-      setJournalEntries(prev => prev.map(item => {
-        if (item.id === editingEntry.id) {
-          return {
-            ...item,
-            startTime,
-            endTime,
-            activityType,
-            title,
-            description,
-            target,
-            status,
-            date: selectedDate, // update to currently viewed date
-            proofPhotoUrl,
-            proofPhotoName,
-            absentStudents: absentStudents.trim() || undefined,
-          };
-        }
-        return item;
-      }));
+      const updatedEntry: BKJournalEntry = {
+        ...editingEntry,
+        startTime,
+        endTime,
+        activityType,
+        title,
+        description,
+        target,
+        status,
+        date: selectedDate, // update to currently viewed date
+        proofPhotoUrl,
+        proofPhotoName,
+        absentStudents: absentStudents.trim() || undefined,
+      };
+      setJournalEntries(prev => prev.map(item => item.id === editingEntry.id ? updatedEntry : item));
+      saveToFirestore('bk_daily_journals', updatedEntry);
     } else {
       // Add New
       const newEntry: BKJournalEntry = {
@@ -691,6 +688,7 @@ export default function JurnalHarianView({
         absentStudents: absentStudents.trim() || undefined,
       };
       setJournalEntries(prev => [newEntry, ...prev]);
+      saveToFirestore('bk_daily_journals', newEntry);
 
       // Add to global Activity Log if handler is provided
       if (onAddActivityLog) {
@@ -736,17 +734,18 @@ export default function JurnalHarianView({
   // Scan current day automatic activities
   const currentDayServices = services.filter(s => s.date === selectedDate);
   const currentDayViolations = violations.filter(v => v.date === selectedDate);
+  const currentSchoolId = activeCounselor?.schoolId;
 
-  const homeVisits: any[] = loadSchoolData('bk_home_visits', []);
+  const homeVisits: any[] = loadSchoolData('bk_home_visits', [], currentSchoolId);
   const currentDayHomeVisits = homeVisits.filter(hv => hv.date === selectedDate);
 
-  const summons: any[] = loadSchoolData('bk_parent_summons', []);
+  const summons: any[] = loadSchoolData('bk_parent_summons', [], currentSchoolId);
   const currentDaySummons = summons.filter(sm => (sm.summonDate || sm.date) === selectedDate);
 
-  const achievements: any[] = loadSchoolData('bk_achievements', []);
+  const achievements: any[] = loadSchoolData('bk_achievements', [], currentSchoolId);
   const currentDayAchievements = achievements.filter(a => a.date === selectedDate);
 
-  const attendanceHistory: any[] = loadSchoolData('bk_attendance_history', []);
+  const attendanceHistory: any[] = loadSchoolData('bk_attendance_history', [], currentSchoolId);
   const currentDayAttendance = attendanceHistory.filter(att => normalizeDateStr(att.date) === normalizeDateStr(selectedDate));
 
   // Map services & violations to standard structures
@@ -906,6 +905,7 @@ export default function JurnalHarianView({
     });
 
     setJournalEntries(prev => [...newEntries, ...prev]);
+    newEntries.forEach(ne => saveToFirestore('bk_daily_journals', ne));
     alert(`Berhasil mengimpor ${mappedAutoActivities.length} kegiatan otomatis ke Jurnal Harian permanen!`);
   };
 
@@ -1293,40 +1293,42 @@ export default function JurnalHarianView({
     <div className="space-y-6 animate-in fade-in duration-300">
       
       {/* Header Banner */}
-      <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4 bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-xs">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="p-1.5 bg-[#00685f]/10 rounded-lg text-[#00685f]">
-              <ClipboardList className="w-5 h-5" />
-            </span>
-            <h2 className="text-2xl font-extrabold text-[#0b1c30]">Jurnal Harian Kegiatan Guru BK</h2>
+      <PageHeaderBanner
+        category="Beranda & Jurnal"
+        title="Jurnal Harian Kegiatan Guru BK"
+        description="Catatan formal harian pelaksanaan bimbingan klasikal, konseling individual, mediasi kasus, rapat dinas, serta arsip cetak format dinas."
+        icon={<ClipboardList className="w-5 h-5" />}
+        badge={formatIndonesianDate(selectedDate)}
+        workflowHint="1. Pilih Tanggal Jurnal › 2. Tambah Aktivitas Manual atau Impor Otomatis › 3. Klik Cetak PDF untuk format rekap resmi"
+        stats={[
+          { label: 'Tanggal', value: selectedDate },
+          { label: 'Catatan Manual', value: filteredManualEntries.length },
+          { label: 'Aktivitas Otomatis', value: mappedAutoActivities.length },
+          { label: 'Total Hari Ini', value: totalItemsCount, color: 'text-[#00685f]' }
+        ]}
+        actions={
+          <div className="flex flex-wrap gap-2 items-center">
+            <label className="flex items-center gap-2 text-xs font-bold text-gray-700 bg-gray-50 border border-gray-200 rounded-xl px-3.5 py-2.5 cursor-pointer select-none">
+              <input 
+                type="checkbox"
+                checked={includeAutoInPrint}
+                onChange={(e) => setIncludeAutoInPrint(e.target.checked)}
+                className="w-4 h-4 rounded text-[#00685f] focus:ring-[#00685f] cursor-pointer"
+              />
+              <span>Sertakan Layanan Otomatis di PDF</span>
+            </label>
+
+            <button
+              onClick={handlePrintPDF}
+              className="flex items-center gap-2 px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-md cursor-pointer active:scale-97"
+              title="Cetak/Unduh Jurnal Hari Ini (PDF)"
+            >
+              <Printer className="w-4 h-4" />
+              <span>Cetak PDF</span>
+            </button>
           </div>
-          <p className="text-sm text-[#3d4947]/70 font-semibold mt-1">
-            Catatan harian formal pelaksanaan bimbingan, konseling, mediasi, rapat koordinasi, serta administrasi sekolah.
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-2 items-center">
-          <label className="flex items-center gap-2 text-xs font-bold text-gray-700 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 cursor-pointer select-none">
-            <input 
-              type="checkbox"
-              checked={includeAutoInPrint}
-              onChange={(e) => setIncludeAutoInPrint(e.target.checked)}
-              className="w-4 h-4 rounded text-[#00685f] focus:ring-[#00685f] cursor-pointer"
-            />
-            <span>Sertakan Rekam Layanan Otomatis di PDF</span>
-          </label>
-
-          <button
-            onClick={handlePrintPDF}
-            className="flex items-center gap-2 px-5 py-2.5 bg-[#0b1c30] hover:bg-[#0b1c30]/90 text-white rounded-xl text-sm font-bold transition-all shadow-sm cursor-pointer active:scale-97"
-            title="Cetak/Unduh Jurnal Hari Ini (PDF)"
-          >
-            <Printer className="w-4.5 h-4.5" />
-            <span>Cetak PDF</span>
-          </button>
-        </div>
-      </div>
+        }
+      />
 
       {/* Mode Switcher Navigation Tabs */}
       <div className="flex items-center gap-2 border-b border-[#bcc9c6]/30 pb-2 overflow-x-auto">

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { jsPDF } from 'jspdf';
+import { motion, AnimatePresence } from 'motion/react';
 import { 
   Home, 
   Plus, 
@@ -18,12 +18,16 @@ import {
   Image as ImageIcon,
   AlertCircle
 } from 'lucide-react';
-import { Student, Counselor, HomeVisitRecord } from '../types';
-import { drawLetterhead, getSchoolConfig } from '../utils/pdfGenerator';
+import { Student, Counselor, HomeVisitRecord, BidangBimbinganType } from '../types';
+import { BIDANG_BIMBINGAN_OPTIONS } from '../utils/bkKomprehensif';
+import { getSchoolConfig, downloadHomeVisitPDF, downloadRekapHomeVisitPDF } from '../utils/pdfGenerator';
 import { triggerBackgroundAutoSync } from '../utils/googleSync';
 import { registerDeletedId } from '../utils/deletionTracker';
 import { autoPushToJournal } from '../utils/journalAutoLink';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore } from '../utils/firestoreSync';
+import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { filterHomeVisits } from '../utils/accessControl';
+import GoogleDrivePhotoUploader from './GoogleDrivePhotoUploader';
+import { initialHomeVisits } from '../data/mockData';
 
 interface SignaturePadProps {
   label: string;
@@ -168,7 +172,12 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
 
   // Core states
   const [visits, setVisits] = useState<HomeVisitRecord[]>(() => {
-    return loadSchoolData('bk_home_visits', []);
+    const loaded = loadSchoolData<HomeVisitRecord[]>('bk_home_visits', initialHomeVisits);
+    if (!loaded || loaded.length === 0) {
+      saveSchoolData('bk_home_visits', initialHomeVisits);
+      return initialHomeVisits;
+    }
+    return loaded;
   });
 
   // Navigation / Modal States
@@ -184,6 +193,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
   
   const [parentNameMet, setParentNameMet] = useState('');
   const [visitDate, setVisitDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [bidangBimbingan, setBidangBimbingan] = useState<BidangBimbinganType>('Pribadi');
   const [address, setAddress] = useState('');
   const [purpose, setPurpose] = useState('');
   const [result, setResult] = useState('');
@@ -192,22 +202,16 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
   // Photo capture & upload states
   const [photoUrl, setPhotoUrl] = useState<string | undefined>(undefined);
   const [photoName, setPhotoName] = useState<string | undefined>(undefined);
-  const [isDragging, setIsDragging] = useState(false);
+  const [driveFileId, setDriveFileId] = useState<string | undefined>(undefined);
+  const [driveViewUrl, setDriveViewUrl] = useState<string | undefined>(undefined);
 
   // Digital Signature states
   const [parentSignature, setParentSignature] = useState<string | undefined>(undefined);
   const [counselorSignature, setCounselorSignature] = useState<string | undefined>(undefined);
-  
-  // Live Camera states
-  const [showCamera, setShowCamera] = useState(false);
-  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Sync to localStorage and Firestore
+  // Sync to local cache
   useEffect(() => {
     saveSchoolData('bk_home_visits', visits);
-    saveBulkToFirestore('bk_home_visits', visits);
     if (isInitialMount.current) {
       isInitialMount.current = false;
       return;
@@ -255,103 +259,16 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
     const query = studentSearch.toLowerCase().trim();
     if (!query) return [];
     return students
-      .filter(
-        (s) =>
-          s.name.toLowerCase().includes(query) ||
-          s.nis.includes(query) ||
-          s.class.toLowerCase().includes(query)
-      )
-      .sort((a, b) => a.name.localeCompare(b.name, 'id'));
+      .filter((s) => {
+        if (!s) return false;
+        const name = String(s.name || '').toLowerCase();
+        const nis = String(s.nis ?? '').toLowerCase();
+        const nisn = String(s.nisn ?? '').toLowerCase();
+        const sClass = String(s.class || '').toLowerCase();
+        return name.includes(query) || nis.includes(query) || nisn.includes(query) || sClass.includes(query);
+      })
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'id'));
   }, [studentSearch, students]);
-
-  // Handle local file selection / drop
-  const processFile = (file: File) => {
-    if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      alert('Hanya diperbolehkan melampirkan berkas gambar/foto.');
-      return;
-    }
-    
-    // Convert to Base64
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const base64 = e.target?.result as string;
-      setPhotoUrl(base64);
-      setPhotoName(file.name);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      processFile(e.target.files[0]);
-    }
-  };
-
-  // Drag and Drop handlers
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = () => {
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processFile(e.dataTransfer.files[0]);
-    }
-  };
-
-  // Camera Capture implementation
-  const startCamera = async () => {
-    setCameraError(null);
-    setShowCamera(true);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: 640, height: 480 },
-        audio: false
-      });
-      setCameraStream(stream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-      }
-    } catch (err: any) {
-      console.error('Camera access error:', err);
-      setCameraError(
-        'Gagal mengakses kamera. Pastikan izin kamera telah diberikan dan kamera tidak sedang digunakan oleh aplikasi lain.'
-      );
-    }
-  };
-
-  const stopCamera = () => {
-    if (cameraStream) {
-      cameraStream.getTracks().forEach((track) => track.stop());
-      setCameraStream(null);
-    }
-    setShowCamera(false);
-  };
-
-  const capturePhoto = () => {
-    if (videoRef.current) {
-      const video = videoRef.current;
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-        setPhotoUrl(dataUrl);
-        setPhotoName(`kamera_capture_${Date.now()}.jpg`);
-        stopCamera();
-      }
-    }
-  };
 
   // Submit form handler
   const handleFormSubmit = (e: React.FormEvent) => {
@@ -369,10 +286,11 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
       id: `hv-${Date.now()}`,
       reportNumber,
       date: visitDate,
+      bidangBimbingan,
       studentId: selectedStudent.id,
-      studentName: selectedStudent.name,
-      studentClass: selectedStudent.class,
-      studentNis: selectedStudent.nis,
+      studentName: selectedStudent.name || '',
+      studentClass: selectedStudent.class || '',
+      studentNis: String(selectedStudent.nis ?? ''),
       parentNameMet,
       address,
       purpose,
@@ -380,6 +298,8 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
       agreement,
       photoUrl,
       photoName,
+      driveFileId,
+      driveViewUrl,
       parentSignature,
       counselorSignature,
       counselorName: activeCounselor.name,
@@ -388,6 +308,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
     };
 
     setVisits((prev) => [newRecord, ...prev]);
+    saveToFirestore('bk_home_visits', newRecord);
     
     // Add activity log to local store for dashboard
     const today = new Date();
@@ -397,7 +318,13 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
     const timeLabel = `HARI INI, ${formattedHour}`;
     
     const savedLogs = localStorage.getItem('bk_logs');
-    const existingLogs = savedLogs ? JSON.parse(savedLogs) : [];
+    let existingLogs = [];
+    try {
+      existingLogs = savedLogs ? JSON.parse(savedLogs) : [];
+      if (!Array.isArray(existingLogs)) existingLogs = [];
+    } catch (e) {
+      existingLogs = [];
+    }
     const newLog = {
       id: `log-hv-${Date.now()}`,
       timeLabel,
@@ -408,7 +335,8 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
       studentClass: selectedStudent.class,
       timestamp: new Date().toISOString()
     };
-    localStorage.setItem('bk_logs', JSON.stringify([newLog, ...existingLogs]));
+    saveSchoolData('bk_logs', [newLog, ...existingLogs.slice(0, 79)]);
+    saveToFirestore('bk_logs', newLog);
 
     // Automatically push entry directly to Jurnal Harian
     autoPushToJournal({
@@ -426,6 +354,9 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
       proofPhotoName: photoName
     });
 
+    // Otomatis terbitkan & unduh dokumen PDF resmi Home Visit
+    downloadHomeVisitPDF(newRecord);
+
     // Close form and reset fields
     setShowAddForm(false);
     resetFormFields();
@@ -437,15 +368,17 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
     setStudentSearch('');
     setParentNameMet('');
     setVisitDate(new Date().toISOString().split('T')[0]);
+    setBidangBimbingan('Pribadi');
     setAddress('');
     setPurpose('');
     setResult('');
     setAgreement('');
     setPhotoUrl(undefined);
     setPhotoName(undefined);
+    setDriveFileId(undefined);
+    setDriveViewUrl(undefined);
     setParentSignature(undefined);
     setCounselorSignature(undefined);
-    stopCamera();
   };
 
   const handleDeleteVisit = (id: string, e: React.MouseEvent) => {
@@ -462,236 +395,29 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
 
   // Filtered visits for main listing
   const filteredVisits = React.useMemo(() => {
+    const counselorAllowedVisits = filterHomeVisits(visits, activeCounselor);
     const q = searchQuery.toLowerCase().trim();
-    if (!q) return visits;
-    return visits.filter(
-      (v) =>
-        v.studentName.toLowerCase().includes(q) ||
-        v.studentNis.includes(q) ||
-        v.studentClass.toLowerCase().includes(q) ||
-        v.reportNumber.toLowerCase().includes(q) ||
-        v.purpose.toLowerCase().includes(q)
-    );
-  }, [searchQuery, visits]);
+    if (!q) return counselorAllowedVisits;
+    return counselorAllowedVisits.filter((v) => {
+      if (!v) return false;
+      const sName = String(v.studentName || '').toLowerCase();
+      const sNis = String(v.studentNis ?? '').toLowerCase();
+      const sClass = String(v.studentClass || '').toLowerCase();
+      const repNo = String(v.reportNumber || '').toLowerCase();
+      const purposeText = String(v.purpose || '').toLowerCase();
+      return (
+        sName.includes(q) ||
+        sNis.includes(q) ||
+        sClass.includes(q) ||
+        repNo.includes(q) ||
+        purposeText.includes(q)
+      );
+    });
+  }, [searchQuery, visits, activeCounselor]);
 
   // PDF Generator for Home Visit Record
   const handleDownloadPDF = (record: HomeVisitRecord) => {
-    const doc = new jsPDF({
-      orientation: 'portrait',
-      unit: 'mm',
-      format: 'a4'
-    });
-
-    const primaryColor = [0, 104, 95]; // #00685f (Teal)
-    const darkColor = [11, 28, 48]; // #0b1c30 (Dark Slate)
-    const grayColor = [61, 73, 71]; // #3d4947 (Charcoal)
-    const lightGrayColor = [240, 244, 244]; // Light background
-
-    // 1. Draw Letterhead
-    drawLetterhead(doc, primaryColor);
-
-    // 2. Document Title
-    doc.setFont('Helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-    doc.text('LAPORAN BUKTI KUNJUNGAN RUMAH (HOME VISIT)', 105, 45, { align: 'center' });
-
-    doc.setFont('Helvetica', 'normal');
-    doc.setFontSize(10);
-    doc.setTextColor(darkColor[0], darkColor[1], darkColor[2]);
-    doc.text(`Nomor Dokumen: ${record.reportNumber}`, 105, 51, { align: 'center' });
-
-    // 3. I. IDENTITAS SISWA & WALI
-    doc.setFillColor(lightGrayColor[0], lightGrayColor[1], lightGrayColor[2]);
-    doc.rect(15, 58, 180, 8, 'F');
-    doc.setFont('Helvetica', 'bold');
-    doc.setFontSize(9.5);
-    doc.setTextColor(darkColor[0], darkColor[1], darkColor[2]);
-    doc.text('I. DATA DIRI SISWA & ORANG TUA/WALI', 20, 63.5);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.setFontSize(9);
-    
-    doc.text('Nama Siswa', 20, 72);
-    doc.text(':', 55, 72);
-    doc.setFont('Helvetica', 'bold');
-    doc.text(record.studentName, 60, 72);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.text('NISN', 20, 77);
-    doc.text(':', 55, 77);
-    doc.text(record.studentNis, 60, 77);
-
-    doc.text('Kelas', 20, 82);
-    doc.text(':', 55, 82);
-    doc.text(record.studentClass, 60, 82);
-
-    doc.text('Wali yang Ditemui', 20, 87);
-    doc.text(':', 55, 87);
-    doc.setFont('Helvetica', 'bold');
-    doc.text(record.parentNameMet, 60, 87);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.text('Alamat Kunjungan', 20, 92);
-    doc.text(':', 55, 92);
-    const splitAddress = doc.splitTextToSize(record.address, 130);
-    doc.text(splitAddress, 60, 92);
-
-    const afterAddressY = 92 + (splitAddress.length * 4.5) + 3;
-
-    // 4. II. DETAIL KUNJUNGAN & TEMUAN
-    doc.setFillColor(lightGrayColor[0], lightGrayColor[1], lightGrayColor[2]);
-    doc.rect(15, afterAddressY, 180, 8, 'F');
-    doc.setFont('Helvetica', 'bold');
-    doc.text('II. MAKSUD, TEMUAN & SOLUSI KUNJUNGAN RUMAH', 20, afterAddressY + 5);
-
-    let contentY = afterAddressY + 14;
-    doc.setFont('Helvetica', 'bold');
-    doc.text('Tanggal Kunjungan:', 20, contentY);
-    doc.setFont('Helvetica', 'normal');
-    doc.text(new Date(record.date).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }), 55, contentY);
-
-    contentY += 6;
-    doc.setFont('Helvetica', 'bold');
-    doc.text('Tujuan / Masalah:', 20, contentY);
-    doc.setFont('Helvetica', 'normal');
-    const splitPurpose = doc.splitTextToSize(record.purpose, 170);
-    doc.text(splitPurpose, 20, contentY + 5);
-
-    contentY += (splitPurpose.length * 4.5) + 8;
-    doc.setFont('Helvetica', 'bold');
-    doc.text('Hasil Kunjungan (Temuan):', 20, contentY);
-    doc.setFont('Helvetica', 'normal');
-    const splitResult = doc.splitTextToSize(record.result, 170);
-    doc.text(splitResult, 20, contentY + 5);
-
-    contentY += (splitResult.length * 4.5) + 8;
-    doc.setFont('Helvetica', 'bold');
-    doc.text('Kesepakatan / Tindak Lanjut:', 20, contentY);
-    doc.setFont('Helvetica', 'normal');
-    const splitAgreement = doc.splitTextToSize(record.agreement, 170);
-    doc.text(splitAgreement, 20, contentY + 5);
-
-    contentY += (splitAgreement.length * 4.5) + 8;
-
-    // Check if there is a photo to add
-    let imageAdded = false;
-    let photoBlockHeight = 0;
-    
-    if (record.photoUrl) {
-      photoBlockHeight = 55; // Approximate space needed for the photo block
-    }
-
-    // Determine signatures placement
-    const signaturesHeight = 45;
-    const totalSpaceNeeded = photoBlockHeight + signaturesHeight + 10;
-
-    // Check if we need to wrap to a new page
-    if (contentY + totalSpaceNeeded > 275) {
-      doc.addPage();
-      
-      doc.setDrawColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-      doc.setLineWidth(0.8);
-      doc.line(15, 15, 195, 15);
-
-      doc.setFont('Helvetica', 'italic');
-      doc.setFontSize(8);
-      doc.setTextColor(120, 130, 130);
-      doc.text(`Bukti Home Visit: ${record.studentName} (${record.reportNumber}) - Halaman 2`, 15, 12);
-      
-      contentY = 22;
-    }
-
-    // 5. DRAW PHOTO ATTACHMENT IF AVAILABLE
-    if (record.photoUrl) {
-      try {
-        // Draw documentation label
-        doc.setFillColor(lightGrayColor[0], lightGrayColor[1], lightGrayColor[2]);
-        doc.rect(15, contentY, 180, 7, 'F');
-        doc.setFont('Helvetica', 'bold');
-        doc.setFontSize(9);
-        doc.setTextColor(darkColor[0], darkColor[1], darkColor[2]);
-        doc.text('III. DOKUMENTASI KEGIATAN (FOTO BUKTI KUNJUNGAN)', 20, contentY + 4.5);
-        
-        contentY += 10;
-        
-        // Draw image (scaled to safe fitting bounding box on PDF)
-        const format = record.photoUrl.toLowerCase().includes('image/png') ? 'PNG' : 'JPEG';
-        doc.addImage(record.photoUrl, format, 15, contentY, 65, 40);
-        
-        doc.setFont('Helvetica', 'normal');
-        doc.setFontSize(8);
-        doc.setTextColor(grayColor[0], grayColor[1], grayColor[2]);
-        doc.text(`Lampiran Berkas: ${record.photoName || 'foto_visit.jpg'}`, 85, contentY + 15);
-        doc.text('Keterangan: Foto diambil di lokasi kunjungan sebagai bukti sah fisik', 85, contentY + 20);
-        doc.text('pelaksanaan layanan bimbingan konseling Guru BK SMP N 2 Susukan.', 85, contentY + 24);
-
-        contentY += 46;
-      } catch (err) {
-        console.error('Error rendering image in PDF:', err);
-        // Fallback error label
-        doc.setFont('Helvetica', 'italic');
-        doc.setFontSize(8);
-        doc.setTextColor(180, 50, 50);
-        doc.text('([Gagal menyematkan foto ke dalam PDF. Format gambar tidak didukung/korup])', 20, contentY + 5);
-        contentY += 10;
-      }
-    }
-
-    // 6. IV. SIGNATURES
-    if (contentY + 45 > 275) {
-      doc.addPage();
-      drawLetterhead(doc, primaryColor);
-      contentY = 45;
-    } else {
-      contentY = Math.max(contentY, 215);
-    }
-    
-    const schoolConfig = getSchoolConfig();
-    doc.setFont('Helvetica', 'normal');
-    doc.setFontSize(9.5);
-    doc.setTextColor(darkColor[0], darkColor[1], darkColor[2]);
-
-    doc.text('Mengetahui,', 20, contentY);
-    doc.text('Orang Tua / Wali Murid,', 20, contentY + 5);
-
-    if (record.parentSignature) {
-      try {
-        doc.addImage(record.parentSignature, 'PNG', 24, contentY + 7, 36, 18);
-      } catch (err) {
-        console.error('Error rendering parent signature on PDF:', err);
-      }
-    }
-
-    doc.line(20, contentY + 28, 70, contentY + 28);
-    doc.setFont('Helvetica', 'bold');
-    doc.text(record.parentNameMet.replace('Bapak / Ibu Wali dari ', ''), 20, contentY + 27);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.text('Kabupaten Semarang, ' + new Date(record.date).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }), 125, contentY);
-    doc.text('Guru Pembimbing / Konselor BK,', 125, contentY + 5);
-
-    if (record.counselorSignature) {
-      try {
-        doc.addImage(record.counselorSignature, 'PNG', 128, contentY + 7, 36, 18);
-      } catch (err) {
-        console.error('Error rendering counselor signature on PDF:', err);
-      }
-    }
-
-    doc.line(125, contentY + 28, 180, contentY + 28);
-    doc.setFont('Helvetica', 'bold');
-    doc.text(record.counselorName, 125, contentY + 27);
-    doc.setFont('Helvetica', 'normal');
-    doc.text('NIP. 19931231 202221 1 002', 125, contentY + 32);
-
-    // Page footer layout
-    doc.setFont('Helvetica', 'italic');
-    doc.setFontSize(8);
-    doc.setTextColor(120, 130, 130);
-    doc.text(`Dicetak otomatis melalui Portal BK ${schoolConfig.schoolName} pada ${new Date().toLocaleDateString('id-ID')} | Sifat: Dokumen Rahasia BK`, 15, 282);
-
-    doc.save(`Laporan_Home_Visit_${record.reportNumber}_${record.studentName.replace(/\s+/g, '_')}.pdf`);
+    downloadHomeVisitPDF(record);
   };
 
   return (
@@ -717,9 +443,17 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
       </div>
 
       {/* Main Content Area */}
+      <AnimatePresence mode="wait" initial={false}>
       {showAddForm ? (
         /* Form Bukti Home Visit Card */
-        <div className="bg-white rounded-2xl border border-[#bcc9c6]/30 shadow-md p-6 max-w-3xl mx-auto animate-in zoom-in-95 duration-200">
+        <motion.div
+          key="homevisit-form"
+          initial={{ opacity: 0, y: 12, filter: 'blur(4px)' }}
+          animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+          exit={{ opacity: 0, y: -8, filter: 'blur(2px)' }}
+          transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+          className="bg-white rounded-2xl border border-[#bcc9c6]/30 shadow-md p-6 max-w-3xl mx-auto"
+        >
           <div className="flex justify-between items-center border-b border-gray-100 pb-4 mb-6">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-[#eff4ff] rounded-xl text-[#00685f]">
@@ -728,7 +462,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
               <div>
                 <h3 className="font-extrabold text-[#0b1c30] text-lg">Formulir Bukti Home Visit</h3>
                 <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mt-0.5">
-                  SMP N 2 Susukan • Kabupaten Semarang
+                  {getSchoolConfig().schoolName} • {getSchoolConfig().governmentName || 'Pemerintah Daerah'}
                 </p>
               </div>
             </div>
@@ -785,7 +519,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                             <div>
                               <p className="text-xs font-bold text-[#0b1c30]">{s.name}</p>
                               <p className="text-[10px] text-gray-500 font-semibold">
-                                NISN: {s.nis} | Kelas: {s.class}
+                                NISN: {s.nis || '-'} | Kelas: {s.class || '-'}
                               </p>
                             </div>
                             <span className="text-[10px] font-bold text-[#00685f] bg-[#e6fcf5] px-2 py-0.5 rounded">
@@ -811,7 +545,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                         {selectedStudent.name} ({selectedStudent.class})
                       </p>
                       <p className="text-[10px] text-gray-500 font-semibold">
-                        NISN: {selectedStudent.nis} | Akumulasi Pelanggaran: {selectedStudent.violationPoints} Poin
+                        NISN: {selectedStudent.nis || '-'} | Akumulasi Pelanggaran: {selectedStudent.violationPoints || 0} Poin
                       </p>
                     </div>
                     <span className="bg-[#00685f]/10 text-[#00685f] p-1.5 rounded-lg">
@@ -835,8 +569,28 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                 />
               </div>
 
-              {/* Parent Name Met */}
+              {/* Bidang Bimbingan Standar SOP Dinas */}
               <div className="space-y-1.5">
+                <label className="text-xs font-bold text-[#0b1c30] uppercase tracking-wide flex items-center justify-between">
+                  <span>Bidang Bimbingan <span className="text-red-500">*</span></span>
+                  <span className="text-[10px] text-[#00685f] font-bold">SOP Dinas BK</span>
+                </label>
+                <select
+                  value={bidangBimbingan}
+                  onChange={(e) => setBidangBimbingan(e.target.value as BidangBimbinganType)}
+                  className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                  required
+                >
+                  {BIDANG_BIMBINGAN_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      Bidang {opt.label} — {opt.description}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Parent Name Met */}
+              <div className="space-y-1.5 md:col-span-2">
                 <label className="text-xs font-bold text-[#0b1c30] uppercase tracking-wide block">
                   Nama Orang Tua / Wali yang Ditemui <span className="text-red-500">*</span>
                 </label>
@@ -910,128 +664,25 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                 />
               </div>
 
-              {/* ATTACHMENT PHOTO SECTION */}
+              {/* ATTACHMENT PHOTO SECTION via Google Drive */}
               <div className="space-y-2 md:col-span-2">
-                <label className="text-xs font-bold text-[#0b1c30] uppercase tracking-wide block">
-                  Dokumentasi Foto Bukti (Opsional)
-                </label>
-                
-                {/* Image selection and capture buttons */}
-                <div className="flex flex-wrap gap-2 mb-2">
-                  <label className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer text-[11px] font-bold text-gray-700 transition-colors">
-                    <Upload className="w-3.5 h-3.5 text-[#00685f]" />
-                    <span>Pilih Berkas Foto</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleFileChange}
-                      className="hidden"
-                    />
-                  </label>
-                  
-                  <button
-                    type="button"
-                    onClick={startCamera}
-                    className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer text-[11px] font-bold text-gray-700 transition-colors"
-                  >
-                    <Camera className="w-3.5 h-3.5 text-[#00685f]" />
-                    <span>Ambil dari Kamera</span>
-                  </button>
-                </div>
-
-                {/* Direct Camera View Stream */}
-                {showCamera && (
-                  <div className="p-4 bg-gray-900 rounded-xl border border-gray-700 space-y-3">
-                    <div className="flex justify-between items-center text-white text-[11px] font-bold">
-                      <span className="flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping" />
-                        Kamera Aktif (Live Preview)
-                      </span>
-                      <button
-                        type="button"
-                        onClick={stopCamera}
-                        className="text-gray-400 hover:text-white text-xs font-black uppercase"
-                      >
-                        Batal
-                      </button>
-                    </div>
-
-                    {cameraError ? (
-                      <div className="p-3 bg-red-950 border border-red-800 text-red-200 rounded-lg text-xs flex gap-2">
-                        <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                        <span>{cameraError}</span>
-                      </div>
-                    ) : (
-                      <div className="relative aspect-video max-w-md mx-auto bg-black rounded-lg overflow-hidden">
-                        <video
-                          ref={videoRef}
-                          className="w-full h-full object-cover transform -scale-x-100"
-                          playsInline
-                          muted
-                        />
-                      </div>
-                    )}
-
-                    {!cameraError && (
-                      <div className="flex justify-center">
-                        <button
-                          type="button"
-                          onClick={capturePhoto}
-                          className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition-all shadow-md hover:scale-105"
-                        >
-                          Tangkap Foto (Capture)
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Drag and Drop Box Area */}
-                <div
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onDrop={handleDrop}
-                  className={`border-2 border-dashed rounded-xl p-4 text-center transition-colors ${
-                    isDragging ? 'border-[#00685f] bg-[#e6fcf5]' : 'border-gray-300 bg-gray-50/50'
-                  }`}
-                >
-                  {photoUrl ? (
-                    <div className="flex flex-col items-center gap-2">
-                      <div className="relative w-36 h-24 rounded-lg overflow-hidden border border-[#bcc9c6]/40 shadow-sm">
-                        <img
-                          src={photoUrl}
-                          alt="Documentation"
-                          className="w-full h-full object-cover"
-                          referrerPolicy="no-referrer"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setPhotoUrl(undefined);
-                            setPhotoName(undefined);
-                          }}
-                          className="absolute top-1 right-1 p-1 bg-black/60 rounded-full hover:bg-black/80 text-white transition-colors"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                      <p className="text-[10px] text-gray-500 font-bold truncate max-w-[200px]">
-                        {photoName || 'visit_photo.jpg'}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center py-2 text-gray-400">
-                      <ImageIcon className="w-8 h-8 mb-1.5 opacity-60" />
-                      <p className="text-[11px] font-bold text-gray-500">
-                        Seret & letakkan foto di sini untuk melampirkan secara instan
-                      </p>
-                      <p className="text-[9px] text-gray-400 mt-0.5">
-                        Format file: PNG, JPG, JPEG (Max 5MB)
-                      </p>
-                    </div>
-                  )}
-                </div>
-
+                <GoogleDrivePhotoUploader
+                  photoUrl={photoUrl}
+                  photoName={photoName}
+                  driveFileId={driveFileId}
+                  driveViewUrl={driveViewUrl}
+                  category="home_visit"
+                  studentName={selectedStudent?.name}
+                  date={visitDate}
+                  label="Foto Bukti Home Visit (Google Drive API)"
+                  description="Unggah foto atau potret langsung dari kamera. File disimpan otomatis ke folder Google Drive."
+                  onPhotoChange={({ photoUrl, photoName, driveFileId, driveViewUrl }) => {
+                    setPhotoUrl(photoUrl);
+                    setPhotoName(photoName);
+                    setDriveFileId(driveFileId);
+                    setDriveViewUrl(driveViewUrl);
+                  }}
+                />
               </div>
 
               {/* DIGITAL SIGNATURES SECTION */}
@@ -1073,14 +724,21 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
               </button>
             </div>
           </form>
-        </div>
+        </motion.div>
       ) : (
         /* Main Visits Listing Dashboard View */
-        <div className="space-y-6">
+        <motion.div
+          key="homevisit-list"
+          initial={{ opacity: 0, y: 12, filter: 'blur(4px)' }}
+          animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+          exit={{ opacity: 0, y: -8, filter: 'blur(2px)' }}
+          transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+          className="space-y-6"
+        >
           
           {/* Filter & Search Bar */}
-          <div className="bg-white p-4 rounded-2xl shadow-sm border border-[#bcc9c6]/30 flex items-center gap-4">
-            <div className="relative flex-1">
+          <div className="bg-white p-4 rounded-2xl shadow-sm border border-[#bcc9c6]/30 flex flex-col sm:flex-row items-center gap-3">
+            <div className="relative flex-1 w-full">
               <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <input
                 type="text"
@@ -1090,6 +748,26 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                 className="w-full pl-10 pr-4 py-2 bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl text-xs font-semibold text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 placeholder:text-gray-400"
               />
             </div>
+
+            <button
+              onClick={() => {
+                const now = new Date();
+                const firstDay = new Date(now.getFullYear(), 0, 1).toISOString().split('T')[0];
+                const today = now.toISOString().split('T')[0];
+                downloadRekapHomeVisitPDF({
+                  startDate: firstDay,
+                  endDate: today,
+                  selectedClass: 'semua',
+                  homeVisits: filteredVisits,
+                  activeCounselor
+                });
+              }}
+              className="px-3.5 py-2 bg-teal-50 hover:bg-teal-100 text-[#00685f] border border-teal-200 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap active:scale-97 shrink-0"
+              title="Unduh Buku Register Rekapitulasi Home Visit Resmi (PDF)"
+            >
+              <Download className="w-4 h-4" />
+              <span>Cetak Rekap Home Visit (PDF)</span>
+            </button>
           </div>
 
           {/* Records Display Grid */}
@@ -1103,9 +781,14 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                 >
                   <div className="space-y-3">
                     <div className="flex justify-between items-start">
-                      <span className="text-[10px] bg-teal-50 text-[#00685f] font-extrabold px-2.5 py-1 rounded-lg border border-[#00685f]/10">
-                        {v.reportNumber}
-                      </span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] bg-teal-50 text-[#00685f] font-extrabold px-2.5 py-1 rounded-lg border border-[#00685f]/10">
+                          {v.reportNumber}
+                        </span>
+                        <span className="text-[10px] bg-emerald-50 text-emerald-800 font-bold px-2 py-0.5 rounded-md border border-emerald-200/60">
+                          Bidang {v.bidangBimbingan || 'Pribadi'}
+                        </span>
+                      </div>
                       <span className="text-[9px] text-gray-400 font-bold">
                         {v.date}
                       </span>
@@ -1116,7 +799,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                         {v.studentName}
                       </h4>
                       <p className="text-[11px] text-gray-500 font-semibold">
-                        Kelas: {v.studentClass} | NISN: {v.studentNis}
+                        Kelas: {v.studentClass || '-'} | NISN: {v.studentNis || '-'}
                       </p>
                     </div>
 
@@ -1187,8 +870,9 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
             </div>
           )}
 
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
 
       {/* Detail Laporan Modal overlay */}
       {selectedVisit && (
@@ -1223,7 +907,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                 <div>
                   <span className="block text-[10px] text-gray-400 font-extrabold uppercase tracking-wide">Nama Siswa:</span>
                   <span className="font-extrabold text-[#0b1c30] text-sm block mt-0.5">{selectedVisit.studentName}</span>
-                  <span className="text-[10px] text-gray-500 font-semibold block">NISN: {selectedVisit.studentNis} | Kelas {selectedVisit.studentClass}</span>
+                  <span className="text-[10px] text-gray-500 font-semibold block">NISN: {selectedVisit.studentNis || '-'} | Kelas {selectedVisit.studentClass || '-'}</span>
                 </div>
                 <div>
                   <span className="block text-[10px] text-gray-400 font-extrabold uppercase tracking-wide">Wali yang Ditemui:</span>
@@ -1238,10 +922,16 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
 
               {/* Home Visit Details */}
               <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-4 border-b border-gray-100 pb-3">
+                <div className="grid grid-cols-3 gap-3 border-b border-gray-100 pb-3">
                   <div>
                     <span className="text-gray-400 font-extrabold block uppercase text-[9px] tracking-wide">Tanggal Kunjungan:</span>
                     <span className="font-bold text-gray-800 block mt-1">{selectedVisit.date}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400 font-extrabold block uppercase text-[9px] tracking-wide">Bidang Bimbingan:</span>
+                    <span className="font-bold text-[#00685f] block mt-1">
+                      {selectedVisit.bidangBimbingan ? `Bidang ${selectedVisit.bidangBimbingan}` : 'Bidang Pribadi'}
+                    </span>
                   </div>
                   <div>
                     <span className="text-gray-400 font-extrabold block uppercase text-[9px] tracking-wide">Petugas Pelaksana BK:</span>
@@ -1273,10 +963,22 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                 {/* Photo Documentation attached display */}
                 {selectedVisit.photoUrl && (
                   <div className="space-y-1.5 pt-2">
-                    <span className="text-[#0b1c30] font-black block uppercase text-[9px] tracking-wider flex items-center gap-1.5">
-                      <Camera className="w-4 h-4 text-[#00685f]" />
-                      Lampiran Foto Bukti Lapangan:
-                    </span>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#0b1c30] font-black block uppercase text-[9px] tracking-wider flex items-center gap-1.5">
+                        <Camera className="w-4 h-4 text-[#00685f]" />
+                        Lampiran Foto Bukti Lapangan:
+                      </span>
+                      {selectedVisit.driveViewUrl && (
+                        <a
+                          href={selectedVisit.driveViewUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[10px] text-[#00685f] hover:underline font-bold flex items-center gap-1"
+                        >
+                          Buka di Google Drive ↗
+                        </a>
+                      )}
+                    </div>
                     <div className="relative aspect-video max-w-sm rounded-2xl overflow-hidden border border-gray-200 shadow-sm">
                       <img
                         src={selectedVisit.photoUrl}

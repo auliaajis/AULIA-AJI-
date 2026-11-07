@@ -1,0 +1,24 @@
+{
+  "name": "SIKAP-BK SMPN 2 Susukan",
+  "short_name": "SIKAP BK",
+  "description": "Sistem Informasi Karakter, Apresiasi, dan Pelayanan BK SMP Negeri 2 Susukan",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f8faf9",
+  "theme_color": "#00685f",
+  "icons": [
+    {
+      "src": "/src/assets/images/sidebar_logo_1784550999341.jpg",
+      "sizes": "192x192",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/src/assets/images/sidebar_logo_1784550999341.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    }
+  ]
+}

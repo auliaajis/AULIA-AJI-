@@ -48,7 +48,19 @@ import {
   ModulAjarRpl,
   AkpdQuestion
 } from '../data/asesmenData';
+import {
+  RIASEC_MINAT_QUESTIONS,
+  RIASEC_KETERAMPILAN_ITEMS,
+  RIASEC_INTERPRETATIONS,
+  EPSTEIN_PARENT_PARTNERSHIP_MODELS,
+  PPKSP_2023_SOP,
+  TIGA_DOSA_BESAR_SOP,
+  SEGITIGA_RESTITUSI_STEPS,
+  LIMA_POSISI_KONTROL
+} from '../data/juknisBskap2022';
 import { getSchoolConfig } from '../utils/schoolConfig';
+import { applyLatestBkGuideConfig } from '../utils/violationRulesConfig';
+import { finalizeAndSavePdf } from '../utils/pdfGenerator';
 import jsPDF from 'jspdf';
 
 export interface AkpdStudentSubmission {
@@ -71,7 +83,7 @@ interface AsesmenBkViewProps {
 }
 
 export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkViewProps) {
-  const [activeTab, setActiveTab] = useState<'akpd' | 'capaian' | 'atl' | 'modul' | 'ai-script'>('akpd');
+  const [activeTab, setActiveTab] = useState<'akpd' | 'capaian' | 'atl' | 'modul' | 'ai-script' | 'juknis-bskap'>('akpd');
   const [selectedClass, setSelectedClass] = useState<string>('7A');
   const [selectedFase, setSelectedFase] = useState<'Fase D' | 'Fase E' | 'Fase F'>('Fase D');
   const [searchQuery, setSearchQuery] = useState('');
@@ -640,7 +652,11 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
     doc.text(`NIP. ${sc.principalNip}`, 20, y + 33);
     doc.text('NIP. 19850412 201001 2 018', 135, y + 33);
 
-    doc.save(`Laporan_AKPD_Kelas_${selectedClass}_${sc.schoolName.replace(/\s+/g, '_')}.pdf`);
+    const pdfFilename = `Laporan_AKPD_Kelas_${selectedClass}_${sc.schoolName.replace(/\s+/g, '_')}.pdf`;
+    finalizeAndSavePdf(doc, pdfFilename, {
+      category: 'layanan',
+      successToastMessage: 'Laporan AKPD berhasil diunduh & tersimpan otomatis di Google Drive!',
+    });
   };
 
   // Copy Helper Functions
@@ -1015,7 +1031,11 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
       }
     }
 
-    doc.save(`Paket_Lengkap_RPL_BK_${modul.title.slice(0, 20).replace(/\s+/g, '_')}_${sc.schoolName.replace(/\s+/g, '_')}.pdf`);
+    const pdfFilename = `Paket_Lengkap_RPL_BK_${modul.title.slice(0, 20).replace(/\s+/g, '_')}_${sc.schoolName.replace(/\s+/g, '_')}.pdf`;
+    finalizeAndSavePdf(doc, pdfFilename, {
+      category: 'layanan',
+      successToastMessage: 'Paket Lengkap RPL BK berhasil diunduh & tersimpan otomatis di Google Drive!',
+    });
   };
 
   return (
@@ -1119,6 +1139,18 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
         >
           <Bot className="w-4 h-4 text-amber-500" />
           <span>Panduan Konseling AI</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('juknis-bskap')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-2xl text-xs font-extrabold transition-all cursor-pointer whitespace-nowrap ${
+            activeTab === 'juknis-bskap'
+              ? 'bg-[#00685f] text-white shadow-sm'
+              : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-200'
+          }`}
+        >
+          <BookOpen className="w-4 h-4 text-purple-600" />
+          <span>Panduan BK & PPKSP 2023</span>
         </button>
       </div>
 
@@ -2437,6 +2469,146 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
                 </p>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 6: PANDUAN BK KURIKULUM MERDEKA & PPKSP 2023 */}
+      {activeTab === 'juknis-bskap' && (
+        <div className="space-y-6 animate-in fade-in duration-200">
+          {/* Hero Banner */}
+          <div className="bg-gradient-to-r from-teal-950 via-[#00685f] to-[#004e47] rounded-3xl p-6 text-white shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4 border border-teal-700/60">
+            <div className="space-y-2 max-w-2xl">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-teal-300 text-teal-950">
+                  Resmi Kemendikbudristek
+                </span>
+                <span className="text-teal-200 text-xs font-semibold">
+                  BSKAP & Permendikbudristek No. 46 Tahun 2023
+                </span>
+              </div>
+              <h2 className="text-xl font-black">
+                Pedoman Operasional BK Kurikulum Merdeka & Alur TPPK
+              </h2>
+              <p className="text-xs text-teal-100/90 leading-relaxed font-medium">
+                Sistem pencegahan & penanganan kekerasan di lingkungan satuan pendidikan, pendekatan disiplin positif (Segitiga Restitusi), 5 posisi kontrol, dan 4 pilar program bimbingan konseling komprehensif.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const res = applyLatestBkGuideConfig();
+                showToast(`Standar BK Kurikulum Merdeka & PPKSP berhasil diterapkan (${res.count} kategori aktif)!`, 'success');
+              }}
+              className="px-4.5 py-3 bg-white text-[#00685f] hover:bg-teal-50 active:scale-97 rounded-xl text-xs font-black transition-all shadow-md cursor-pointer shrink-0 flex items-center gap-2 self-start md:self-center"
+            >
+              <Sparkles className="w-4 h-4 text-[#00685f]" />
+              <span>Terapkan Standar ke Sekolah Ini</span>
+            </button>
+          </div>
+
+          {/* 6 Bentuk Kekerasan PPKSP 2023 */}
+          <div className="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-rose-600" />
+                <h3 className="text-sm font-black text-[#0b1c30]">
+                  6 Bentuk Kekerasan Satuan Pendidikan (Permendikbudristek No. 46/2023)
+                </h3>
+              </div>
+              <span className="text-xs font-bold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-full border border-rose-200">
+                Hotline SAPA 129 / WA: 08111-129-129
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {PPKSP_2023_SOP.enamBentukKekerasan.map((bk) => (
+                <div key={bk.id} className="p-3.5 bg-rose-50/40 rounded-xl border border-rose-100 space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-rose-600 text-white font-black text-[10px] flex items-center justify-center">
+                      {bk.id}
+                    </span>
+                    <h4 className="text-xs font-black text-rose-950">{bk.nama}</h4>
+                  </div>
+                  <p className="text-[11px] text-gray-600 leading-relaxed font-medium">{bk.definisi}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Alur SOP TPPK */}
+            <div className="pt-3 border-t border-gray-100 space-y-2">
+              <h4 className="text-xs font-black uppercase tracking-wider text-[#00685f]">
+                5 Tahap Penanganan Kasus oleh Tim TPPK Satuan Pendidikan:
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
+                {PPKSP_2023_SOP.alurPenangananTppk.map((step) => (
+                  <div key={step.step} className="p-3 bg-teal-50/40 rounded-xl border border-teal-200/80 space-y-1">
+                    <span className="w-5 h-5 rounded-full bg-[#00685f] text-white font-black text-[10px] flex items-center justify-center">
+                      {step.step}
+                    </span>
+                    <h5 className="text-xs font-extrabold text-[#0b1c30]">{step.title}</h5>
+                    <p className="text-[10px] text-gray-600 leading-relaxed font-medium">{step.desc}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Segitiga Restitusi & Posisi Kontrol Glasser */}
+          <div className="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm space-y-5">
+            <div className="flex items-center gap-2 pb-3 border-b border-gray-100">
+              <Sparkles className="w-5 h-5 text-[#00685f]" />
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">
+                  Segitiga Restitusi & 5 Posisi Kontrol Guru BK (Dr. William Glasser)
+                </h3>
+                <p className="text-xs text-gray-500 font-medium">
+                  Roh pembinaan karakter Kurikulum Merdeka yang menggantikan paradigma hukuman retributif
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {SEGITIGA_RESTITUSI_STEPS.map((s, idx) => (
+                <div key={idx} className="p-4 bg-teal-50/30 rounded-2xl border border-teal-200/70 space-y-2 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="w-5 h-5 rounded-full bg-[#00685f] text-white text-[10px] font-black flex items-center justify-center">
+                        {s.step}
+                      </span>
+                      <h4 className="text-xs font-black text-[#0b1c30]">{s.title}</h4>
+                    </div>
+                    <p className="text-[11px] text-gray-600 font-medium leading-relaxed">{s.tujuan}</p>
+                  </div>
+                  <div className="bg-white p-2.5 rounded-xl border border-teal-100 text-[10px] text-gray-700 italic space-y-0.5">
+                    <span className="font-bold text-[#00685f] not-italic block uppercase text-[9px]">Contoh Kalimat:</span>
+                    <p>"{s.contohKalimat[0]}"</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5 pt-2 border-t border-gray-100">
+              {LIMA_POSISI_KONTROL.map((pk, idx) => (
+                <div
+                  key={idx}
+                  className={`p-3 rounded-xl border text-xs space-y-1 ${
+                    pk.posisi.includes('Manajer')
+                      ? 'bg-teal-50 border-[#00685f] ring-2 ring-[#00685f]/20'
+                      : 'bg-gray-50 border-gray-200'
+                  }`}
+                >
+                  <div className="flex justify-between items-center">
+                    <span className="text-[9px] font-bold text-gray-400">Posisi {idx + 1}</span>
+                    <span className="text-[8px] font-black px-1.5 py-0.2 rounded bg-white text-gray-700 border">
+                      {pk.kategori}
+                    </span>
+                  </div>
+                  <h5 className="font-extrabold text-[#0b1c30] text-[11px]">{pk.posisi}</h5>
+                  <p className="text-[10px] text-gray-600 leading-tight font-medium">{pk.ciri}</p>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}

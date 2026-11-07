@@ -334,102 +334,196 @@ html.dark .shadow-lg {
   box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6) !important;
 }
 
-/* Print Utilities */
+/* ==========================================================================
+   🖨️ ADVANCED PRINT MEDIA QUERIES (A4 PRINT & PDF GENERATION)
+   ========================================================================== */
 @media print {
-  /* Set standard paper size and margin */
   @page {
     size: A4 portrait;
-    margin: 15mm 15mm 15mm 15mm;
+    margin: 10mm 12mm 12mm 12mm;
   }
 
-  body {
-    background: white !important;
-    color: black !important;
-    font-size: 11pt !important;
-    line-height: 1.4 !important;
+  *, *::before, *::after {
+    box-sizing: border-box !important;
+    text-shadow: none !important;
   }
 
-  /* Universal hide class for printing */
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 10.5pt !important;
+    line-height: 1.45 !important;
+    width: 100% !important;
+    min-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+  }
+
+  /* Universal hide non-printable UI elements */
   .no-print,
+  .no-print-wrapper,
   nav,
   sidebar,
   aside,
   header,
   footer,
   button,
-  .no-print-wrapper {
+  .mobile-fab,
+  .sticky-notes,
+  .ai-assistant,
+  .toast-container,
+  input[type="button"],
+  input[type="submit"] {
     display: none !important;
+    visibility: hidden !important;
     height: 0 !important;
     width: 0 !important;
     padding: 0 !important;
     margin: 0 !important;
     border: none !important;
+    opacity: 0 !important;
   }
 
-  /* Layout and framework resets to avoid cropping or double sidebars */
-  html, body, #root, .min-h-screen, main, .max-w-7xl, .lg\:pl-64, .mt-16 {
+  /* Layout and framework container resets to avoid truncation & clipping */
+  #root,
+  #root > div,
+  .min-h-screen,
+  main,
+  .max-w-7xl,
+  .lg\:pl-64,
+  .mt-16,
+  .overflow-hidden,
+  .overflow-y-auto,
+  .overflow-x-auto,
+  .fixed,
+  .absolute {
+    position: static !important;
+    display: block !important;
     height: auto !important;
     min-height: 0 !important;
+    max-height: none !important;
     overflow: visible !important;
     padding: 0 !important;
     margin: 0 !important;
     width: 100% !important;
     max-width: 100% !important;
-    position: static !important;
     transform: none !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+    border: none !important;
   }
 
-  /* Make sure printing containers span full width with no margins/paddings or scrolling */
-  .print-container {
+  /* Full-width container formatting */
+  .print-container,
+  #print-profile-area,
+  .printable-card,
+  .print-sheet,
+  .service-card,
+  .layanan-card,
+  .counseling-card,
+  [id*="service-card"],
+  [id*="kartu-layanan"] {
     width: 100% !important;
     max-width: 100% !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    border: none !important;
+    margin: 0 auto !important;
+    padding: 10px !important;
+    border: 1px solid #cbd5e1 !important;
     box-shadow: none !important;
-    background: white !important;
+    background: #ffffff !important;
     display: block !important;
+    overflow: visible !important;
+    box-sizing: border-box !important;
   }
 
-  /* Prevent page breaks inside cards/records/table rows */
-  tr, .print-card, .print-avoid-break {
+  /* Prevent page breaks inside cards, tables, rows, signature sections */
+  tr,
+  .print-card,
+  .service-card,
+  .layanan-card,
+  .counseling-card,
+  [id*="service-card"],
+  [id*="kartu-layanan"],
+  .print-avoid-break,
+  .break-inside-avoid,
+  .signature-block,
+  .kop-surat,
+  .grid-cols-2,
+  .grid {
     page-break-inside: avoid !important;
     break-inside: avoid !important;
   }
 
-  /* Force table layouts and colors to display correctly */
-  table {
-    border-collapse: collapse !important;
-    width: 100% !important;
-    background: white !important;
-  }
-
-  th, td {
-    border: 1.5px solid #000000 !important;
-    padding: 8px 10px !important;
-    text-align: left !important;
+  /* Prevent awkward heading splits */
+  h1, h2, h3, h4, h5, h6 {
+    page-break-after: avoid !important;
+    break-after: avoid !important;
     color: #000000 !important;
   }
 
+  /* Tables formatting for crisp black & white / greyscale print */
+  table {
+    border-collapse: collapse !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    background: #ffffff !important;
+    margin-bottom: 12px !important;
+    table-layout: fixed !important;
+    word-wrap: break-word !important;
+    overflow-wrap: break-word !important;
+  }
+
+  th, td {
+    border: 1px solid #1e293b !important;
+    padding: 6px 8px !important;
+    text-align: left !important;
+    color: #000000 !important;
+    font-size: 9.5pt !important;
+    vertical-align: top !important;
+    word-break: break-word !important;
+  }
+
   th {
-    background-color: #f2f2f2 !important;
-    font-weight: bold !important;
+    background-color: #f1f5f9 !important;
+    font-weight: 700 !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
 
-  /* Text color printing corrections */
-  .text-red-600 {
-    color: #b91c1c !important;
+  /* Utility grid display for 2 columns on A4 */
+  .print-grid-2 {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+    gap: 16px !important;
+    width: 100% !important;
   }
-  .text-emerald-600 {
-    color: #047857 !important;
+
+  /* High contrast colors for print text */
+  .text-red-600, .text-red-700, .text-red-800 {
+    color: #991b1b !important;
   }
-  .text-teal-800, .text-teal-700 {
+  .text-emerald-600, .text-emerald-700, .text-emerald-800 {
+    color: #065f46 !important;
+  }
+  .text-teal-800, .text-teal-700, .text-\[\#00685f\] {
     color: #0f766e !important;
   }
-  .text-gray-500 {
-    color: #4b5563 !important;
+  .text-gray-900, .text-gray-800, .text-\[\#0b1c30\] {
+    color: #000000 !important;
+  }
+  .text-gray-700, .text-gray-600, .text-gray-500, .text-\[\#3d4947\] {
+    color: #334155 !important;
+  }
+
+  /* Card and border adjustments */
+  .border, .border-2, .border-t, .border-b, .border-l, .border-r {
+    border-color: #94a3b8 !important;
+  }
+
+  .rounded, .rounded-lg, .rounded-xl, .rounded-2xl {
+    border-radius: 4px !important;
   }
 }
 
@@ -458,5 +552,274 @@ html.dark .custom-scrollbar::-webkit-scrollbar-thumb {
 
 html.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #14b8a6;
+}
+
+/* ==========================================================================
+   RESPONSIVE DESIGN SYSTEM (CSS Media Queries for Mobile, Tablet, Desktop)
+   ========================================================================== */
+
+/* 1. Global Viewport & Responsive Resets */
+:root {
+  --header-height: 4rem;
+  --bottom-nav-height: 4.5rem;
+  --sidebar-width: 16rem;
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Fluid responsive container */
+.app-content-container,
+.responsive-container {
+  width: 100%;
+  margin-inline: auto;
+}
+
+/* Touch-optimized horizontal scrolling with momentum */
+.table-responsive,
+.overflow-x-auto,
+.responsive-table-wrapper {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+  position: relative;
+  max-width: 100%;
+}
+
+/* --------------------------------------------------------------------------
+   A. MOBILE PHONES (max-width: 767.98px)
+   -------------------------------------------------------------------------- */
+@media screen and (max-width: 767.98px) {
+  /* Prevent horizontal document overflow */
+  html, body {
+    overflow-x: hidden;
+    width: 100%;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* Main workspace padding to prevent obstruction by bottom navigation bar */
+  main,
+  .app-workspace {
+    margin-top: 3.75rem !important;
+    padding-left: 0.75rem !important;
+    padding-right: 0.75rem !important;
+    padding-top: 0.75rem !important;
+    padding-bottom: calc(var(--bottom-nav-height) + var(--safe-area-bottom) + 1.25rem) !important;
+  }
+
+  .app-main-column {
+    padding-left: 0 !important;
+    width: 100% !important;
+  }
+
+  /* Header adjustments on mobile */
+  header,
+  .app-header {
+    width: 100% !important;
+    height: 3.75rem !important;
+    padding-inline: 0.625rem !important;
+  }
+
+  /* Interactive touch targets >= 44px */
+  button,
+  a,
+  input[type="button"],
+  input[type="submit"],
+  .touch-target {
+    min-height: 40px;
+    touch-action: manipulation;
+  }
+
+  /* Prevent iOS auto-zoom on input focus by setting 14-16px font size */
+  input[type="text"],
+  input[type="search"],
+  input[type="password"],
+  input[type="email"],
+  input[type="number"],
+  select,
+  textarea {
+    font-size: 14px !important;
+  }
+
+  /* Modal Dialogs on Mobile - Full width bottom-sheet or card fitting screen */
+  .fixed.inset-0 > div,
+  .modal-dialog,
+  [role="dialog"] {
+    padding: 0.5rem !important;
+  }
+
+  .fixed.inset-0 > div > div,
+  .modal-content {
+    max-width: 100% !important;
+    width: 100% !important;
+    max-height: calc(92dvh - var(--safe-area-bottom)) !important;
+    border-radius: 1.25rem !important;
+    margin: auto !important;
+    overflow-y: auto !important;
+  }
+
+  /* Table styling on mobile */
+  table {
+    font-size: 11px !important;
+  }
+
+  th, td {
+    padding: 0.5rem 0.625rem !important;
+  }
+
+  /* Responsive card padding reduction */
+  .p-5, .p-6, .p-7, .p-8 {
+    padding: 0.875rem !important;
+  }
+
+  /* Hide non-essential desktop decoration on mobile */
+  .desktop-only {
+    display: none !important;
+  }
+
+  /* Responsive canvas for signature pad */
+  canvas {
+    max-width: 100% !important;
+    height: auto !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   B. EXTRA-SMALL SMARTPHONES (max-width: 479.98px)
+   -------------------------------------------------------------------------- */
+@media screen and (max-width: 479.98px) {
+  h1, .text-2xl {
+    font-size: 1.25rem !important;
+    line-height: 1.75rem !important;
+  }
+
+  h2, .text-xl {
+    font-size: 1.125rem !important;
+    line-height: 1.5rem !important;
+  }
+
+  /* Action buttons stack gracefully */
+  .btn-group-responsive {
+    flex-direction: column !important;
+    width: 100% !important;
+  }
+
+  .btn-group-responsive > button,
+  .btn-group-responsive > a {
+    width: 100% !important;
+    justify-content: center !important;
+  }
+
+  /* Header compact items */
+  header .max-w-xs,
+  header .max-w-md {
+    max-width: 150px !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   C. TABLETS (min-width: 768px) and (max-width: 1023.98px)
+   -------------------------------------------------------------------------- */
+@media screen and (min-width: 768px) and (max-width: 1023.98px) {
+  .app-main-column {
+    padding-left: 0 !important;
+    width: 100% !important;
+  }
+
+  header,
+  .app-header {
+    width: 100% !important;
+    padding-inline: 1.25rem !important;
+  }
+
+  main,
+  .app-workspace {
+    margin-top: 4.25rem !important;
+    padding: 1.25rem !important;
+    padding-bottom: calc(var(--bottom-nav-height) + 2rem) !important;
+  }
+
+  /* Modal size constraint for tablets */
+  .modal-content,
+  .fixed.inset-0 > div > div {
+    max-width: 640px !important;
+    width: 90vw !important;
+    max-height: 85vh !important;
+  }
+
+  /* Chart containers */
+  .chart-container-responsive {
+    min-height: 280px !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   D. DESKTOPS & LAPTOPS (min-width: 1024px)
+   -------------------------------------------------------------------------- */
+@media screen and (min-width: 1024px) {
+  /* Permanent sidebar visible */
+  .app-main-column {
+    padding-left: var(--sidebar-width) !important;
+  }
+
+  header,
+  .app-header {
+    width: calc(100% - var(--sidebar-width)) !important;
+    left: var(--sidebar-width) !important;
+    right: 0 !important;
+  }
+
+  main,
+  .app-workspace {
+    margin-top: 4rem !important;
+    padding: 2rem !important;
+    padding-bottom: 3rem !important;
+  }
+
+  /* Hide mobile-specific navigation controls */
+  .mobile-only,
+  .bottom-nav-bar,
+  [data-component="bottom-nav"] {
+    display: none !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   E. ULTRA-WIDE MONITORS (min-width: 1440px)
+   -------------------------------------------------------------------------- */
+@media screen and (min-width: 1440px) {
+  .app-content-container,
+  .max-w-7xl {
+    max-width: 1440px !important;
+    margin-inline: auto !important;
+  }
+
+  main,
+  .app-workspace {
+    padding-inline: 2.5rem !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   F. TOUCH-SPECIFIC INTERACTION OPTIMIZATIONS
+   -------------------------------------------------------------------------- */
+@media (hover: none) and (pointer: coarse) {
+  button:hover,
+  a:hover {
+    transform: none !important;
+  }
+
+  button:active,
+  a:active {
+    opacity: 0.85;
+    transform: scale(0.98);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   G. SAFE AREA INSETS (Notch, Home Indicator, Dynamic Island)
+   -------------------------------------------------------------------------- */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .bottom-nav-bar,
+  [data-component="bottom-nav"] {
+    padding-bottom: calc(0.5rem + env(safe-area-inset-bottom)) !important;
+  }
 }
 

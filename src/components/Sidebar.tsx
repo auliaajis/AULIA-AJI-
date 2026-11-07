@@ -28,17 +28,22 @@ import {
   BarChart3,
   ShieldAlert,
   Sliders,
+  Sparkles,
   ShieldCheck,
   KeyRound,
   Eye,
   EyeOff,
   Phone,
-  Lock
+  Lock,
+  BookOpen
 } from 'lucide-react';
 import SchoolLogo from './SchoolLogo';
+import UserManualModal from './UserManualModal';
+import PanduanBskap2022Modal from './PanduanBskap2022Modal';
 import { Counselor } from '../types';
 import { getSchoolConfig } from '../utils/schoolConfig';
 import { isAdministrator } from '../utils/accessControl';
+import { listenToAccountRequests } from '../utils/firestoreSync';
 
 interface SidebarProps {
   currentView: string;
@@ -77,6 +82,8 @@ export default function Sidebar({
 }: SidebarProps) {
   const isUserAdmin = isAdministrator(activeCounselor);
 
+  const [isManualModalOpen, setIsManualModalOpen] = useState(false);
+  const [isBskapModalOpen, setIsBskapModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [name, setName] = useState(activeCounselor.name);
   const [nip, setNip] = useState(activeCounselor.nip);
@@ -87,14 +94,34 @@ export default function Sidebar({
   const [password, setPassword] = useState(activeCounselor.password || '');
   const [showPassword, setShowPassword] = useState(false);
   const [allowedClassesStr, setAllowedClassesStr] = useState(activeCounselor.allowedClasses.join(', '));
-  const [schoolName, setSchoolName] = useState(() => getSchoolConfig().schoolName);
+  const resolveSchoolName = () => {
+    const config = getSchoolConfig(activeCounselor?.schoolId);
+    return activeCounselor?.schoolName || config.schoolName || 'SMP N 2 Susukan';
+  };
+
+  const [schoolName, setSchoolName] = useState<string>(resolveSchoolName);
 
   // Dynamic Counter Calculations
+  const [cloudPendingRequests, setCloudPendingRequests] = useState<Counselor[]>([]);
+
+  useEffect(() => {
+    if (!isUserAdmin) return;
+    const unsub = listenToAccountRequests((reqs) => {
+      setCloudPendingRequests(reqs.filter((r) => r.approvalStatus === 'pending'));
+    });
+    return () => unsub();
+  }, [isUserAdmin]);
+
   const totalStudentsCount = students.length;
   const unhandledViolationsCount = violations.filter(v => !v.handledBy || v.handledBy === 'Belum Ditangani').length;
   const highRiskStudentsCount = students.filter(s => (s.violationPoints || 0) >= 30).length;
   const scheduledServicesCount = services.filter(s => s.status === 'Terjadwal').length;
-  const pendingAccountsCount = isUserAdmin ? (allCounselors || []).filter(c => c.approvalStatus === 'pending').length : 0;
+  const pendingAccountsCount = isUserAdmin
+    ? Math.max(
+        (allCounselors || []).filter((c) => c.approvalStatus === 'pending').length,
+        cloudPendingRequests.length
+      )
+    : 0;
 
   // Collapsible Groups State
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
@@ -109,12 +136,22 @@ export default function Sidebar({
   };
 
   useEffect(() => {
+    setSchoolName(resolveSchoolName());
+  }, [activeCounselor]);
+
+  useEffect(() => {
     const handleConfigUpdate = () => {
-      setSchoolName(getSchoolConfig().schoolName);
+      setSchoolName(resolveSchoolName());
     };
     window.addEventListener('bk_school_config_updated', handleConfigUpdate);
-    return () => window.removeEventListener('bk_school_config_updated', handleConfigUpdate);
-  }, []);
+    window.addEventListener('bk_school_changed', handleConfigUpdate);
+    window.addEventListener('storage', handleConfigUpdate);
+    return () => {
+      window.removeEventListener('bk_school_config_updated', handleConfigUpdate);
+      window.removeEventListener('bk_school_changed', handleConfigUpdate);
+      window.removeEventListener('storage', handleConfigUpdate);
+    };
+  }, [activeCounselor]);
 
   useEffect(() => {
     setName(activeCounselor.name);
@@ -129,13 +166,13 @@ export default function Sidebar({
 
   // Auto-expand group if active view belongs to it
   useEffect(() => {
-    if (['dashboard', 'jurnal-harian', 'laporan-rekap'].includes(currentView)) {
+    if (['dashboard', 'jurnal-harian'].includes(currentView)) {
       setOpenGroups((prev) => ({ ...prev, dashboard: true }));
     } else if (['data-siswa', 'absensi'].includes(currentView)) {
       setOpenGroups((prev) => ({ ...prev, dataUtama: true }));
-    } else if (['pelanggaran', 'pembinaan-pendisiplinan', 'apresiasi', 'layanan-bk', 'asesmen-bk'].includes(currentView)) {
+    } else if (['pelanggaran', 'pembinaan-pendisiplinan', 'apresiasi', 'layanan-bk', 'tambah-layanan', 'home-visit', 'panggilan-ortu', 'asesmen-bk'].includes(currentView)) {
       setOpenGroups((prev) => ({ ...prev, layanan: true }));
-    } else if (['google-sync', 'pengaturan'].includes(currentView)) {
+    } else if (['laporan-rekap', 'laporan', 'studio-pdf', 'pdf-maker', 'google-sync', 'pengaturan'].includes(currentView)) {
       setOpenGroups((prev) => ({ ...prev, pengaturan: true }));
     }
   }, [currentView]);
@@ -146,20 +183,18 @@ export default function Sidebar({
       return;
     }
     
-    // Only admins can change allowed classes from this modal
-    const parsedClasses = isUserAdmin
-      ? allowedClassesStr
-          .split(',')
-          .map(c => c.trim().toUpperCase())
-          .filter(c => c.length > 0)
-      : activeCounselor.allowedClasses;
+    // All counselors can freely manage their own class assignments (kelas binaan)
+    const parsedClasses = allowedClassesStr
+      .split(',')
+      .map(c => c.trim().toUpperCase())
+      .filter(c => c.length > 0);
 
     if (onUpdateCounselor) {
       onUpdateCounselor({
         ...activeCounselor,
         name: name.trim(),
         nip: nip.trim(),
-        role: isUserAdmin ? role.trim() : activeCounselor.role,
+        role: role.trim() || activeCounselor.role,
         avatar: avatar,
         email: email.trim(),
         phone: phone.trim(),
@@ -167,7 +202,7 @@ export default function Sidebar({
         allowedClasses: parsedClasses
       });
       setIsProfileModalOpen(false);
-      alert('Profil Anda berhasil diperbarui!');
+      alert('Profil dan kelas binaan Anda berhasil diperbarui!');
     }
   };
 
@@ -182,18 +217,23 @@ export default function Sidebar({
       )}
 
       <aside
-        className={`w-64 fixed left-0 top-0 h-screen overflow-y-auto bg-white border-r border-[#bcc9c6]/30 flex flex-col p-3.5 gap-2 z-50 transition-transform duration-300 custom-scrollbar ${
+        className={`w-72 sm:w-80 lg:w-64 max-w-[85vw] fixed left-0 top-0 h-screen overflow-y-auto bg-white border-r border-[#bcc9c6]/30 flex flex-col p-3.5 gap-2 z-50 transition-transform duration-300 custom-scrollbar shadow-2xl lg:shadow-none ${
           isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
       >
-        <div className="mb-4 px-2 pt-2 flex justify-between items-center">
-          <div className="flex items-center gap-2.5">
-            <SchoolLogo size={40} className="flex-shrink-0" />
-            <div>
-              <h1 className="text-[11px] font-black text-[#00685f] tracking-wider uppercase leading-tight">
-                Bimbingan Konseling
-              </h1>
-              <p className="text-[11px] text-[#3d4947] font-bold opacity-80 leading-none truncate max-w-[125px]" title={schoolName}>
+        <div className="mb-3 px-1 pt-1 flex justify-between items-center">
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+            <SchoolLogo size={38} className="flex-shrink-0" schoolId={activeCounselor?.schoolId} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-black text-[#00685f] tracking-wider uppercase leading-tight">
+                  SIKAP-BK
+                </span>
+                <span className="text-[8px] font-extrabold bg-[#00685f]/10 text-[#00685f] px-1 py-0.2 rounded shrink-0">
+                  v2.6
+                </span>
+              </div>
+              <p className="text-[10px] sm:text-[10.5px] text-[#3d4947] font-bold opacity-90 leading-tight line-clamp-2 break-words" title={schoolName}>
                 {schoolName}
               </p>
             </div>
@@ -201,7 +241,7 @@ export default function Sidebar({
           {/* Close button for mobile drawer */}
           <button
             onClick={onClose}
-            className="lg:hidden p-1 text-[#3d4947] hover:bg-gray-100 rounded-lg cursor-pointer transition-colors"
+            className="lg:hidden p-1.5 text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded-xl cursor-pointer transition-colors ml-1 shrink-0 bg-gray-50 border border-gray-200"
             title="Tutup Menu"
           >
             <X className="w-5 h-5" />
@@ -209,34 +249,39 @@ export default function Sidebar({
         </div>
 
         {/* Counselor Class Permissions Display */}
-        <div className="px-2 mb-3">
-          <div className="p-2.5 bg-[#f8faf9] border border-[#bcc9c6]/30 rounded-xl flex items-center justify-between">
-            <div>
+        <div className="px-1 mb-2">
+          <div className="p-2.5 bg-gradient-to-r from-[#f8faf9] to-[#e6f4f1]/50 border border-[#bcc9c6]/40 rounded-xl flex items-center justify-between">
+            <div className="min-w-0 flex-1 mr-2">
               <span className="text-[9px] font-extrabold text-[#3d4947]/70 uppercase tracking-wider block">
                 Hak Akses Bimbingan
               </span>
-              <p className="text-[11px] font-extrabold text-[#00685f]">
-                {activeCounselor.allowedClasses.length === 0 ? 'Seluruh Kelas (Admin)' : `Kelas: ${activeCounselor.allowedClasses.join(', ')}`}
+              <p className="text-[11px] font-extrabold text-[#00685f] truncate" title={activeCounselor.allowedClasses.join(', ')}>
+                {activeCounselor.allowedClasses.length === 0 
+                  ? 'Seluruh Rombel (Admin)' 
+                  : activeCounselor.allowedClasses.length > 5
+                  ? `Semua Rombel (${activeCounselor.allowedClasses[0]} - ${activeCounselor.allowedClasses[activeCounselor.allowedClasses.length - 1]})`
+                  : `Kelas: ${activeCounselor.allowedClasses.join(', ')}`}
               </p>
             </div>
-            <span className="text-[9px] font-bold bg-[#00685f]/10 text-[#00685f] px-2 py-0.5 rounded-full">
+            <span className="text-[9px] font-extrabold bg-[#00685f]/10 text-[#00685f] px-2 py-0.5 rounded-full shrink-0">
               {activeCounselor.allowedClasses.length === 0 ? 'Full' : `${activeCounselor.allowedClasses.length} Kelas`}
             </span>
           </div>
         </div>
 
-        {/* Collapsible Grouped Navigation */}
+        {/* Collapsible Grouped Navigation - Sederhana, Konsisten & Mudah Dipelajari */}
         <nav className="flex-1 flex flex-col gap-3 px-1">
-          {/* GROUP 1: Dashboard & Laporan */}
+          
+          {/* GROUP 1: Beranda & Jurnal Harian */}
           <div className="space-y-1">
             <button
               type="button"
               onClick={() => toggleGroup('dashboard')}
-              className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] font-black uppercase tracking-wider text-[#3d4947]/70 hover:text-[#00685f] transition-colors cursor-pointer"
+              className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] font-black uppercase tracking-wider text-[#3d4947]/80 hover:text-[#00685f] transition-colors cursor-pointer"
             >
               <div className="flex items-center gap-1.5">
                 <BarChart3 className="w-3.5 h-3.5 text-[#00685f]" />
-                <span>Dashboard & Laporan</span>
+                <span>Beranda & Jurnal</span>
               </div>
               {openGroups.dashboard ? (
                 <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
@@ -246,65 +291,63 @@ export default function Sidebar({
             </button>
 
             {openGroups.dashboard && (
-              <div className="pl-1.5 space-y-0.5 border-l-2 border-[#00685f]/15 ml-2.5">
+              <div className="pl-1.5 space-y-1 border-l-2 border-[#00685f]/15 ml-2.5">
+                {/* 1.1 Dashboard Utama */}
                 <button
                   onClick={() => onNavigate('dashboard')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
                     currentView === 'dashboard'
                       ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
                       : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <LayoutDashboard className="w-4 h-4 shrink-0" />
-                    <span>Dashboard</span>
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Dashboard</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'dashboard' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Ikhtisar & Kasus Perlu Tindakan
+                      </span>
+                    </div>
                   </div>
                 </button>
 
+                {/* 1.2 Jurnal Harian */}
                 <button
                   onClick={() => onNavigate('jurnal-harian')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
                     currentView === 'jurnal-harian'
                       ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
                       : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <ClipboardList className="w-4 h-4 shrink-0" />
-                    <span>Jurnal Harian</span>
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Jurnal Harian</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'jurnal-harian' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Catatan Aktivitas Hari Ini
+                      </span>
+                    </div>
                   </div>
-                  <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-full ${currentView === 'jurnal-harian' ? 'bg-white/20 text-white' : 'bg-teal-50 text-[#00685f]'}`}>
+                  <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-full shrink-0 ml-1 ${currentView === 'jurnal-harian' ? 'bg-white/20 text-white' : 'bg-teal-50 text-[#00685f]'}`}>
                     Hari Ini
                   </span>
-                </button>
-
-                <button
-                  onClick={() => onNavigate('laporan-rekap')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-                    currentView === 'laporan-rekap'
-                      ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
-                      : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <FileBarChart className="w-4 h-4 shrink-0" />
-                    <span>Rekap Laporan</span>
-                  </div>
                 </button>
               </div>
             )}
           </div>
 
-          {/* GROUP 2: Data Utama */}
+          {/* GROUP 2: Siswa & Presensi */}
           <div className="space-y-1">
             <button
               type="button"
               onClick={() => toggleGroup('dataUtama')}
-              className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] font-black uppercase tracking-wider text-[#3d4947]/70 hover:text-[#00685f] transition-colors cursor-pointer"
+              className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] font-black uppercase tracking-wider text-[#3d4947]/80 hover:text-[#00685f] transition-colors cursor-pointer"
             >
               <div className="flex items-center gap-1.5">
                 <Users className="w-3.5 h-3.5 text-[#00685f]" />
-                <span>Data Utama</span>
+                <span>Siswa & Presensi</span>
               </div>
               {openGroups.dataUtama ? (
                 <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
@@ -314,37 +357,49 @@ export default function Sidebar({
             </button>
 
             {openGroups.dataUtama && (
-              <div className="pl-1.5 space-y-0.5 border-l-2 border-[#00685f]/15 ml-2.5">
+              <div className="pl-1.5 space-y-1 border-l-2 border-[#00685f]/15 ml-2.5">
+                {/* 2.1 Data Siswa */}
                 <button
                   onClick={() => onNavigate('data-siswa')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
                     currentView === 'data-siswa'
                       ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
                       : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <Users className="w-4 h-4 shrink-0" />
-                    <span>Data Siswa</span>
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Data Siswa</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'data-siswa' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Profil, Poin & Dossier
+                      </span>
+                    </div>
                   </div>
-                  <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${currentView === 'data-siswa' ? 'bg-white/20 text-white' : 'bg-[#00685f]/10 text-[#00685f]'}`}>
+                  <span className={`text-[10px] font-black px-2 py-0.5 rounded-full shrink-0 ml-1 ${currentView === 'data-siswa' ? 'bg-white/20 text-white' : 'bg-[#00685f]/10 text-[#00685f]'}`}>
                     {totalStudentsCount}
                   </span>
                 </button>
 
+                {/* 2.2 Absensi Kelas */}
                 <button
                   onClick={() => onNavigate('absensi')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
                     currentView === 'absensi'
                       ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
                       : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <Calendar className="w-4 h-4 shrink-0" />
-                    <span>Absensi Kelas</span>
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Absensi Kelas</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'absensi' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Presensi Harian Rombel
+                      </span>
+                    </div>
                   </div>
-                  <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-full ${currentView === 'absensi' ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-600'}`}>
+                  <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-full shrink-0 ml-1 ${currentView === 'absensi' ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-600'}`}>
                     Harian
                   </span>
                 </button>
@@ -352,16 +407,16 @@ export default function Sidebar({
             )}
           </div>
 
-          {/* GROUP 3: Layanan BK & Kasus */}
+          {/* GROUP 3: Layanan & Kedisiplinan */}
           <div className="space-y-1">
             <button
               type="button"
               onClick={() => toggleGroup('layanan')}
-              className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] font-black uppercase tracking-wider text-[#3d4947]/70 hover:text-[#00685f] transition-colors cursor-pointer"
+              className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] font-black uppercase tracking-wider text-[#3d4947]/80 hover:text-[#00685f] transition-colors cursor-pointer"
             >
               <div className="flex items-center gap-1.5">
                 <HeartHandshake className="w-3.5 h-3.5 text-[#00685f]" />
-                <span>Layanan BK & Kasus</span>
+                <span>Layanan & Bimbingan</span>
               </div>
               {openGroups.layanan ? (
                 <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
@@ -371,117 +426,122 @@ export default function Sidebar({
             </button>
 
             {openGroups.layanan && (
-              <div className="pl-1.5 space-y-0.5 border-l-2 border-[#00685f]/15 ml-2.5">
-                <button
-                  onClick={() => onNavigate('pelanggaran')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-                    currentView === 'pelanggaran'
-                      ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
-                      : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <ShieldAlert className="w-4 h-4 shrink-0" />
-                    <span>Pembinaan & Restitusi</span>
-                  </div>
-                  {unhandledViolationsCount > 0 ? (
-                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-amber-500 text-white animate-pulse">
-                      {unhandledViolationsCount} Pending
-                    </span>
-                  ) : (
-                    <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${currentView === 'pelanggaran' ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'}`}>
-                      0
-                    </span>
-                  )}
-                </button>
-
-                <button
-                  onClick={() => onNavigate('pembinaan-pendisiplinan')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-                    currentView === 'pembinaan-pendisiplinan'
-                      ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
-                      : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Gavel className="w-4 h-4 shrink-0" />
-                    <span>Pendisiplinan</span>
-                  </div>
-                  {highRiskStudentsCount > 0 ? (
-                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-rose-500 text-white">
-                      {highRiskStudentsCount} Risk
-                    </span>
-                  ) : (
-                    <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-full ${currentView === 'pembinaan-pendisiplinan' ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700'}`}>
-                      Aman
-                    </span>
-                  )}
-                </button>
-
-                <button
-                  onClick={() => onNavigate('apresiasi')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-                    currentView === 'apresiasi'
-                      ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
-                      : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Award className="w-4 h-4 shrink-0" />
-                    <span>Apresiasi & Prestasi</span>
-                  </div>
-                </button>
-
+              <div className="pl-1.5 space-y-1 border-l-2 border-[#00685f]/15 ml-2.5">
+                {/* 3.1 Layanan Konseling */}
                 <button
                   onClick={() => onNavigate('layanan-bk')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-                    currentView === 'layanan-bk'
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
+                    currentView === 'layanan-bk' || currentView === 'tambah-layanan' || currentView === 'home-visit' || currentView === 'panggilan-ortu'
                       ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
                       : 'text-[#3d4947] hover:bg-[#d3e4fe]/30 hover:text-[#0b1c30]'
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <HeartHandshake className="w-4 h-4 shrink-0" />
-                    <span>Layanan BK</span>
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Layanan Konseling</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'layanan-bk' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Sesi BK, Home Visit & Ortu
+                      </span>
+                    </div>
                   </div>
                   {scheduledServicesCount > 0 ? (
-                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-teal-600 text-white">
-                      {scheduledServicesCount} Terjadwal
+                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-teal-600 text-white shrink-0 ml-1">
+                      {scheduledServicesCount} Jadwal
                     </span>
                   ) : (
-                    <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${currentView === 'layanan-bk' ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                    <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ml-1 ${currentView === 'layanan-bk' ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'}`}>
                       {services.length}
                     </span>
                   )}
                 </button>
 
+                {/* 3.2 Kedisiplinan & Restitusi Terpadu */}
+                <button
+                  onClick={() => onNavigate('pembinaan-pendisiplinan')}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
+                    currentView === 'pembinaan-pendisiplinan' || currentView === 'pelanggaran'
+                      ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
+                      : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Gavel className="w-4 h-4 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Kedisiplinan & Restitusi</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'pembinaan-pendisiplinan' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Tata Tertib & Kontrak Siswa
+                      </span>
+                    </div>
+                  </div>
+                  {highRiskStudentsCount > 0 ? (
+                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-rose-500 text-white shrink-0 ml-1">
+                      {highRiskStudentsCount} Siaga
+                    </span>
+                  ) : unhandledViolationsCount > 0 ? (
+                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-amber-500 text-white shrink-0 ml-1 animate-pulse">
+                      {unhandledViolationsCount} Kasus
+                    </span>
+                  ) : (
+                    <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-full shrink-0 ml-1 ${currentView === 'pembinaan-pendisiplinan' ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700'}`}>
+                      Tertib
+                    </span>
+                  )}
+                </button>
+
+                {/* 3.3 Apresiasi & Prestasi */}
+                <button
+                  onClick={() => onNavigate('apresiasi')}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
+                    currentView === 'apresiasi'
+                      ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
+                      : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Award className="w-4 h-4 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Apresiasi & Prestasi</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'apresiasi' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Penghargaan Karakter Baik
+                      </span>
+                    </div>
+                  </div>
+                </button>
+
+                {/* 3.4 Asesmen & AKD */}
                 <button
                   onClick={() => onNavigate('asesmen-bk')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
                     currentView === 'asesmen-bk'
                       ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
                       : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <FileCheck className="w-4 h-4 shrink-0" />
-                    <span>Asesmen & AKD</span>
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Asesmen & AKD</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'asesmen-bk' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Kebutuhan Siswa & Gaya Belajar
+                      </span>
+                    </div>
                   </div>
                 </button>
               </div>
             )}
           </div>
 
-          {/* GROUP 4: Pengaturan */}
+          {/* GROUP 4: Laporan & Pengaturan */}
           <div className="space-y-1">
             <button
               type="button"
               onClick={() => toggleGroup('pengaturan')}
-              className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] font-black uppercase tracking-wider text-[#3d4947]/70 hover:text-[#00685f] transition-colors cursor-pointer"
+              className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] font-black uppercase tracking-wider text-[#3d4947]/80 hover:text-[#00685f] transition-colors cursor-pointer"
             >
               <div className="flex items-center gap-1.5">
                 <Sliders className="w-3.5 h-3.5 text-[#00685f]" />
-                <span>Pengaturan & Tools</span>
+                <span>Laporan & Pengaturan</span>
               </div>
               {openGroups.pengaturan ? (
                 <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
@@ -491,48 +551,118 @@ export default function Sidebar({
             </button>
 
             {openGroups.pengaturan && (
-              <div className="pl-1.5 space-y-0.5 border-l-2 border-[#00685f]/15 ml-2.5">
+              <div className="pl-1.5 space-y-1 border-l-2 border-[#00685f]/15 ml-2.5">
+                {/* 4.1 Rekap Laporan & Studio PDF */}
+                <button
+                  onClick={() => onNavigate('laporan-rekap')}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
+                    currentView === 'laporan-rekap' || currentView === 'studio-pdf'
+                      ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
+                      : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <FileBarChart className="w-4 h-4 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Rekap Laporan</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'laporan-rekap' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Laporan Berkala & Studio PDF
+                      </span>
+                    </div>
+                  </div>
+                  <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-full shrink-0 ml-1 ${currentView === 'laporan-rekap' ? 'bg-white/20 text-white' : 'bg-amber-100 text-amber-800'}`}>
+                    Dinas
+                  </span>
+                </button>
+
+                {/* 4.2 Integrasi Google */}
                 <button
                   onClick={() => onNavigate('google-sync')}
-                  className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
                     currentView === 'google-sync'
                       ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
                       : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
                   }`}
                 >
-                  <Database className="w-4 h-4 shrink-0" />
-                  <span>Integrasi Google</span>
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Database className="w-4 h-4 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Integrasi Cloud</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'google-sync' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Sinkronisasi Google & Firestore
+                      </span>
+                    </div>
+                  </div>
                 </button>
 
+                {/* 4.3 Pengaturan Akun & Profil */}
                 <button
                   onClick={() => onNavigate('pengaturan')}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
                     currentView === 'pengaturan'
                       ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
                       : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <Settings className="w-4 h-4 shrink-0" />
-                    <span>{isUserAdmin ? 'System & Hak Akses' : 'Pengaturan Profil'}</span>
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">{isUserAdmin ? 'Sistem & Hak Akses' : 'Pengaturan Profil'}</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'pengaturan' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        {isUserAdmin ? 'Kelola Akun & Rombel' : 'Data & Kata Sandi Akun'}
+                      </span>
+                    </div>
                   </div>
                   {pendingAccountsCount > 0 ? (
-                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-amber-500 text-white animate-pulse">
+                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-amber-500 text-white animate-pulse shrink-0 ml-1">
                       {pendingAccountsCount} ACC
                     </span>
                   ) : isUserAdmin ? (
-                    <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full uppercase ${
+                    <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full uppercase shrink-0 ml-1 ${
                       currentView === 'pengaturan' ? 'bg-white/20 text-white' : 'bg-purple-100 text-purple-800'
                     }`}>
                       Admin
                     </span>
                   ) : (
-                    <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full uppercase ${
+                    <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full uppercase shrink-0 ml-1 ${
                       currentView === 'pengaturan' ? 'bg-white/20 text-white' : 'bg-teal-100 text-teal-800'
                     }`}>
                       User
                     </span>
                   )}
+                </button>
+
+                {/* 4.4 Panduan Buku & Regulasi */}
+                <button
+                  onClick={() => setIsBskapModalOpen(true)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all text-[#00685f] bg-[#00685f]/5 hover:bg-[#00685f]/15 cursor-pointer border border-[#00685f]/20"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <BookOpen className="w-4 h-4 shrink-0 text-[#00685f]" />
+                    <div className="min-w-0 text-left">
+                      <span className="text-xs font-bold block leading-tight">Panduan BK & PPKSP</span>
+                      <span className="text-[10px] text-[#00685f]/70 block leading-tight">Regulasi Kemendikbudristek</span>
+                    </div>
+                  </div>
+                  <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-[#00685f] text-white shrink-0 ml-1">
+                    Terbaru
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setIsManualModalOpen(true)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all text-[#3d4947] hover:bg-teal-50 hover:text-[#00685f] cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <BookOpen className="w-4 h-4 shrink-0 text-[#00685f]" />
+                    <div className="min-w-0 text-left">
+                      <span className="text-xs font-bold block leading-tight">Buku Panduan Aplikasi</span>
+                      <span className="text-[10px] text-gray-400 block leading-tight">Petunjuk Langkah Praktis</span>
+                    </div>
+                  </div>
+                  <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-[#00685f]/10 text-[#00685f] shrink-0 ml-1">
+                    PDF
+                  </span>
                 </button>
               </div>
             )}
@@ -541,6 +671,15 @@ export default function Sidebar({
 
         {/* Action Area & Profiles */}
         <div className="border-t border-[#bcc9c6]/20 pt-3.5 flex flex-col gap-1.5 px-1 mt-auto">
+          <button
+            onClick={() => setIsManualModalOpen(true)}
+            className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-[#e6f4f1] hover:bg-[#d0ece6] text-[#00685f] border border-[#00685f]/30 rounded-xl text-xs font-extrabold transition-all cursor-pointer active:scale-98 shadow-2xs"
+            title="Buka panduan lengkap dan unduh PDF dokumentasi fitur"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            <span>Panduan Aplikasi (PDF)</span>
+          </button>
+
           <button
             onClick={() => onNavigate('tambah-layanan')}
             className="w-full flex items-center justify-center gap-2 py-2.5 px-3 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-black transition-all shadow-2xs hover:shadow cursor-pointer active:scale-98"
@@ -557,10 +696,17 @@ export default function Sidebar({
           >
             <div className="w-8 h-8 rounded-full overflow-hidden bg-[#00685f]/10 border border-[#00685f]/30 text-[#00685f] flex items-center justify-center shrink-0 font-extrabold text-xs">
               {avatar ? (
-                <img referrerPolicy="no-referrer" src={avatar} alt={activeCounselor.name} className="w-full h-full object-cover" />
-              ) : (
-                activeCounselor.name.charAt(0)
-              )}
+                <img 
+                  referrerPolicy="no-referrer" 
+                  src={avatar} 
+                  alt={activeCounselor.name} 
+                  className="w-full h-full object-cover" 
+                  onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
+                />
+              ) : null}
+              <span className="font-extrabold text-xs text-[#00685f]">
+                {activeCounselor.name ? activeCounselor.name.split(' ').slice(0, 2).map(n => n[0]).join('') : 'BK'}
+              </span>
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-1">
@@ -742,24 +888,55 @@ export default function Sidebar({
                   </div>
                 </div>
 
-                {/* Admin-only Class Configuration */}
-                {isUserAdmin && (
-                  <div className="pt-3 border-t border-gray-100">
-                    <label className="block text-[10px] font-black uppercase tracking-wider text-[#3d4947] mb-1">
-                      Kelas Bimbingan (Khusus Admin)
+                {/* Class Configuration (Kelas Bimbingan / Binaan) */}
+                <div className="pt-3 border-t border-gray-100">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[10px] font-black uppercase tracking-wider text-[#3d4947]">
+                      Kelas Bimbingan / Binaan
                     </label>
-                    <input
-                      type="text"
-                      value={allowedClassesStr}
-                      onChange={(e) => setAllowedClassesStr(e.target.value)}
-                      className="w-full px-3 py-2 text-xs font-semibold bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#00685f]/30 focus:border-[#00685f] transition-all font-sans"
-                      placeholder="Contoh: 8A, 8B, 8C (Kosongkan jika Full Admin)"
-                    />
-                    <p className="text-[10px] text-gray-500 mt-1">
-                      Kosongkan untuk memberikan akses penuh (Administrator) ke seluruh kelas.
-                    </p>
+                    <span className="text-[10px] text-[#00685f] font-bold">Bebas Dikelola</span>
                   </div>
-                )}
+                  <input
+                    type="text"
+                    value={allowedClassesStr}
+                    onChange={(e) => setAllowedClassesStr(e.target.value)}
+                    className="w-full px-3 py-2 text-xs font-semibold bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#00685f]/30 focus:border-[#00685f] transition-all font-sans"
+                    placeholder="Contoh: 7A, 7B, 7C atau 8A, 8B (Kosongkan jika semua kelas)"
+                  />
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    <button
+                      type="button"
+                      onClick={() => setAllowedClassesStr('7A, 7B, 7C, 7D, 7E, 7F')}
+                      className="px-2 py-0.5 bg-gray-100 hover:bg-teal-50 hover:text-[#00685f] text-gray-700 rounded text-[10px] font-bold transition-colors cursor-pointer border border-gray-200"
+                    >
+                      + Kelas 7
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllowedClassesStr('8A, 8B, 8C, 8D, 8E, 8F, 8G')}
+                      className="px-2 py-0.5 bg-gray-100 hover:bg-teal-50 hover:text-[#00685f] text-gray-700 rounded text-[10px] font-bold transition-colors cursor-pointer border border-gray-200"
+                    >
+                      + Kelas 8
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllowedClassesStr('9A, 9B, 9C, 9D, 9E, 9F, 9G')}
+                      className="px-2 py-0.5 bg-gray-100 hover:bg-teal-50 hover:text-[#00685f] text-gray-700 rounded text-[10px] font-bold transition-colors cursor-pointer border border-gray-200"
+                    >
+                      + Kelas 9
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllowedClassesStr('')}
+                      className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded text-[10px] font-bold transition-colors cursor-pointer border border-emerald-200"
+                    >
+                      Semua Kelas (Akses Penuh)
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    Hanya siswa dari kelas binaan ini yang ditampilkan di layanan bimbingan & rekap Anda. Kosongkan untuk akses semua kelas.
+                  </p>
+                </div>
               </div>
 
               {/* Admin Panel Quick Link */}
@@ -800,6 +977,18 @@ export default function Sidebar({
           </div>
         </div>
       )}
+
+      {/* User Manual & Features Documentation Modal */}
+      <UserManualModal
+        isOpen={isManualModalOpen}
+        onClose={() => setIsManualModalOpen(false)}
+      />
+
+      {/* Panduan Juknis BSKAP 2022 Modal */}
+      <PanduanBskap2022Modal
+        isOpen={isBskapModalOpen}
+        onClose={() => setIsBskapModalOpen(false)}
+      />
     </>
   );
 }

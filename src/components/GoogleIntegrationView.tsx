@@ -19,16 +19,22 @@ import {
   Download,
   ShieldCheck,
   ShieldAlert,
-  X
+  X,
+  UserCheck
 } from 'lucide-react';
 import { 
   getSavedScriptUrl, 
   saveScriptUrl, 
+  getSavedSpreadsheetConfig,
+  saveSpreadsheetConfig,
   testConnection, 
   pushDataToGoogle, 
   pullDataFromGoogle,
-  getLocalDatabaseData
+  getLocalDatabaseData,
+  ensureDriveFolderStructure
 } from '../utils/googleSync';
+import { Counselor } from '../types';
+import { saveSchoolData, getActiveSchoolId } from '../utils/schoolConfig';
 import {
   initAuth,
   googleSignIn,
@@ -53,9 +59,19 @@ interface GoogleIntegrationViewProps {
     homeVisits?: any[];
     achievements?: any[];
   }) => void;
+  activeCounselor?: Counselor;
 }
 
-export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrationViewProps) {
+export default function GoogleIntegrationView({ onDataImported, activeCounselor }: GoogleIntegrationViewProps) {
+  const userKey = activeCounselor?.email || activeCounselor?.username || activeCounselor?.id;
+  const [spreadsheetScope, setSpreadsheetScope] = useState<'personal' | 'shared'>(() => {
+    if (userKey) {
+      const config = getSavedSpreadsheetConfig(userKey);
+      return config.isPersonal ? 'personal' : 'shared';
+    }
+    return 'personal';
+  });
+
   // Traditional Apps Script state
   const [scriptUrl, setScriptUrl] = useState('');
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle');
@@ -99,24 +115,48 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
     alert('Pesan informasi Database berhasil disalin!\n\nSilakan tempel (paste) dan kirim pesan ini melalui WhatsApp ke rekan guru lain.');
   };
 
+  const [isSessionExpired, setIsSessionExpired] = useState(false);
+  const [isVerifyingFolders, setIsVerifyingFolders] = useState(false);
+  const [foldersVerifiedTime, setFoldersVerifiedTime] = useState<string | null>(() => {
+    return typeof localStorage !== 'undefined' ? localStorage.getItem('bk_drive_folders_verified_at') : null;
+  });
+
   // Load configuration on mount
   useEffect(() => {
-    setScriptUrl(getSavedScriptUrl());
-    
-    // Load spreadsheet details if saved
-    const savedId = localStorage.getItem('bk_google_spreadsheet_id');
-    const savedUrl = localStorage.getItem('bk_google_spreadsheet_url');
-    if (savedId) setSpreadsheetId(savedId);
-    if (savedUrl) setSpreadsheetUrl(savedUrl);
+    if (userKey) {
+      const config = getSavedSpreadsheetConfig(userKey);
+      setSpreadsheetScope(config.isPersonal ? 'personal' : 'shared');
+      if (config.id) setSpreadsheetId(config.id);
+      if (config.url) setSpreadsheetUrl(config.url);
+      setScriptUrl(getSavedScriptUrl(userKey));
+    } else {
+      setScriptUrl(getSavedScriptUrl());
+      const savedId = localStorage.getItem('bk_google_spreadsheet_id');
+      const savedUrl = localStorage.getItem('bk_google_spreadsheet_url');
+      if (savedId) setSpreadsheetId(savedId);
+      if (savedUrl) setSpreadsheetUrl(savedUrl);
+    }
+
+    const handleSessionExpiredEvent = () => {
+      setIsSessionExpired(true);
+      setAccessToken(null);
+    };
+    window.addEventListener('bk_google_session_expired', handleSessionExpiredEvent);
+
+    const handleFoldersUpdated = () => {
+      setFoldersVerifiedTime(localStorage.getItem('bk_drive_folders_verified_at'));
+    };
+    window.addEventListener('bk_drive_folders_updated', handleFoldersUpdated);
 
     // Unsubscribe listener for Firebase Auth
     const unsubscribe = initAuth(
       (currentUser, token) => {
         setUser(currentUser);
         setAccessToken(token);
-        // Automatically check/create spreadsheet once logged in
         if (token) {
+          setIsSessionExpired(false);
           handleAutoSetupSpreadsheet(token);
+          ensureDriveFolderStructure(token).catch(console.warn);
         }
       },
       () => {
@@ -127,11 +167,37 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
     );
 
     return () => {
+      window.removeEventListener('bk_google_session_expired', handleSessionExpiredEvent);
+      window.removeEventListener('bk_drive_folders_updated', handleFoldersUpdated);
       if (typeof unsubscribe === 'function') {
         unsubscribe();
       }
     };
-  }, []);
+  }, [userKey]);
+
+  const handleToggleScope = (newScope: 'personal' | 'shared') => {
+    setSpreadsheetScope(newScope);
+    const isPersonal = newScope === 'personal';
+    if (userKey) {
+      const cleanKey = userKey.toLowerCase().replace(/[^a-z0-9]/g, '_');
+      localStorage.setItem(`bk_google_spreadsheet_mode_${cleanKey}`, newScope);
+      if (isPersonal) {
+        const pId = localStorage.getItem(`bk_google_spreadsheet_id_${cleanKey}`) || '';
+        const pUrl = localStorage.getItem(`bk_google_spreadsheet_url_${cleanKey}`) || '';
+        const pScript = localStorage.getItem(`bk_google_script_url_${cleanKey}`) || '';
+        setSpreadsheetId(pId || null);
+        setSpreadsheetUrl(pUrl || null);
+        setScriptUrl(pScript);
+      } else {
+        const sId = localStorage.getItem('bk_google_spreadsheet_id') || '';
+        const sUrl = localStorage.getItem('bk_google_spreadsheet_url') || '';
+        const sScript = localStorage.getItem('bk_google_script_url') || '';
+        setSpreadsheetId(sId || null);
+        setSpreadsheetUrl(sUrl || null);
+        setScriptUrl(sScript);
+      }
+    }
+  };
 
   const handleAutoSetupSpreadsheet = async (token: string) => {
     setDirectSyncStatus('connecting');
@@ -146,10 +212,7 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       }
       setSpreadsheetId(result.spreadsheetId);
       setSpreadsheetUrl(result.spreadsheetUrl || null);
-      localStorage.setItem('bk_google_spreadsheet_id', result.spreadsheetId);
-      if (result.spreadsheetUrl) {
-        localStorage.setItem('bk_google_spreadsheet_url', result.spreadsheetUrl);
-      }
+      saveSpreadsheetConfig(result.spreadsheetId, result.spreadsheetUrl || '', userKey, spreadsheetScope === 'personal');
 
       // AUTO-PULL FOR MULTI-DEVICE PROTECTION:
       // If this device hasn't been verified/synced yet, try to pull the data from Google Sheets automatically.
@@ -207,11 +270,11 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
     if (input && input.trim()) {
       const cleanId = input.trim();
       setSpreadsheetId(cleanId);
-      localStorage.setItem('bk_google_spreadsheet_id', cleanId);
       const url = `https://docs.google.com/spreadsheets/d/${cleanId}/edit`;
       setSpreadsheetUrl(url);
-      localStorage.setItem('bk_google_spreadsheet_url', url);
-      alert('ID Spreadsheet Custom berhasil disimpan!');
+      const isPersonal = spreadsheetScope === 'personal';
+      saveSpreadsheetConfig(cleanId, url, userKey, isPersonal);
+      alert(`ID Spreadsheet ${isPersonal ? 'Pribadi' : 'Bersama'} berhasil disimpan!`);
     }
   };
 
@@ -223,6 +286,7 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
         setUser(result.user);
         setAccessToken(result.accessToken);
         await handleAutoSetupSpreadsheet(result.accessToken);
+        await ensureDriveFolderStructure(result.accessToken);
       }
     } catch (error: any) {
       const errMsg = error?.message || String(error);
@@ -389,14 +453,15 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
         finalHomeVisits = merged.homeVisits;
         finalAchievements = merged.achievements;
 
-        // Save merged data locally
-        localStorage.setItem('bk_students', JSON.stringify(finalStudents));
-        localStorage.setItem('bk_violations', JSON.stringify(finalViolations));
-        localStorage.setItem('bk_services', JSON.stringify(finalServices));
-        localStorage.setItem('bk_attendance_history', JSON.stringify(finalAttendance));
-        localStorage.setItem('bk_daily_journals', JSON.stringify(finalJournals));
-        localStorage.setItem('bk_home_visits', JSON.stringify(finalHomeVisits));
-        localStorage.setItem('bk_achievements', JSON.stringify(finalAchievements));
+        // Save merged data locally per school partition
+        const targetSchoolId = activeCounselor?.schoolId || getActiveSchoolId();
+        saveSchoolData('bk_students', finalStudents, targetSchoolId);
+        saveSchoolData('bk_violations', finalViolations, targetSchoolId);
+        saveSchoolData('bk_services', finalServices, targetSchoolId);
+        saveSchoolData('bk_attendance_history', finalAttendance, targetSchoolId);
+        saveSchoolData('bk_daily_journals', finalJournals, targetSchoolId);
+        saveSchoolData('bk_home_visits', finalHomeVisits, targetSchoolId);
+        saveSchoolData('bk_achievements', finalAchievements, targetSchoolId);
         
         // Pass merged data to App state
         onDataImported({
@@ -554,7 +619,8 @@ export default function GoogleIntegrationView({ onDataImported }: GoogleIntegrat
       alert('Silakan masukkan URL Apps Script terlebih dahulu.');
       return;
     }
-    saveScriptUrl(url);
+    const isPersonal = spreadsheetScope === 'personal';
+    saveScriptUrl(url, userKey, isPersonal);
     
     // Auto-pull check for Apps Script URL
     if (localStorage.getItem('bk_google_sync_verified') !== 'true') {
@@ -917,6 +983,74 @@ function doPost(e) {
         status: "success", 
         message: "Draf email berhasil dibuat di folder Draf Gmail Anda!" 
       });
+    } else if (payload.action === "savePdf") {
+      var rootFolder = null;
+      var rootFolders = DriveApp.getFoldersByName("SIKAP-BK");
+      if (rootFolders.hasNext()) {
+        rootFolder = rootFolders.next();
+      } else {
+        rootFolder = DriveApp.createFolder("SIKAP-BK");
+      }
+
+      var targetFolder = rootFolder;
+      if (payload.folderName) {
+        var subFolders = rootFolder.getFoldersByName(payload.folderName);
+        if (subFolders.hasNext()) {
+          targetFolder = subFolders.next();
+        } else {
+          targetFolder = rootFolder.createFolder(payload.folderName);
+        }
+      }
+
+      var decodedBytes = Utilities.base64Decode(payload.fileBase64);
+      var blob = Utilities.newBlob(decodedBytes, payload.mimeType || "application/pdf", payload.fileName);
+      var file = targetFolder.createFile(blob);
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
+      output = JSON.stringify({
+        status: "success",
+        fileId: file.getId(),
+        fileName: file.getName(),
+        webViewLink: file.getUrl(),
+        folderName: targetFolder.getName()
+      });
+    } else if (payload.action === "ensureFolders") {
+      var rootFolder = null;
+      var rootFolders = DriveApp.getFoldersByName("SIKAP-BK");
+      if (rootFolders.hasNext()) {
+        rootFolder = rootFolders.next();
+      } else {
+        rootFolder = DriveApp.createFolder("SIKAP-BK");
+      }
+
+      var subfolderNames = [
+        "Laporan_Layanan",
+        "Pelanggaran",
+        "Jurnal",
+        "Panggilan_Ortu",
+        "Home_Visit",
+        "Perjanjian_Kontrak",
+        "Rekap_Analitik"
+      ];
+      var subfolders = {};
+      for (var i = 0; i < subfolderNames.length; i++) {
+        var sName = subfolderNames[i];
+        var sIter = rootFolder.getFoldersByName(sName);
+        var sFolder = sIter.hasNext() ? sIter.next() : rootFolder.createFolder(sName);
+        subfolders[sName] = {
+          id: sFolder.getId(),
+          name: sName,
+          viewUrl: sFolder.getUrl()
+        };
+      }
+
+      output = JSON.stringify({
+        status: "success",
+        rootFolderId: rootFolder.getId(),
+        rootFolderName: rootFolder.getName(),
+        subfolders: subfolders,
+        message: "Struktur folder Google Drive SIKAP-BK berhasil diverifikasi & dibuat."
+      });
     } else {
       output = JSON.stringify({ status: "error", message: "Aksi POST tidak dikenal." });
     }
@@ -994,6 +1128,67 @@ function readTab(ss, tabName, headers) {
           <p className="text-sm text-[#3d4947]/70 font-semibold mt-0.5">
             Cadangkan dan sinkronisasikan seluruh database BK (Siswa, Pelanggaran, Layanan, Absensi) dengan Google Spreadsheet secara aman.
           </p>
+        </div>
+      </div>
+
+      {/* Multi-User Spreadsheet Target Scope Card */}
+      <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#bcc9c6]/40 shadow-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <div className={`p-3 rounded-xl shrink-0 ${spreadsheetScope === 'personal' ? 'bg-[#00685f]/10 text-[#00685f]' : 'bg-blue-50 text-blue-700'}`}>
+            <FileSpreadsheet className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h4 className="font-extrabold text-sm text-[#0b1c30]">
+                {spreadsheetScope === 'personal'
+                  ? `Spreadsheet Mandiri (${activeCounselor?.name || 'Akun Login'})`
+                  : 'Spreadsheet Bersama (Satu Sekolah)'}
+              </h4>
+              <span className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border ${
+                spreadsheetScope === 'personal'
+                  ? 'bg-teal-50 text-[#00685f] border-teal-200'
+                  : 'bg-blue-50 text-blue-700 border-blue-200'
+              }`}>
+                {spreadsheetScope === 'personal' ? 'Data Terisolasi Per-Email' : 'Database Berbagi'}
+              </span>
+            </div>
+            <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+              {spreadsheetScope === 'personal' ? (
+                <>
+                  Data tersinkronisasi ke Google Spreadsheet milik akun <strong>{activeCounselor?.email || activeCounselor?.username || activeCounselor?.name || 'Anda'}</strong>. Setiap guru memiliki spreadsheet tersendiri tanpa mengganggu data guru lain.
+                </>
+              ) : (
+                <>
+                  Seluruh guru BK di sekolah ini menggunakan Google Spreadsheet bersama yang terpusat.
+                </>
+              )}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center bg-gray-100 p-1 rounded-xl shrink-0 self-stretch sm:self-end md:self-center">
+          <button
+            type="button"
+            onClick={() => handleToggleScope('personal')}
+            className={`flex-1 sm:flex-initial px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+              spreadsheetScope === 'personal'
+                ? 'bg-[#00685f] text-white shadow-2xs'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            Email Masing-masing
+          </button>
+          <button
+            type="button"
+            onClick={() => handleToggleScope('shared')}
+            className={`flex-1 sm:flex-initial px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+              spreadsheetScope === 'shared'
+                ? 'bg-[#00685f] text-white shadow-2xs'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            Bersama Sekolah
+          </button>
         </div>
       </div>
 
@@ -1254,6 +1449,34 @@ function readTab(ss, tabName, headers) {
                 </div>
               ) : (
                 <div className="space-y-6">
+                  {/* Session Expired Reconnect Banner */}
+                  {(isSessionExpired || (!accessToken && user)) && (
+                    <div className="p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-in fade-in">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2.5 bg-amber-500 text-white rounded-xl shrink-0">
+                          <AlertTriangle className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="text-xs font-extrabold text-amber-950 uppercase tracking-wider">
+                            Sesi Google Drive Perlu Disegarkan
+                          </h4>
+                          <p className="text-xs text-amber-900/90 font-medium mt-0.5">
+                            Sesi akses Google berlaku 1 jam demi keamanan akun. Klik tombol di kanan untuk menyegarkan sesi 1-klik tanpa perlu login ulang.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleGoogleLogin}
+                        disabled={isLoggingIn}
+                        className="px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-xs shrink-0 cursor-pointer flex items-center gap-1.5"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isLoggingIn ? 'animate-spin' : ''}`} />
+                        <span>Segarkan Sesi (1-Klik)</span>
+                      </button>
+                    </div>
+                  )}
+
                   {/* Connected Profile */}
                   <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4.5 bg-gray-50 border border-gray-200 rounded-2xl">
                     <div className="flex items-center gap-3">
@@ -1333,6 +1556,127 @@ function readTab(ss, tabName, headers) {
                       )}
                     </div>
                   )}
+
+                  {/* Google Drive Folder Hierarchy Status Card */}
+                  <div className="p-4.5 bg-gradient-to-r from-teal-50/70 to-emerald-50/40 border border-teal-200/60 rounded-2xl space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                      <div className="flex items-center gap-2">
+                        <div className="p-2 bg-[#00685f] text-white rounded-xl shadow-xs">
+                          <Database className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h5 className="font-extrabold text-[#0b1c30] text-xs uppercase tracking-wider">
+                              Struktur Folder Otomatis Arsip PDF (Google Drive)
+                            </h5>
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              Auto-Verifikasi saat Start-up
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-[#3d4947] font-medium mt-0.5">
+                            Setiap input layanan, pelanggaran, dan jurnal PDF otomatis diarsipkan ke folder terorganisir di Drive Anda
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isVerifyingFolders}
+                        onClick={async () => {
+                          setIsVerifyingFolders(true);
+                          try {
+                            const tok = accessToken || await getAccessToken();
+                            const currentScript = scriptUrl || getSavedScriptUrl();
+                            if (!tok && !currentScript) {
+                              if (confirm('Belum terhubung ke Akun Google atau Google Apps Script.\n\nApakah Anda ingin menghubungkan akun Google sekarang?')) {
+                                await handleGoogleLogin();
+                              }
+                              return;
+                            }
+                            const res = await ensureDriveFolderStructure(tok || undefined, true);
+                            if (res.success) {
+                              setFoldersVerifiedTime(new Date().toISOString());
+                              alert(`✅ Struktur folder Google Drive berhasil diverifikasi & siap!\n\nFolder Induk: ${res.rootFolderName || 'SIKAP-BK'}\n\nSubfolder Aktif:\n• SIKAP-BK/Laporan_Layanan (Layanan & Konseling)\n• SIKAP-BK/Pelanggaran (Catatan & Bukti Pelanggaran Siswa)\n• SIKAP-BK/Jurnal (Jurnal Harian & Bukti Foto)\n• SIKAP-BK/Panggilan_Ortu (Surat Panggilan & Berita Acara)\n• SIKAP-BK/Home_Visit (Laporan Kunjungan Rumah)\n• SIKAP-BK/Perjanjian_Kontrak (Kontrak Perilaku & RTL)\n• SIKAP-BK/Rekap_Analitik (Rekapitulasi Bulanan)\n\nSemua ekspor PDF akan otomatis tersimpan ke folder ini secara terorganisir tanpa risiko data hilang!`);
+                            } else {
+                              if (res.error?.includes('UNAUTHENTICATED') || res.error?.includes('401') || res.error?.includes('kedaluwarsa')) {
+                                if (confirm('Sesi login Google Drive Anda telah kedaluwarsa demi keamanan (otomatis 1 jam).\n\nKlik OK untuk menyegarkan sesi Google secara instan.')) {
+                                  await handleGoogleLogin();
+                                }
+                              } else {
+                                alert(`Pemberitahuan: ${res.error || 'Gagal menyiapkan folder'}`);
+                              }
+                            }
+                          } catch (err: any) {
+                            const msg = err?.message || String(err);
+                            if (msg.includes('UNAUTHENTICATED') || msg.includes('401') || msg.includes('kedaluwarsa')) {
+                              if (confirm('Sesi login Google Drive Anda telah kedaluwarsa demi keamanan (otomatis 1 jam).\n\nKlik OK untuk menyegarkan sesi Google secara instan.')) {
+                                await handleGoogleLogin();
+                              }
+                            } else {
+                              alert(`Pemberitahuan: ${msg}`);
+                            }
+                          } finally {
+                            setIsVerifyingFolders(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-teal-50 text-[#00685f] border border-teal-300 rounded-xl text-xs font-extrabold transition-all shadow-2xs cursor-pointer self-start sm:self-center disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isVerifyingFolders ? 'animate-spin' : ''}`} />
+                        <span>{isVerifyingFolders ? 'Memverifikasi...' : 'Verifikasi Ulang'}</span>
+                      </button>
+                    </div>
+
+                    {foldersVerifiedTime && (
+                      <div className="flex items-center gap-1.5 text-[11px] text-[#00685f] font-semibold bg-white/70 px-2.5 py-1 rounded-lg border border-teal-100">
+                        <span>✓ Terverifikasi aktif: {new Date(foldersVerifiedTime).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })} pukul {new Date(foldersVerifiedTime).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB</span>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 pt-1 text-[11px]">
+                      <div className="p-2 bg-white/95 rounded-xl border border-teal-100 flex flex-col gap-0.5 font-semibold text-[#0b1c30] shadow-2xs">
+                        <div className="flex items-center gap-1.5 text-[#00685f]">
+                          <span>📁</span> <span className="font-bold">Laporan_Layanan</span>
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-normal">SIKAP-BK/Laporan_Layanan</span>
+                      </div>
+                      <div className="p-2 bg-white/95 rounded-xl border border-teal-100 flex flex-col gap-0.5 font-semibold text-[#0b1c30] shadow-2xs">
+                        <div className="flex items-center gap-1.5 text-[#00685f]">
+                          <span>📁</span> <span className="font-bold">Pelanggaran</span>
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-normal">SIKAP-BK/Pelanggaran</span>
+                      </div>
+                      <div className="p-2 bg-white/95 rounded-xl border border-teal-100 flex flex-col gap-0.5 font-semibold text-[#0b1c30] shadow-2xs">
+                        <div className="flex items-center gap-1.5 text-[#00685f]">
+                          <span>📁</span> <span className="font-bold">Jurnal</span>
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-normal">SIKAP-BK/Jurnal</span>
+                      </div>
+                      <div className="p-2 bg-white/95 rounded-xl border border-teal-100 flex flex-col gap-0.5 font-semibold text-[#0b1c30] shadow-2xs">
+                        <div className="flex items-center gap-1.5 text-[#00685f]">
+                          <span>📁</span> <span className="font-bold">Panggilan_Ortu</span>
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-normal">SIKAP-BK/Panggilan_Ortu</span>
+                      </div>
+                      <div className="p-2 bg-white/95 rounded-xl border border-teal-100 flex flex-col gap-0.5 font-semibold text-[#0b1c30] shadow-2xs">
+                        <div className="flex items-center gap-1.5 text-[#00685f]">
+                          <span>📁</span> <span className="font-bold">Home_Visit</span>
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-normal">SIKAP-BK/Home_Visit</span>
+                      </div>
+                      <div className="p-2 bg-white/95 rounded-xl border border-teal-100 flex flex-col gap-0.5 font-semibold text-[#0b1c30] shadow-2xs">
+                        <div className="flex items-center gap-1.5 text-[#00685f]">
+                          <span>📁</span> <span className="font-bold">Perjanjian_Kontrak</span>
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-normal">SIKAP-BK/Perjanjian_Kontrak</span>
+                      </div>
+                      <div className="p-2 bg-white/95 rounded-xl border border-teal-100 flex flex-col gap-0.5 font-semibold text-[#0b1c30] shadow-2xs">
+                        <div className="flex items-center gap-1.5 text-[#00685f]">
+                          <span>📁</span> <span className="font-bold">Rekap_Analitik</span>
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-normal">SIKAP-BK/Rekap_Analitik</span>
+                      </div>
+                    </div>
+                  </div>
 
                   {/* Push & Pull Actions */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">

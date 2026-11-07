@@ -2,6 +2,8 @@
  * Utility functions for direct Client-Side Google Drive & Google Sheets API Integration
  */
 
+import { loadSchoolData } from './schoolConfig';
+
 export interface GoogleSyncResult {
   success: boolean;
   message: string;
@@ -230,21 +232,17 @@ export async function pushDataDirect(
     let homeVisits = data.homeVisits || [];
     let achievements = data.achievements || [];
 
-    if ((!students || students.length === 0) && typeof localStorage !== 'undefined') {
-      const rawS = localStorage.getItem('bk_students');
-      if (rawS) { try { students = JSON.parse(rawS); } catch (e) {} }
+    if ((!students || students.length === 0)) {
+      students = loadSchoolData('bk_students', []);
     }
-    if ((!violations || violations.length === 0) && typeof localStorage !== 'undefined') {
-      const rawV = localStorage.getItem('bk_violations');
-      if (rawV) { try { violations = JSON.parse(rawV); } catch (e) {} }
+    if ((!violations || violations.length === 0)) {
+      violations = loadSchoolData('bk_violations', []);
     }
-    if ((!services || services.length === 0) && typeof localStorage !== 'undefined') {
-      const rawSvc = localStorage.getItem('bk_services');
-      if (rawSvc) { try { services = JSON.parse(rawSvc); } catch (e) {} }
+    if ((!services || services.length === 0)) {
+      services = loadSchoolData('bk_services', []);
     }
-    if ((!achievements || achievements.length === 0) && typeof localStorage !== 'undefined') {
-      const rawAch = localStorage.getItem('bk_achievements');
-      if (rawAch) { try { achievements = JSON.parse(rawAch); } catch (e) {} }
+    if ((!achievements || achievements.length === 0)) {
+      achievements = loadSchoolData('bk_achievements', []);
     }
 
     // Filter data pembinaan (pelanggaran belum/perlu ditangani) dan data restitusi (telah ditangani/dalam proses restitusi)

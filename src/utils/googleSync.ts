@@ -6,33 +6,92 @@ import { pushDataDirect, pullDataDirect } from './googleSheetsDirect';
 import { mergeFullDatabase } from './dataMerger';
 import { registerSyncedIds, cleanupSyncedIds } from './deletionTracker';
 import { initialStudents, initialViolations, initialServices } from '../data/mockData';
+import { loadSchoolData, saveSchoolData, getActiveSchoolId } from './schoolConfig';
+import { getOrCreateDriveFolder, getRootFolderName } from './googleDriveUpload';
 
 export function getLocalDatabaseData() {
-  const studentsRaw = localStorage.getItem('bk_students');
-  const violationsRaw = localStorage.getItem('bk_violations');
-  const servicesRaw = localStorage.getItem('bk_services');
-  const attendanceRaw = localStorage.getItem('bk_attendance_history');
-  const journalsRaw = localStorage.getItem('bk_daily_journals');
-  const homeVisitsRaw = localStorage.getItem('bk_home_visits');
-  const achievementsRaw = localStorage.getItem('bk_achievements');
-
-  let students = studentsRaw ? JSON.parse(studentsRaw) : [];
-  let violations = violationsRaw ? JSON.parse(violationsRaw) : [];
-  let services = servicesRaw ? JSON.parse(servicesRaw) : [];
-  const attendance = attendanceRaw ? JSON.parse(attendanceRaw) : [];
-  const journals = journalsRaw ? JSON.parse(journalsRaw) : [];
-  const homeVisits = homeVisitsRaw ? JSON.parse(homeVisitsRaw) : [];
-  const achievements = achievementsRaw ? JSON.parse(achievementsRaw) : [];
+  const schoolId = getActiveSchoolId();
+  const students = loadSchoolData<any[]>('bk_students', [], schoolId);
+  const violations = loadSchoolData<any[]>('bk_violations', [], schoolId);
+  const services = loadSchoolData<any[]>('bk_services', [], schoolId);
+  const attendance = loadSchoolData<any[]>('bk_attendance_history', [], schoolId);
+  const journals = loadSchoolData<any[]>('bk_daily_journals', [], schoolId);
+  const homeVisits = loadSchoolData<any[]>('bk_home_visits', [], schoolId);
+  const achievements = loadSchoolData<any[]>('bk_achievements', [], schoolId);
 
   return { students, violations, services, attendance, journals, homeVisits, achievements };
 }
 
-export function getSavedScriptUrl(): string {
+export function getSavedScriptUrl(emailOrId?: string): string {
+  if (emailOrId) {
+    const cleanKey = emailOrId.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    const personalUrl = localStorage.getItem(`bk_google_script_url_${cleanKey}`);
+    if (personalUrl) return personalUrl;
+  }
   return localStorage.getItem('bk_google_script_url') || '';
 }
 
-export function saveScriptUrl(url: string): void {
-  localStorage.setItem('bk_google_script_url', url.trim());
+export function saveScriptUrl(url: string, emailOrId?: string, isPersonal: boolean = true): void {
+  const cleanUrl = url.trim();
+  if (emailOrId && isPersonal) {
+    const cleanKey = emailOrId.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    localStorage.setItem(`bk_google_script_url_${cleanKey}`, cleanUrl);
+  } else {
+    localStorage.setItem('bk_google_script_url', cleanUrl);
+  }
+}
+
+export function getSavedSpreadsheetConfig(emailOrId?: string): { id: string; url: string; isPersonal: boolean } {
+  if (emailOrId) {
+    const cleanKey = emailOrId.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    const mode = localStorage.getItem(`bk_google_spreadsheet_mode_${cleanKey}`);
+    if (mode === 'shared') {
+      return {
+        id: localStorage.getItem('bk_google_spreadsheet_id') || '',
+        url: localStorage.getItem('bk_google_spreadsheet_url') || '',
+        isPersonal: false
+      };
+    }
+    const pId = localStorage.getItem(`bk_google_spreadsheet_id_${cleanKey}`);
+    const pUrl = localStorage.getItem(`bk_google_spreadsheet_url_${cleanKey}`);
+    if (pId || pUrl) {
+      return { id: pId || '', url: pUrl || '', isPersonal: true };
+    }
+  }
+  return {
+    id: localStorage.getItem('bk_google_spreadsheet_id') || '',
+    url: localStorage.getItem('bk_google_spreadsheet_url') || '',
+    isPersonal: false
+  };
+}
+
+export function saveSpreadsheetConfig(
+  id: string,
+  url: string,
+  emailOrId?: string,
+  isPersonal: boolean = true
+): void {
+  if (emailOrId && isPersonal) {
+    const cleanKey = emailOrId.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    if (id) localStorage.setItem(`bk_google_spreadsheet_id_${cleanKey}`, id.trim());
+    else localStorage.removeItem(`bk_google_spreadsheet_id_${cleanKey}`);
+
+    if (url) localStorage.setItem(`bk_google_spreadsheet_url_${cleanKey}`, url.trim());
+    else localStorage.removeItem(`bk_google_spreadsheet_url_${cleanKey}`);
+
+    localStorage.setItem(`bk_google_spreadsheet_mode_${cleanKey}`, 'personal');
+  } else {
+    if (id) localStorage.setItem('bk_google_spreadsheet_id', id.trim());
+    else localStorage.removeItem('bk_google_spreadsheet_id');
+
+    if (url) localStorage.setItem('bk_google_spreadsheet_url', url.trim());
+    else localStorage.removeItem('bk_google_spreadsheet_url');
+
+    if (emailOrId) {
+      const cleanKey = emailOrId.toLowerCase().replace(/[^a-z0-9]/g, '_');
+      localStorage.setItem(`bk_google_spreadsheet_mode_${cleanKey}`, 'shared');
+    }
+  }
 }
 
 /**
@@ -249,13 +308,14 @@ export async function pushDataToGoogle(url: string, force: boolean = false): Pro
           finalHomeVisits = merged.homeVisits;
           finalAchievements = merged.achievements;
 
-          localStorage.setItem('bk_students', JSON.stringify(finalStudents));
-          localStorage.setItem('bk_violations', JSON.stringify(finalViolations));
-          localStorage.setItem('bk_services', JSON.stringify(finalServices));
-          localStorage.setItem('bk_attendance_history', JSON.stringify(finalAttendance));
-          localStorage.setItem('bk_daily_journals', JSON.stringify(finalJournals));
-          localStorage.setItem('bk_home_visits', JSON.stringify(finalHomeVisits));
-          localStorage.setItem('bk_achievements', JSON.stringify(finalAchievements));
+          const currentSchoolId = getActiveSchoolId();
+          saveSchoolData('bk_students', finalStudents, currentSchoolId);
+          saveSchoolData('bk_violations', finalViolations, currentSchoolId);
+          saveSchoolData('bk_services', finalServices, currentSchoolId);
+          saveSchoolData('bk_attendance_history', finalAttendance, currentSchoolId);
+          saveSchoolData('bk_daily_journals', finalJournals, currentSchoolId);
+          saveSchoolData('bk_home_visits', finalHomeVisits, currentSchoolId);
+          saveSchoolData('bk_achievements', finalAchievements, currentSchoolId);
           window.dispatchEvent(new Event('storage'));
         }
       } catch (err) {
@@ -388,13 +448,14 @@ export async function triggerBackgroundAutoSync(): Promise<{ success: boolean; m
             finalHomeVisits = merged.homeVisits;
             finalAchievements = merged.achievements;
 
-            localStorage.setItem('bk_students', JSON.stringify(finalStudents));
-            localStorage.setItem('bk_violations', JSON.stringify(finalViolations));
-            localStorage.setItem('bk_services', JSON.stringify(finalServices));
-            localStorage.setItem('bk_attendance_history', JSON.stringify(finalAttendance));
-            localStorage.setItem('bk_daily_journals', JSON.stringify(finalJournals));
-            localStorage.setItem('bk_home_visits', JSON.stringify(finalHomeVisits));
-            localStorage.setItem('bk_achievements', JSON.stringify(finalAchievements));
+            const currentSchoolId = getActiveSchoolId();
+            saveSchoolData('bk_students', finalStudents, currentSchoolId);
+            saveSchoolData('bk_violations', finalViolations, currentSchoolId);
+            saveSchoolData('bk_services', finalServices, currentSchoolId);
+            saveSchoolData('bk_attendance_history', finalAttendance, currentSchoolId);
+            saveSchoolData('bk_daily_journals', finalJournals, currentSchoolId);
+            saveSchoolData('bk_home_visits', finalHomeVisits, currentSchoolId);
+            saveSchoolData('bk_achievements', finalAchievements, currentSchoolId);
             window.dispatchEvent(new Event('storage'));
           }
         } catch (err) {
@@ -633,4 +694,166 @@ export async function createGmailDraft(to: string, subject: string, body: string
     message: `Gagal membuat draf email otomatis. ${appsScriptError ? `(Apps Script Gagal: ${appsScriptError}).` : ''} Silakan hubungkan akun Google Anda kembali di menu Integrasi dan pastikan mencentang izin pengelolaan Gmail.` 
   };
 }
+
+export interface DriveFolderItem {
+  id: string;
+  name: string;
+  viewUrl?: string;
+}
+
+export interface DriveFolderStructureResult {
+  success: boolean;
+  rootFolderId?: string;
+  rootFolderName?: string;
+  subfolders?: Record<string, DriveFolderItem>;
+  message?: string;
+  error?: string;
+}
+
+export const SIKAP_BK_DEFAULT_SUBFOLDERS = [
+  { key: 'Laporan_Layanan', path: 'SIKAP-BK/Laporan_Layanan', description: 'Folder otomatis PDF Dokumen & Bukti Layanan BK' },
+  { key: 'Pelanggaran', path: 'SIKAP-BK/Pelanggaran', description: 'Folder otomatis PDF Bukti & Catatan Pelanggaran Siswa' },
+  { key: 'Jurnal', path: 'SIKAP-BK/Jurnal', description: 'Folder otomatis PDF Jurnal Harian Konseling & Disiplin' },
+  { key: 'Panggilan_Ortu', path: 'SIKAP-BK/Panggilan_Ortu', description: 'Folder otomatis PDF Surat Panggilan & Berita Acara Kehadiran Orang Tua' },
+  { key: 'Home_Visit', path: 'SIKAP-BK/Home_Visit', description: 'Folder otomatis PDF Laporan Kunjungan Rumah (Home Visit)' },
+  { key: 'Perjanjian_Kontrak', path: 'SIKAP-BK/Perjanjian_Kontrak', description: 'Folder otomatis PDF Surat Perjanjian & Kontrak Perilaku' },
+  { key: 'Rekap_Analitik', path: 'SIKAP-BK/Rekap_Analitik', description: 'Folder otomatis PDF Laporan Rekapitulasi & Analitik' },
+] as const;
+
+/**
+ * Utilitas untuk membuat & memverifikasi struktur folder otomatis di Google Drive
+ * ('SIKAP-BK/Laporan_Layanan', 'SIKAP-BK/Pelanggaran', 'SIKAP-BK/Jurnal', dst.)
+ * saat aplikasi pertama kali dimuat untuk memastikan semua ekspor PDF tersimpan secara terorganisir.
+ * Mendukung dual-engine: Direct Google Drive API (OAuth) & Google Apps Script Web App.
+ */
+export async function ensureDriveFolderStructure(
+  accessToken?: string,
+  force: boolean = false
+): Promise<DriveFolderStructureResult> {
+  // 1. Caching check: avoid redundant network storms if verified in last 30 min
+  if (!force && typeof localStorage !== 'undefined') {
+    const lastVerified = localStorage.getItem('bk_drive_folders_verified_at');
+    const cachedSubfolders = localStorage.getItem('bk_drive_subfolders_cache');
+    const rootFolderId = localStorage.getItem('bk_drive_root_folder_id');
+    if (lastVerified && cachedSubfolders) {
+      const elapsedMs = Date.now() - new Date(lastVerified).getTime();
+      if (elapsedMs < 30 * 60 * 1000) {
+        try {
+          const parsed = JSON.parse(cachedSubfolders);
+          return {
+            success: true,
+            rootFolderId: rootFolderId || undefined,
+            rootFolderName: getRootFolderName(),
+            subfolders: parsed,
+            message: 'Struktur folder Google Drive sudah terverifikasi dan siap digunakan.',
+          };
+        } catch (e) {}
+      }
+    }
+  }
+
+  // 2. Engine A: Direct Google Drive REST API (OAuth)
+  try {
+    let token = accessToken;
+    if (!token) {
+      token = (await getAccessToken()) || undefined;
+    }
+
+    if (token) {
+      const rootFolderName = getRootFolderName(); // 'SIKAP-BK'
+      const rootFolder = await getOrCreateDriveFolder(token, rootFolderName);
+      const subfolders: Record<string, DriveFolderItem> = {};
+
+      for (const item of SIKAP_BK_DEFAULT_SUBFOLDERS) {
+        try {
+          const folder = await getOrCreateDriveFolder(token, item.key, rootFolder.id);
+          subfolders[item.key] = {
+            id: folder.id,
+            name: item.key,
+            viewUrl: folder.viewUrl,
+          };
+        } catch (err: any) {
+          console.warn(`[Drive Folder Init] Gagal membuat subfolder ${item.key}:`, err);
+        }
+      }
+
+      // Persist folder initialization state
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('bk_drive_folders_initialized', 'true');
+        localStorage.setItem('bk_drive_folders_verified_at', new Date().toISOString());
+        localStorage.setItem('bk_drive_folder_mode', 'direct_oauth');
+        localStorage.setItem('bk_drive_root_folder_id', rootFolder.id);
+        localStorage.setItem('bk_drive_subfolders_cache', JSON.stringify(subfolders));
+        window.dispatchEvent(new CustomEvent('bk_drive_folders_updated', {
+          detail: { mode: 'direct_oauth', rootFolderId: rootFolder.id, subfolders }
+        }));
+      }
+
+      console.log('✅ Struktur folder Google Drive SIKAP-BK terverifikasi (OAuth Direct):', {
+        root: rootFolderName,
+        subfolders: Object.keys(subfolders),
+      });
+
+      return {
+        success: true,
+        rootFolderId: rootFolder.id,
+        rootFolderName,
+        subfolders,
+        message: `Struktur folder Google Drive ${rootFolderName} berhasil disiapkan & diverifikasi.`,
+      };
+    }
+  } catch (error: any) {
+    console.warn('Direct OAuth folder initialization warning:', error);
+    const rawMsg = String(error?.message || error || '');
+    if (rawMsg.includes('UNAUTHENTICATED') || rawMsg.includes('401') || rawMsg.includes('invalid authentication')) {
+      // Token expired or invalid: will attempt Apps Script fallback below
+    }
+  }
+
+  // 3. Engine B: Google Apps Script Web App fallback
+  try {
+    const scriptUrl = getSavedScriptUrl();
+    if (scriptUrl) {
+      const res = await callGasApi(scriptUrl, 'POST', { action: 'ensureFolders' });
+      if (res.success && res.data) {
+        const subfolders = res.data.subfolders || {};
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('bk_drive_folders_initialized', 'true');
+          localStorage.setItem('bk_drive_folders_verified_at', new Date().toISOString());
+          localStorage.setItem('bk_drive_folder_mode', 'apps_script');
+          if (res.data.rootFolderId) {
+            localStorage.setItem('bk_drive_root_folder_id', res.data.rootFolderId);
+          }
+          localStorage.setItem('bk_drive_subfolders_cache', JSON.stringify(subfolders));
+          window.dispatchEvent(new CustomEvent('bk_drive_folders_updated', {
+            detail: { mode: 'apps_script', rootFolderId: res.data.rootFolderId, subfolders }
+          }));
+        }
+
+        console.log('✅ Struktur folder Google Drive SIKAP-BK terverifikasi (Apps Script Web App):', {
+          root: res.data.rootFolderName || 'SIKAP-BK',
+          subfolders: Object.keys(subfolders),
+        });
+
+        return {
+          success: true,
+          rootFolderId: res.data.rootFolderId,
+          rootFolderName: res.data.rootFolderName || 'SIKAP-BK',
+          subfolders,
+          message: res.data.message || 'Struktur folder Google Drive berhasil disiapkan via Apps Script.',
+        };
+      }
+    }
+  } catch (gasErr: any) {
+    console.warn('Apps Script folder verification error:', gasErr);
+  }
+
+  // 4. If neither authenticated nor Apps Script is connected, return safe state (do not crash app)
+  return {
+    success: false,
+    error: 'Akun Google atau Google Apps Script belum terhubung di menu Integrasi Google.',
+  };
+}
+
+
 

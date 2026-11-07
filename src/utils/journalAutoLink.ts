@@ -1,6 +1,8 @@
 import { BKJournalEntry } from '../types';
 import { triggerBackgroundAutoSync } from './googleSync';
 import { saveToFirestore } from './firestoreSync';
+import { safeSetItem } from './storageQuota';
+import { loadSchoolData, saveSchoolData } from './schoolConfig';
 
 export interface AutoJournalSettings {
   syncViolations: boolean; // default: false (Catatan Pelanggaran TIDAK masuk jurnal)
@@ -28,7 +30,7 @@ export function getAutoJournalSettings(): AutoJournalSettings {
 
 export function saveAutoJournalSettings(settings: AutoJournalSettings): void {
   try {
-    localStorage.setItem('bk_auto_journal_settings', JSON.stringify(settings));
+    safeSetItem('bk_auto_journal_settings', JSON.stringify(settings));
     saveToFirestore('bk_auto_journal_settings', settings);
   } catch (err) {
     console.error('Error saving bk_auto_journal_settings:', err);
@@ -74,8 +76,7 @@ export function autoPushToJournal(input: AutoJournalInput): void {
       return;
     }
 
-    const saved = localStorage.getItem('bk_daily_journals');
-    const journals: BKJournalEntry[] = saved ? JSON.parse(saved) : [];
+    const journals: BKJournalEntry[] = loadSchoolData('bk_daily_journals', []);
 
     const dateStr = input.date || new Date().toISOString().split('T')[0];
     
@@ -107,7 +108,7 @@ export function autoPushToJournal(input: AutoJournalInput): void {
     };
 
     const updated = [newJournal, ...journals];
-    localStorage.setItem('bk_daily_journals', JSON.stringify(updated));
+    saveSchoolData('bk_daily_journals', updated);
     saveToFirestore('bk_daily_journals', newJournal);
     triggerBackgroundAutoSync();
   } catch (err) {

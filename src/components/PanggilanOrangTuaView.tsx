@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Counselor, Student, ParentSummon, ParentSummonTemplate } from '../types';
+import { motion, AnimatePresence } from 'motion/react';
+import { Counselor, Student, ParentSummon, ParentSummonTemplate, BidangBimbinganType } from '../types';
+import { BIDANG_BIMBINGAN_OPTIONS } from '../utils/bkKomprehensif';
 import { 
   Mail, 
   Printer, 
@@ -33,7 +35,8 @@ import {
 import { downloadParentSummonPDF, downloadParentAttendancePDF, formatIndonesianDate } from '../utils/pdfGenerator';
 import { registerDeletedId } from '../utils/deletionTracker';
 import { autoPushToJournal } from '../utils/journalAutoLink';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore } from '../utils/firestoreSync';
+import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { showToast } from '../utils/toast';
 import { 
   getParentSummonTemplates, 
   saveParentSummonTemplates, 
@@ -42,6 +45,95 @@ import {
   createWhatsAppLink 
 } from '../utils/summonTemplates';
 import { getSchoolConfig } from '../utils/schoolConfig';
+
+export interface AttendancePreset {
+  id: string;
+  label: string;
+  bidang: BidangBimbinganType;
+  issues: string;
+  agreements: string;
+  parentCommitment: string;
+  studentCommitment: string;
+  followUpPlan: string;
+}
+
+export const ATTENDANCE_PRESETS: AttendancePreset[] = [
+  {
+    id: 'disiplin_presensi',
+    label: 'Kedisiplinan & Presensi',
+    bidang: 'Pribadi',
+    issues: 'Evaluasi ketidakhadiran tanpa keterangan (alpa) dan keterlambatan masuk kelas yang terjadi berulang dalam kurun waktu 2 pekan terakhir.',
+    agreements: 'Orang tua bersama pihak sekolah sepakat memperketat pengawasan waktu istirahat dan bangun pagi siswa, serta mewajibkan siswa melapor presensi ke ruang BK setiap pagi sebelum jam pertama dimulai.',
+    parentCommitment: 'Orang tua berkomitmen memastikan putra/putri berangkat tepat waktu dari rumah dan segera mengabari wali kelas/guru BK apabila ada kendala darurat.',
+    studentCommitment: 'Siswa berjanji tidak akan terlambat lagi, hadir tepat waktu setiap hari, dan mematuhi tata tertib jam kehadiran sekolah.',
+    followUpPlan: 'Guru BK melakukan monitoring absensi harian bersama wali kelas selama 2 pekan berturut-turut dan menyampaikan laporan perkembangannya ke orang tua.'
+  },
+  {
+    id: 'perilaku_sosial',
+    label: 'Perilaku Teman Sebaya',
+    bidang: 'Sosial',
+    issues: 'Penanganan insiden perselisihan / ketidakharmonisan interaksi dengan teman sebaya di kelas yang mengganggu kenyamanan proses belajar mengajar.',
+    agreements: 'Kedua belah pihak menyepakati penyelesaian masalah secara damai, saling memaafkan, menghormati teman, dan menjunjung tinggi budaya santun di sekolah.',
+    parentCommitment: 'Orang tua memberikan nasihat dan pembinaan moral di rumah agar anak senantiasa mengendalikan emosi dan bergaul secara positif.',
+    studentCommitment: 'Siswa bersedia saling memaafkan, menjaga sikap ramah, menghindari provokasi, dan tidak mengulangi perilaku konfrontatif.',
+    followUpPlan: 'Guru BK memantau dinamika pertemanan siswa di lingkungan sekolah dan melakukan sesi konseling kelompok/individu berkala.'
+  },
+  {
+    id: 'motivasi_akademik',
+    label: 'Motivasi Belajar & Tugas',
+    bidang: 'Belajar',
+    issues: 'Penurunan konsentrasi dan motivasi belajar, serta kelalaian dalam pengumpulan tugas-tugas mata pelajaran utama.',
+    agreements: 'Menyusun jadwal belajar mandiri terstruktur di rumah minimal 1,5 jam setiap malam, dengan pendampingan orang tua dan bimbingan guru mata pelajaran.',
+    parentCommitment: 'Orang tua membatasi penggunaan gawai/game pada malam hari dan memantau penyelesaian tugas sekolah sebelum waktu tidur.',
+    studentCommitment: 'Siswa bertekad mencatat seluruh tugas di buku agenda, fokus saat pembelajaran di kelas, dan mengumpulkan tugas tepat waktu.',
+    followUpPlan: 'Guru BK berkoordinasi mingguan dengan guru mata pelajaran untuk memantau kemajuan nilai dan pengumpulan tugas siswa.'
+  },
+  {
+    id: 'gawai_gadget',
+    label: 'Pengawasan Gawai / HP',
+    bidang: 'Pribadi',
+    issues: 'Penggunaan gawai/smartphone berlebihan di rumah hingga larut malam yang berdampak pada rasa kantuk di kelas dan hilangnya fokus belajar.',
+    agreements: 'Penerapan aturan batas waktu layar (screen time) di rumah maksimal hingga pukul 21.00 WIB dan pengumpulan gawai kepada orang tua menjelang jam istirahat malam.',
+    parentCommitment: 'Orang tua berkomitmen mendampingi jam belajar malam dan konsisten menerapkan aturan penyimpanan gawai sebelum tidur.',
+    studentCommitment: 'Siswa berkomitmen mematuhi batas jam bermain gawai dan mengutamakan istirahat cukup agar segar saat bersekolah.',
+    followUpPlan: 'Evaluasi kebugaran dan keaktifan siswa di sekolah dilakukan berkala setiap pekan oleh Guru BK dan Wali Kelas.'
+  }
+];
+
+export function createAttendanceWaSummary(summon: ParentSummon, counselor: Counselor): string {
+  const att = summon.attendanceDetails || {
+    actualDate: summon.summonDate,
+    actualTime: summon.summonTime,
+    attendeeName: summon.parentName,
+    attendeeRelation: 'Orang Tua / Wali',
+    issuesDiscussed: summon.agenda,
+    agreements: 'Peningkatan disiplin dan koordinasi belajar bersama.',
+    parentCommitment: '-',
+    studentCommitment: '-',
+    followUpPlan: 'Pemantauan berkala Guru BK & Wali Kelas.',
+    counselorName: counselor.name,
+    documentedAt: new Date().toISOString()
+  };
+  const config = getSchoolConfig();
+  const dateStr = formatIndonesianDate(att.actualDate || summon.summonDate, true);
+  return `*RESUME RESMI PERTEMUAN WALI MURID - ${config.schoolName.toUpperCase()}*\n\n` +
+    `Yth. Bapak/Ibu *${att.attendeeName || summon.parentName}* (${att.attendeeRelation || 'Wali Murid'}),\n\n` +
+    `Terima kasih telah hadir dan bermusyawarah di Ruang Bimbingan dan Konseling (BK) ${config.schoolName} pada:\n` +
+    `📅 Hari/Tanggal : ${dateStr}\n` +
+    `⏰ Waktu         : ${att.actualTime || summon.summonTime || '09:00'} WIB\n` +
+    `👤 Peserta Didik : *${summon.studentName}* (Kelas ${summon.studentClass})\n\n` +
+    `*📋 Ringkasan Hasil Pertemuan:* \n` +
+    `• Pokok Bahasan : ${att.issuesDiscussed || summon.agenda}\n` +
+    `• Kesepakatan   : ${att.agreements}\n\n` +
+    `*🤝 Komitmen Bersama:*\n` +
+    `• Komitmen Orang Tua : ${att.parentCommitment || '-'}\n` +
+    `• Janji Siswa        : ${att.studentCommitment || '-'}\n` +
+    `• Tindak Lanjut BK   : ${att.followUpPlan || '-'}\n\n` +
+    `Dokumen resmi Berita Acara & Notulen telah diarsipkan secara digital di Portal BK ${config.schoolName}.\n\n` +
+    `Salam hormat,\n` +
+    `*${counselor.name}*\n` +
+    `Guru Bimbingan dan Konseling ${config.schoolName}`;
+}
 
 interface SignaturePadProps {
   label: string;
@@ -192,6 +284,41 @@ interface PanggilanOrangTuaViewProps {
 export default function PanggilanOrangTuaView({ students, activeCounselor }: PanggilanOrangTuaViewProps) {
   // Tabs: 'daftar' | 'templat' | 'dokumentasi' | 'buat'
   const [activeTab, setActiveTab] = useState<'daftar' | 'templat' | 'dokumentasi' | 'buat'>('daftar');
+  const [tabDirection, setTabDirection] = useState<number>(1);
+  const TAB_ORDER: Record<string, number> = { daftar: 0, templat: 1, dokumentasi: 2, buat: 3 };
+
+  const handleSwitchTab = (newTab: 'daftar' | 'templat' | 'dokumentasi' | 'buat') => {
+    const currentIdx = TAB_ORDER[activeTab] ?? 0;
+    const nextIdx = TAB_ORDER[newTab] ?? 0;
+    setTabDirection(nextIdx >= currentIdx ? 1 : -1);
+    setActiveTab(newTab);
+  };
+
+  const tabSlideVariants = {
+    enter: (direction: number) => ({
+      x: direction > 0 ? 32 : -32,
+      opacity: 0,
+      filter: 'blur(3px)',
+    }),
+    center: {
+      x: 0,
+      opacity: 1,
+      filter: 'blur(0px)',
+      transition: {
+        duration: 0.28,
+        ease: [0.16, 1, 0.3, 1] as const,
+      },
+    },
+    exit: (direction: number) => ({
+      x: direction > 0 ? -32 : 32,
+      opacity: 0,
+      filter: 'blur(3px)',
+      transition: {
+        duration: 0.2,
+        ease: [0.16, 1, 0.3, 1] as const,
+      },
+    }),
+  };
   
   // Summons State
   const [summons, setSummons] = useState<ParentSummon[]>(() => {
@@ -223,6 +350,7 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
   const [summonTime, setSummonTime] = useState<string>('09:00');
   const [summonPlace, setSummonPlace] = useState<string>('Ruang Bimbingan dan Konseling (BK) SMP N 2 Susukan');
   const [agenda, setAgenda] = useState<string>('Konsultasi bimbingan perkembangan perilaku, kedisiplinan, dan belajar putra/putri Bapak/Ibu');
+  const [bidangBimbingan, setBidangBimbingan] = useState<BidangBimbinganType>('Pribadi');
   const [customAgenda, setCustomAgenda] = useState<string>('');
   const [customWaTemplate, setCustomWaTemplate] = useState<string>('');
 
@@ -233,6 +361,8 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
   const [selectedSummonForAttendance, setSelectedSummonForAttendance] = useState<ParentSummon | null>(null);
   const [attActualDate, setAttActualDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
   const [attActualTime, setAttActualTime] = useState<string>('09:00');
+  const [attMeetingPlace, setAttMeetingPlace] = useState<string>('Ruang Bimbingan dan Konseling (BK) SMP N 2 Susukan');
+  const [attBidangBimbingan, setAttBidangBimbingan] = useState<BidangBimbinganType>('Pribadi');
   const [attAttendeeName, setAttAttendeeName] = useState<string>('');
   const [attAttendeeRelation, setAttAttendeeRelation] = useState<string>('Ibu Kandung');
   const [attPhone, setAttPhone] = useState<string>('');
@@ -271,10 +401,9 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
   const [saveAsTplTitle, setSaveAsTplTitle] = useState<string>('');
   const [saveAsTplCategory, setSaveAsTplCategory] = useState<ParentSummonTemplate['category']>('Kedisiplinan');
 
-  // Auto-sync summons to localStorage and Firestore
+  // Auto-sync summons to local cache
   useEffect(() => {
     saveSchoolData('bk_parent_summons', summons);
-    saveBulkToFirestore('bk_parent_summons', summons);
   }, [summons]);
 
   // Realtime subscriber for remote changes
@@ -504,12 +633,14 @@ _{NAMA_SEKOLAH}_`);
     if (q) {
       list = students.filter(
         (s) =>
-          s.name.toLowerCase().includes(q) ||
-          s.nis.includes(q) ||
-          s.class.toLowerCase().includes(q)
+          s &&
+          (String(s.name || '').toLowerCase().includes(q) ||
+            String(s.nis ?? '').toLowerCase().includes(q) ||
+            String(s.nisn ?? '').toLowerCase().includes(q) ||
+            String(s.class || '').toLowerCase().includes(q))
       );
     }
-    return [...list].sort((a, b) => a.name.localeCompare(b.name, 'id'));
+    return [...list].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'id'));
   }, [studentSearchQuery, students]);
 
   const handleStudentChange = (studentId: string) => {
@@ -548,6 +679,7 @@ _{NAMA_SEKOLAH}_`);
       id: `ps-${Date.now()}`,
       letterNumber: letterNumber || generateLetterNumber(summons.length),
       date: letterDate,
+      bidangBimbingan,
       studentId: student.id,
       studentName: student.name,
       studentClass: student.class,
@@ -563,6 +695,7 @@ _{NAMA_SEKOLAH}_`);
     };
 
     setSummons([newSummon, ...summons]);
+    saveToFirestore('bk_parent_summons', newSummon);
 
     // Push to Daily Journal automatically
     autoPushToJournal({
@@ -593,7 +726,14 @@ _{NAMA_SEKOLAH}_`);
 
   // Handle status update
   const handleUpdateStatus = (id: string, newStatus: 'Terkirim' | 'Hadir' | 'Batal' | 'Penjadwalan Ulang') => {
-    setSummons(prev => prev.map(s => s.id === id ? { ...s, status: newStatus } : s));
+    setSummons(prev => {
+      const updated = prev.map(s => s.id === id ? { ...s, status: newStatus } : s);
+      const target = updated.find(s => s.id === id);
+      if (target) saveToFirestore('bk_parent_summons', target);
+      saveSchoolData('bk_parent_summons', updated);
+      return updated;
+    });
+    showToast(`Status penanganan diperbarui ke: ${newStatus}`, 'info');
   };
 
   // Handle delete
@@ -601,7 +741,12 @@ _{NAMA_SEKOLAH}_`);
     if (confirm(`Apakah Anda yakin ingin menghapus catatan surat panggilan untuk ${name}?`)) {
       registerDeletedId(id);
       deleteFromFirestore('bk_parent_summons', id);
-      setSummons(prev => prev.filter(s => s.id !== id));
+      setSummons(prev => {
+        const next = prev.filter(s => s.id !== id);
+        saveSchoolData('bk_parent_summons', next);
+        return next;
+      });
+      showToast(`Catatan surat panggilan ${name} berhasil dihapus.`, 'info');
     }
   };
 
@@ -611,6 +756,8 @@ _{NAMA_SEKOLAH}_`);
     const existing = summon.attendanceDetails;
     setAttActualDate(existing?.actualDate || summon.summonDate || new Date().toISOString().split('T')[0]);
     setAttActualTime(existing?.actualTime || summon.summonTime || '09:00');
+    setAttMeetingPlace(existing?.meetingPlace || summon.summonPlace || 'Ruang Bimbingan dan Konseling (BK) SMP N 2 Susukan');
+    setAttBidangBimbingan(summon.bidangBimbingan || 'Pribadi');
     setAttAttendeeName(existing?.attendeeName || summon.parentName || '');
     setAttAttendeeRelation(existing?.attendeeRelation || 'Ibu Kandung');
     setAttPhone(existing?.phone || '');
@@ -624,9 +771,11 @@ _{NAMA_SEKOLAH}_`);
   };
 
   const openDirectAttendanceForm = () => {
-    setActiveTab('dokumentasi');
+    handleSwitchTab('dokumentasi');
     setAttActualDate(new Date().toISOString().split('T')[0]);
     setAttActualTime('09:00');
+    setAttMeetingPlace('Ruang Bimbingan dan Konseling (BK) SMP N 2 Susukan');
+    setAttBidangBimbingan('Pribadi');
     setAttAttendeeName('');
     setAttAttendeeRelation('Ibu Kandung');
     setAttPhone('');
@@ -647,10 +796,12 @@ _{NAMA_SEKOLAH}_`);
       if (s.id === selectedSummonForAttendance.id) {
         return {
           ...s,
+          bidangBimbingan: attBidangBimbingan,
           status: 'Hadir' as const,
           attendanceDetails: {
             actualDate: attActualDate,
             actualTime: attActualTime,
+            meetingPlace: attMeetingPlace,
             attendeeName: attAttendeeName,
             attendeeRelation: attAttendeeRelation,
             phone: attPhone,
@@ -670,9 +821,11 @@ _{NAMA_SEKOLAH}_`);
     });
 
     setSummons(updatedSummons);
+    saveSchoolData('bk_parent_summons', updatedSummons);
 
     const targetSummon = updatedSummons.find(s => s.id === selectedSummonForAttendance.id);
     if (targetSummon) {
+      saveToFirestore('bk_parent_summons', targetSummon);
       autoPushToJournal({
         sourceType: 'summon_visit',
         date: attActualDate,
@@ -689,7 +842,7 @@ _{NAMA_SEKOLAH}_`);
       downloadParentAttendancePDF(targetSummon, activeCounselor);
     }
 
-    alert('Berita Acara & Notulen Kehadiran Orang Tua berhasil disimpan.');
+    showToast('Berita Acara & Notulen Kehadiran Orang Tua berhasil disimpan!', 'success');
     setSelectedSummonForAttendance(null);
   };
 
@@ -697,12 +850,12 @@ _{NAMA_SEKOLAH}_`);
     e.preventDefault();
     const student = students.find(s => s.id === docStudentId);
     if (!student) {
-      alert('Silakan pilih siswa terlebih dahulu.');
+      showToast('Silakan pilih siswa terlebih dahulu.', 'error');
       return;
     }
 
     if (!attAttendeeName.trim()) {
-      alert('Nama wali murid yang hadir tidak boleh kosong.');
+      showToast('Nama wali murid yang hadir tidak boleh kosong.', 'error');
       return;
     }
 
@@ -713,6 +866,7 @@ _{NAMA_SEKOLAH}_`);
       id: newId,
       letterNumber: letterNo,
       date: attActualDate,
+      bidangBimbingan: attBidangBimbingan,
       studentId: student.id,
       studentName: student.name,
       studentClass: student.class,
@@ -720,7 +874,7 @@ _{NAMA_SEKOLAH}_`);
       parentName: attAttendeeName,
       summonDate: attActualDate,
       summonTime: attActualTime,
-      summonPlace: 'Ruang Bimbingan dan Konseling (BK) SMP N 2 Susukan',
+      summonPlace: attMeetingPlace || 'Ruang Bimbingan dan Konseling (BK) SMP N 2 Susukan',
       agenda: attIssues,
       counselorId: activeCounselor.id,
       status: 'Hadir',
@@ -728,6 +882,7 @@ _{NAMA_SEKOLAH}_`);
       attendanceDetails: {
         actualDate: attActualDate,
         actualTime: attActualTime,
+        meetingPlace: attMeetingPlace,
         attendeeName: attAttendeeName,
         attendeeRelation: attAttendeeRelation,
         phone: attPhone,
@@ -743,7 +898,12 @@ _{NAMA_SEKOLAH}_`);
       }
     };
 
-    setSummons(prev => [newSummon, ...prev]);
+    setSummons(prev => {
+      const next = [newSummon, ...prev];
+      saveSchoolData('bk_parent_summons', next);
+      return next;
+    });
+    saveToFirestore('bk_parent_summons', newSummon);
 
     autoPushToJournal({
       sourceType: 'summon_visit',
@@ -758,9 +918,18 @@ _{NAMA_SEKOLAH}_`);
       counselorId: activeCounselor.id
     });
 
-    alert('Berita Acara Kehadiran Orang Tua berhasil dicatat dan disimpan!');
+    showToast('Berita Acara Kehadiran Orang Tua berhasil dicatat dan diunduh!', 'success');
     downloadParentAttendancePDF(newSummon, activeCounselor);
     setActiveTab('daftar');
+  };
+
+  const openAttendanceWaModal = (summon: ParentSummon) => {
+    setSelectedSummonForWhatsApp(summon);
+    const phone = summon.attendanceDetails?.phone || '';
+    setWaModalPhone(phone);
+    setWaModalSelectedTemplateId('resume-ba');
+    const text = createAttendanceWaSummary(summon, activeCounselor);
+    setWaModalCustomText(text);
   };
 
   // Open WhatsApp Modal for a specific summon
@@ -788,6 +957,11 @@ _{NAMA_SEKOLAH}_`);
   const handleWaTemplateChangeInModal = (templateId: string) => {
     setWaModalSelectedTemplateId(templateId);
     if (!selectedSummonForWhatsApp) return;
+    if (templateId === 'resume-ba') {
+      const text = createAttendanceWaSummary(selectedSummonForWhatsApp, activeCounselor);
+      setWaModalCustomText(text);
+      return;
+    }
     const tpl = templates.find(t => t.id === templateId) || DEFAULT_SUMMON_TEMPLATES[0];
     const formatted = formatSummonWaMessage(tpl.waMessageTemplate, {
       studentName: selectedSummonForWhatsApp.studentName,
@@ -890,57 +1064,96 @@ _{NAMA_SEKOLAH}_`);
         </div>
         
         {/* Tab Controls */}
-        <div className="flex flex-wrap bg-gray-100 p-1.5 rounded-2xl border border-gray-200 gap-1">
+        <div className="flex flex-wrap bg-gray-100 p-1.5 rounded-2xl border border-gray-200 gap-1 shadow-2xs">
           <button
-            onClick={() => setActiveTab('daftar')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all duration-200 cursor-pointer ${
+            onClick={() => handleSwitchTab('daftar')}
+            className={`relative px-3.5 py-2 rounded-xl text-xs font-extrabold transition-colors cursor-pointer select-none active:scale-98 ${
               activeTab === 'daftar'
-                ? 'bg-[#00685f] text-white shadow-sm'
-                : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-gray-200'
+                ? 'text-white'
+                : 'text-[#3d4947] hover:text-[#0b1c30]'
             }`}
           >
-            Daftar Surat ({summons.length})
+            {activeTab === 'daftar' && (
+              <motion.div
+                layoutId="panggilan-tab-indicator"
+                className="absolute inset-0 bg-[#00685f] rounded-xl shadow-xs"
+                transition={{ type: 'spring', stiffness: 450, damping: 32 }}
+              />
+            )}
+            <span className="relative z-10">Daftar Surat ({summons.length})</span>
           </button>
           <button
-            onClick={() => setActiveTab('templat')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all duration-200 flex items-center gap-1.5 cursor-pointer ${
+            onClick={() => handleSwitchTab('templat')}
+            className={`relative px-3.5 py-2 rounded-xl text-xs font-extrabold transition-colors flex items-center gap-1.5 cursor-pointer select-none active:scale-98 ${
               activeTab === 'templat'
-                ? 'bg-[#00685f] text-white shadow-sm'
-                : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-gray-200'
+                ? 'text-white'
+                : 'text-[#3d4947] hover:text-[#0b1c30]'
             }`}
           >
-            <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-            <span>Templat Surat & Pesan ({templates.length})</span>
+            {activeTab === 'templat' && (
+              <motion.div
+                layoutId="panggilan-tab-indicator"
+                className="absolute inset-0 bg-[#00685f] rounded-xl shadow-xs"
+                transition={{ type: 'spring', stiffness: 450, damping: 32 }}
+              />
+            )}
+            <Sparkles className="w-3.5 h-3.5 text-amber-300 relative z-10" />
+            <span className="relative z-10">Templat Surat & Pesan ({templates.length})</span>
           </button>
           <button
             onClick={openDirectAttendanceForm}
-            className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all duration-200 flex items-center gap-1.5 cursor-pointer ${
+            className={`relative px-3.5 py-2 rounded-xl text-xs font-extrabold transition-colors flex items-center gap-1.5 cursor-pointer select-none active:scale-98 ${
               activeTab === 'dokumentasi'
-                ? 'bg-purple-600 text-white shadow-sm'
-                : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-gray-200'
+                ? 'text-white'
+                : 'text-[#3d4947] hover:text-[#0b1c30]'
             }`}
           >
-            <FileSpreadsheet className="w-3.5 h-3.5" />
-            <span>Dokumentasi Kehadiran</span>
+            {activeTab === 'dokumentasi' && (
+              <motion.div
+                layoutId="panggilan-tab-indicator"
+                className="absolute inset-0 bg-purple-600 rounded-xl shadow-xs"
+                transition={{ type: 'spring', stiffness: 450, damping: 32 }}
+              />
+            )}
+            <FileSpreadsheet className="w-3.5 h-3.5 relative z-10" />
+            <span className="relative z-10">Dokumentasi Kehadiran</span>
           </button>
           <button
-            onClick={() => setActiveTab('buat')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all duration-200 cursor-pointer ${
+            onClick={() => handleSwitchTab('buat')}
+            className={`relative px-3.5 py-2 rounded-xl text-xs font-extrabold transition-colors cursor-pointer select-none active:scale-98 ${
               activeTab === 'buat'
-                ? 'bg-[#00685f] text-white shadow-sm'
-                : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-gray-200'
+                ? 'text-white'
+                : 'text-[#3d4947] hover:text-[#0b1c30]'
             }`}
           >
-            + Buat Surat Panggilan
+            {activeTab === 'buat' && (
+              <motion.div
+                layoutId="panggilan-tab-indicator"
+                className="absolute inset-0 bg-[#00685f] rounded-xl shadow-xs"
+                transition={{ type: 'spring', stiffness: 450, damping: 32 }}
+              />
+            )}
+            <span className="relative z-10">+ Buat Surat Panggilan</span>
           </button>
         </div>
       </div>
 
       {/* ========================================================================= */}
-      {/* TAB 1: BANK TEMPLAT SURAT & PESAN WHATSAPP */}
+      {/* SUB-TAB CONTENTS WITH SMOOTH ANIMATE PRESENCE & DIRECTIONAL SLIDE */}
       {/* ========================================================================= */}
-      {activeTab === 'templat' && (
-        <div className="space-y-6">
+      <div className="overflow-hidden">
+        <AnimatePresence mode="wait" custom={tabDirection} initial={false}>
+          {/* TAB 1: BANK TEMPLAT SURAT & PESAN WHATSAPP */}
+          {activeTab === 'templat' && (
+            <motion.div
+              key="panggilan-tab-templat"
+              custom={tabDirection}
+              variants={tabSlideVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              className="space-y-6"
+            >
           {/* Header Bar within Tab */}
           <div className="bg-white rounded-2xl p-5 border border-[#bcc9c6]/30 shadow-xs flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
@@ -1120,13 +1333,21 @@ _{NAMA_SEKOLAH}_`);
               </div>
             ))}
           </div>
-        </div>
+        </motion.div>
       )}
 
       {/* ========================================================================= */}
       {/* TAB 2: CREATE SUMMON FORM */}
       {/* ========================================================================= */}
       {activeTab === 'buat' && (
+        <motion.div
+          key="panggilan-tab-buat"
+          custom={tabDirection}
+          variants={tabSlideVariants}
+          initial="enter"
+          animate="center"
+          exit="exit"
+        >
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <form onSubmit={handleCreateSummon} className="lg:col-span-2 bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-xs space-y-6">
             
@@ -1344,6 +1565,26 @@ _{NAMA_SEKOLAH}_`);
                 />
               </div>
 
+              {/* Bidang Bimbingan Standar SOP Dinas */}
+              <div className="space-y-1.5 md:col-span-2">
+                <label className="text-xs font-bold text-[#0b1c30] uppercase tracking-wide flex items-center justify-between">
+                  <span>Bidang Bimbingan <span className="text-red-500">*</span></span>
+                  <span className="text-[10px] text-[#00685f] font-bold">SOP Dinas BK</span>
+                </label>
+                <select
+                  value={bidangBimbingan}
+                  onChange={(e) => setBidangBimbingan(e.target.value as BidangBimbinganType)}
+                  className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                  required
+                >
+                  {BIDANG_BIMBINGAN_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      Bidang {opt.label} — {opt.description}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {/* Agenda select option */}
               <div className="space-y-1.5 md:col-span-2">
                 <label className="text-xs font-bold text-[#0b1c30] uppercase tracking-wide block">
@@ -1465,12 +1706,21 @@ _{NAMA_SEKOLAH}_`);
 
           </div>
         </div>
+        </motion.div>
       )}
 
       {/* ========================================================================= */}
       {/* TAB 3: DIRECT ATTENDANCE DOCUMENTATION */}
       {/* ========================================================================= */}
       {activeTab === 'dokumentasi' && (
+        <motion.div
+          key="panggilan-tab-dokumentasi"
+          custom={tabDirection}
+          variants={tabSlideVariants}
+          initial="enter"
+          animate="center"
+          exit="exit"
+        >
         <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-xs space-y-6">
           <div className="border-b border-gray-100 pb-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
             <div>
@@ -1491,6 +1741,37 @@ _{NAMA_SEKOLAH}_`);
           </div>
 
           <form onSubmit={handleSaveDirectAttendance} className="space-y-5 text-xs">
+            {/* Quick Presets for Berita Acara */}
+            <div className="space-y-2 bg-teal-50/70 p-4 rounded-xl border border-teal-200 shadow-2xs">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-black text-[#00685f] uppercase tracking-wide flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-[#00685f]" />
+                  <span>⚡ Draf Cepat Berita Acara & Kesepakatan (1-Klik Isi Otomatis)</span>
+                </label>
+                <span className="text-[10px] text-gray-500 font-semibold">Dapat diedit & disesuaikan kembali</span>
+              </div>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {ATTENDANCE_PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => {
+                      setAttBidangBimbingan(p.bidang);
+                      setAttIssues(p.issues);
+                      setAttAgreements(p.agreements);
+                      setAttParentCommitment(p.parentCommitment);
+                      setAttStudentCommitment(p.studentCommitment);
+                      setAttFollowUpPlan(p.followUpPlan);
+                      showToast(`Draf Berita Acara: ${p.label} berhasil diterapkan!`, 'info');
+                    }}
+                    className="px-3 py-1.5 bg-white hover:bg-[#00685f] hover:text-white text-[#00685f] font-extrabold text-[11px] rounded-lg border border-[#00685f]/30 transition-all shadow-2xs cursor-pointer active:scale-95 flex items-center gap-1"
+                  >
+                    <span>+</span> {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Student selection */}
             <div className="space-y-1.5 relative">
               <label className="text-xs font-bold text-[#0b1c30] uppercase tracking-wide block">
@@ -1507,7 +1788,7 @@ _{NAMA_SEKOLAH}_`);
                   }}
                   onFocus={() => setShowDocStudentDropdown(true)}
                   placeholder="Ketik nama, NISN, atau kelas siswa..."
-                  className="w-full pl-3.5 pr-10 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-purple-600"
+                  className="w-full pl-3.5 pr-10 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
                   required
                 />
                 <Search className="w-4.5 h-4.5 absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -1518,23 +1799,28 @@ _{NAMA_SEKOLAH}_`);
                   <div className="fixed inset-0 z-20" onClick={() => setShowDocStudentDropdown(false)} />
                   <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-30 max-h-48 overflow-y-auto custom-scrollbar">
                     {students
-                      .filter(s => 
-                        s.name.toLowerCase().includes(docStudentSearchQuery.toLowerCase()) ||
-                        s.class.toLowerCase().includes(docStudentSearchQuery.toLowerCase()) ||
-                        s.nis.includes(docStudentSearchQuery)
-                      )
+                      .filter((s) => {
+                        if (!s) return false;
+                        const q = docStudentSearchQuery.toLowerCase().trim();
+                        return (
+                          String(s.name || '').toLowerCase().includes(q) ||
+                          String(s.class || '').toLowerCase().includes(q) ||
+                          String(s.nis ?? '').toLowerCase().includes(q) ||
+                          String(s.nisn ?? '').toLowerCase().includes(q)
+                        );
+                      })
                       .slice(0, 15)
                       .map((s) => (
                         <div
                           key={s.id}
                           onClick={() => {
                             setDocStudentId(s.id);
-                            setDocStudentSearchQuery(`${s.name} (${s.class}) - NIS: ${s.nis}`);
+                            setDocStudentSearchQuery(`${s.name} (${s.class}) - NIS: ${s.nis || '-'}`);
                             setAttAttendeeName(`Orang Tua / Wali ${s.name}`);
                             setShowDocStudentDropdown(false);
                           }}
-                          className={`p-3 hover:bg-purple-50 cursor-pointer flex items-center justify-between border-b border-gray-100 last:border-b-0 relative z-40 ${
-                            docStudentId === s.id ? 'bg-purple-100/60' : ''
+                          className={`p-3 hover:bg-teal-50 cursor-pointer flex items-center justify-between border-b border-gray-100 last:border-b-0 relative z-40 ${
+                            docStudentId === s.id ? 'bg-teal-100/60' : ''
                           }`}
                         >
                           <div>
@@ -1542,7 +1828,7 @@ _{NAMA_SEKOLAH}_`);
                             <p className="text-[10px] text-gray-500 font-semibold">NIS: {s.nis} | Kelas: {s.class}</p>
                           </div>
                           {docStudentId === s.id && (
-                            <span className="text-[10px] font-bold text-purple-700 bg-purple-100 px-2 py-0.5 rounded">
+                            <span className="text-[10px] font-bold text-[#00685f] bg-teal-100 px-2 py-0.5 rounded">
                               Terpilih
                             </span>
                           )}
@@ -1553,15 +1839,15 @@ _{NAMA_SEKOLAH}_`);
               )}
             </div>
 
-            {/* Date & Time */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-purple-50/50 p-4 rounded-xl border border-purple-100">
+            {/* Date, Time & Place */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-teal-50/40 p-4 rounded-xl border border-teal-100">
               <div>
                 <label className="font-bold text-gray-700 block mb-1">Tanggal Kehadiran <span className="text-red-500">*</span></label>
                 <input
                   type="date"
                   value={attActualDate}
                   onChange={(e) => setAttActualDate(e.target.value)}
-                  className="w-full bg-white border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-purple-600"
+                  className="w-full bg-white border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-[#00685f]"
                   required
                 />
               </div>
@@ -1571,14 +1857,25 @@ _{NAMA_SEKOLAH}_`);
                   type="time"
                   value={attActualTime}
                   onChange={(e) => setAttActualTime(e.target.value)}
-                  className="w-full bg-white border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-purple-600"
+                  className="w-full bg-white border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-[#00685f]"
+                  required
+                />
+              </div>
+              <div>
+                <label className="font-bold text-gray-700 block mb-1">Tempat Pertemuan <span className="text-red-500">*</span></label>
+                <input
+                  type="text"
+                  value={attMeetingPlace}
+                  onChange={(e) => setAttMeetingPlace(e.target.value)}
+                  placeholder="Contoh: Ruang Bimbingan Konseling SMP N 2 Susukan"
+                  className="w-full bg-white border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-[#00685f]"
                   required
                 />
               </div>
             </div>
 
             {/* Attendee Details */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
               <div>
                 <label className="font-bold text-gray-700 block mb-1">Nama Wali Murid yang Hadir <span className="text-red-500">*</span></label>
                 <input
@@ -1586,7 +1883,7 @@ _{NAMA_SEKOLAH}_`);
                   value={attAttendeeName}
                   onChange={(e) => setAttAttendeeName(e.target.value)}
                   placeholder="Nama lengkap orang tua / wali..."
-                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-purple-600"
+                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-[#00685f]"
                   required
                 />
               </div>
@@ -1595,12 +1892,29 @@ _{NAMA_SEKOLAH}_`);
                 <select
                   value={attAttendeeRelation}
                   onChange={(e) => setAttAttendeeRelation(e.target.value)}
-                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-purple-600"
+                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-[#00685f]"
                 >
                   <option value="Ibu Kandung">Ibu Kandung</option>
                   <option value="Ayah Kandung">Ayah Kandung</option>
-                  <option value="Wali Murid">Wali Murid / Paman / Bibi</option>
+                  <option value="Kakek / Nenek">Kakek / Nenek</option>
+                  <option value="Paman / Bibi (Wali)">Paman / Bibi (Wali)</option>
                   <option value="Kakak Kandung">Kakak Kandung</option>
+                  <option value="Wali Murid Lainnya">Wali Murid Lainnya</option>
+                </select>
+              </div>
+              <div>
+                <label className="font-bold text-gray-700 block mb-1">Bidang Bimbingan <span className="text-red-500">*</span></label>
+                <select
+                  value={attBidangBimbingan}
+                  onChange={(e) => setAttBidangBimbingan(e.target.value as BidangBimbinganType)}
+                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-[#00685f]"
+                  required
+                >
+                  {BIDANG_BIMBINGAN_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      Bidang {opt.label}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
@@ -1610,7 +1924,7 @@ _{NAMA_SEKOLAH}_`);
                   value={attPhone}
                   onChange={(e) => setAttPhone(e.target.value)}
                   placeholder="08xxxxxxxx"
-                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-purple-600"
+                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-[#00685f]"
                 />
               </div>
             </div>
@@ -1623,7 +1937,7 @@ _{NAMA_SEKOLAH}_`);
                 value={attIssues}
                 onChange={(e) => setAttIssues(e.target.value)}
                 placeholder="Pokok masalah yang dibahas bersama orang tua..."
-                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-purple-600"
+                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-[#00685f]"
                 required
               />
             </div>
@@ -1636,7 +1950,7 @@ _{NAMA_SEKOLAH}_`);
                 value={attAgreements}
                 onChange={(e) => setAttAgreements(e.target.value)}
                 placeholder="Langkah-langkah penyelesaian masalah..."
-                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-purple-600"
+                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-[#00685f]"
                 required
               />
             </div>
@@ -1650,7 +1964,7 @@ _{NAMA_SEKOLAH}_`);
                   value={attParentCommitment}
                   onChange={(e) => setAttParentCommitment(e.target.value)}
                   placeholder="Bentuk pengawasan dan komitmen orang tua..."
-                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-purple-600"
+                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-[#00685f]"
                 />
               </div>
               <div>
@@ -1660,7 +1974,7 @@ _{NAMA_SEKOLAH}_`);
                   value={attStudentCommitment}
                   onChange={(e) => setAttStudentCommitment(e.target.value)}
                   placeholder="Janji perbaikan perilaku siswa..."
-                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-purple-600"
+                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-[#00685f]"
                 />
               </div>
             </div>
@@ -1673,7 +1987,7 @@ _{NAMA_SEKOLAH}_`);
                 value={attFollowUpPlan}
                 onChange={(e) => setAttFollowUpPlan(e.target.value)}
                 placeholder="Langkah evaluasi dan koordinasi lanjutan bersama wali kelas..."
-                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-purple-600"
+                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2.5 font-medium focus:ring-2 focus:ring-[#00685f]"
               />
             </div>
 
@@ -1696,7 +2010,7 @@ _{NAMA_SEKOLAH}_`);
               </div>
             </div>
 
-            <div className="pt-4 border-t flex items-center justify-end gap-3">
+            <div className="pt-4 border-t flex flex-wrap items-center justify-end gap-3">
               <button
                 type="button"
                 onClick={() => setActiveTab('daftar')}
@@ -1706,7 +2020,7 @@ _{NAMA_SEKOLAH}_`);
               </button>
               <button
                 type="submit"
-                className="px-6 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-extrabold rounded-xl shadow-md cursor-pointer flex items-center gap-2"
+                className="px-6 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white font-extrabold rounded-xl shadow-md cursor-pointer flex items-center gap-2 transition-all active:scale-97"
               >
                 <CheckCircle2 className="w-4 h-4" />
                 <span>Simpan & Cetak Berita Acara PDF</span>
@@ -1714,14 +2028,22 @@ _{NAMA_SEKOLAH}_`);
             </div>
           </form>
         </div>
+        </motion.div>
       )}
 
       {/* ========================================================================= */}
       {/* TAB 4: SUMMONS LIST VIEW */}
       {/* ========================================================================= */}
       {activeTab === 'daftar' && (
-        <div className="space-y-4">
-          
+        <motion.div
+          key="panggilan-tab-daftar"
+          custom={tabDirection}
+          variants={tabSlideVariants}
+          initial="enter"
+          animate="center"
+          exit="exit"
+          className="space-y-4"
+        >
           {/* Filters & Actions Bar */}
           <div className="bg-white rounded-2xl p-4 border border-[#bcc9c6]/30 shadow-xs flex flex-col sm:flex-row gap-3 items-center justify-between">
             <div className="relative w-full sm:max-w-md">
@@ -1819,9 +2141,14 @@ _{NAMA_SEKOLAH}_`);
                       
                       {/* Badge / Letter Date row */}
                       <div className="flex justify-between items-center">
-                        <span className="text-[10px] bg-gray-100 text-gray-600 font-bold px-2 py-0.5 rounded">
-                          Surat: {summon.date}
-                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[10px] bg-gray-100 text-gray-600 font-bold px-2 py-0.5 rounded">
+                            Surat: {summon.date}
+                          </span>
+                          <span className="text-[10px] bg-teal-50 text-[#00685f] font-bold px-2 py-0.5 rounded border border-[#00685f]/20">
+                            Bidang {summon.bidangBimbingan || 'Pribadi'}
+                          </span>
+                        </div>
                         
                         <div className="flex items-center gap-1">
                           <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full flex items-center gap-1 ${badgeClass}`}>
@@ -1885,21 +2212,41 @@ _{NAMA_SEKOLAH}_`);
 
                       {/* Documented Attendance Callout */}
                       {summon.attendanceDetails && (
-                        <div className="bg-purple-50/90 p-3 rounded-xl border border-purple-200 text-xs space-y-1.5 shadow-2xs">
-                          <div className="flex items-center justify-between text-purple-950 font-black text-[11px]">
-                            <span className="flex items-center gap-1.5">
-                              <CheckCircle2 className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                              <span>Berita Acara & Notulen Terisi</span>
+                        <div className="bg-teal-50/90 p-3 rounded-xl border border-teal-200 text-xs space-y-2 shadow-2xs">
+                          <div className="flex items-center justify-between text-[#0b1c30] font-black text-[11px]">
+                            <span className="flex items-center gap-1.5 text-[#00685f]">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-[#00685f] shrink-0" />
+                              <span>Berita Acara Resmi Tersimpan</span>
                             </span>
-                            <span className="text-[10px] bg-purple-200 text-purple-900 font-bold px-1.5 py-0.5 rounded">
-                              {summon.attendanceDetails.actualDate}
+                            <span className="text-[10px] bg-teal-100 text-[#00685f] font-bold px-2 py-0.5 rounded">
+                              {formatIndonesianDate(summon.attendanceDetails.actualDate)}
                             </span>
                           </div>
-                          <div className="text-[11px] text-purple-900 font-semibold leading-snug">
+                          <div className="text-[11px] text-[#3d4947] font-semibold leading-snug">
                             Wali Hadir: <strong>{summon.attendanceDetails.attendeeName}</strong> ({summon.attendanceDetails.attendeeRelation})
                           </div>
-                          <div className="text-[10px] text-purple-800 bg-white/70 p-2 rounded-lg border border-purple-100 font-medium line-clamp-2">
+                          <div className="text-[10px] text-gray-700 bg-white/80 p-2 rounded-lg border border-teal-100 font-medium line-clamp-2">
                             <strong>Kesepakatan:</strong> "{summon.attendanceDetails.agreements}"
+                          </div>
+                          <div className="flex items-center gap-2 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => downloadParentAttendancePDF(summon, activeCounselor)}
+                              className="flex-1 py-1.5 px-2 bg-[#00685f] hover:bg-[#005049] text-white rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 shadow-2xs cursor-pointer transition-all active:scale-97"
+                              title="Unduh Berita Acara & Notulen Resmi (PDF)"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                              <span>Unduh Berita Acara PDF</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openAttendanceWaModal(summon)}
+                              className="py-1.5 px-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 shadow-2xs cursor-pointer transition-all active:scale-97"
+                              title="Kirim Resume Hasil Pertemuan ke WA Orang Tua"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5 text-emerald-600" />
+                              <span>Resume WA</span>
+                            </button>
                           </div>
                         </div>
                       )}
@@ -1930,7 +2277,7 @@ _{NAMA_SEKOLAH}_`);
                         className="w-full py-1.5 px-3 bg-[#f0fdf4] hover:bg-[#dcfce7] text-emerald-800 border border-emerald-300 rounded-lg text-[11px] font-extrabold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all active:scale-97"
                       >
                         <MessageSquare className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>Kirim / Salin Pesan WA</span>
+                        <span>Kirim / Salin Undangan WA</span>
                       </button>
 
                       {/* Buttons */}
@@ -1941,26 +2288,14 @@ _{NAMA_SEKOLAH}_`);
                             onClick={() => openAttendanceModal(summon)}
                             className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[10px] font-extrabold transition-all cursor-pointer shadow-xs ${
                               summon.attendanceDetails
-                                ? 'bg-purple-100 text-purple-900 hover:bg-purple-200 border border-purple-300'
+                                ? 'bg-teal-50 text-[#00685f] hover:bg-teal-100 border border-teal-200'
                                 : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-600 hover:text-white border border-emerald-200'
                             }`}
                             title="Isi atau edit berita acara & notulen kehadiran orang tua"
                           >
                             <FileText className="w-3.5 h-3.5" />
-                            <span>{summon.attendanceDetails ? 'Edit Notulen Kehadiran' : '+ Dokumen Kehadiran'}</span>
+                            <span>{summon.attendanceDetails ? 'Edit Berita Acara' : '+ Catat Kehadiran Ortu'}</span>
                           </button>
-
-                          {summon.attendanceDetails && (
-                            <button
-                              type="button"
-                              onClick={() => downloadParentAttendancePDF(summon, activeCounselor)}
-                              className="px-2.5 py-1.5 bg-purple-600 text-white hover:bg-purple-700 rounded-lg text-[10px] font-extrabold transition-all cursor-pointer shadow-xs flex items-center gap-1"
-                              title="Unduh Berita Acara Kehadiran (PDF)"
-                            >
-                              <Printer className="w-3.5 h-3.5" />
-                              <span>Notulen</span>
-                            </button>
-                          )}
                         </div>
 
                         <div className="flex items-center gap-2">
@@ -1990,8 +2325,10 @@ _{NAMA_SEKOLAH}_`);
             </div>
           )}
 
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
+      </div>
 
       {/* ========================================================================= */}
       {/* MODAL 1: WHATSAPP SHARE & PREVIEW MODAL */}
@@ -2032,6 +2369,11 @@ _{NAMA_SEKOLAH}_`);
                 onChange={(e) => handleWaTemplateChangeInModal(e.target.value)}
                 className="w-full bg-gray-50 border border-gray-300 rounded-xl p-2.5 text-xs font-bold text-gray-800 focus:ring-2 focus:ring-emerald-500"
               >
+                {selectedSummonForWhatsApp?.attendanceDetails && (
+                  <option value="resume-ba" className="font-bold text-emerald-800">
+                    🌟 [Resume Resmi] Hasil Pertemuan Wali Murid & Kesepakatan BK
+                  </option>
+                )}
                 {templates.map((tpl) => (
                   <option key={tpl.id} value={tpl.id}>
                     [{tpl.category}] {tpl.title}
@@ -2384,9 +2726,39 @@ _{NAMA_SEKOLAH}_`);
             </div>
 
             <form onSubmit={handleSaveAttendanceDocumentation} className="space-y-4 text-xs">
+              {/* Quick Presets for Berita Acara */}
+              <div className="space-y-1.5 bg-teal-50/70 p-3.5 rounded-xl border border-teal-200 shadow-2xs">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-black text-[#00685f] uppercase tracking-wide flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-[#00685f]" />
+                    <span>⚡ Draf Cepat Berita Acara (Klik untuk Isi Otomatis)</span>
+                  </label>
+                  <span className="text-[10px] text-gray-500 font-semibold">Dapat disesuaikan</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {ATTENDANCE_PRESETS.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        setAttBidangBimbingan(p.bidang);
+                        setAttIssues(p.issues);
+                        setAttAgreements(p.agreements);
+                        setAttParentCommitment(p.parentCommitment);
+                        setAttStudentCommitment(p.studentCommitment);
+                        setAttFollowUpPlan(p.followUpPlan);
+                        showToast(`Draf Berita Acara ${p.label} diterapkan!`, 'info');
+                      }}
+                      className="px-2.5 py-1 bg-white hover:bg-[#00685f] hover:text-white text-[#00685f] font-extrabold text-[11px] rounded-lg border border-[#00685f]/30 transition-all shadow-2xs cursor-pointer active:scale-95 flex items-center gap-1"
+                    >
+                      <span>+</span> {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               
               {/* Row 1: Attendance Meta */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-teal-50/50 p-3.5 rounded-xl border border-[#00685f]/10">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-teal-50/50 p-3.5 rounded-xl border border-[#00685f]/10">
                 <div>
                   <label className="font-bold text-gray-700 block mb-1">Tanggal Realisasi Kehadiran</label>
                   <input
@@ -2403,6 +2775,17 @@ _{NAMA_SEKOLAH}_`);
                     type="time"
                     value={attActualTime}
                     onChange={(e) => setAttActualTime(e.target.value)}
+                    className="w-full bg-white border border-gray-300 rounded-lg p-2 font-bold focus:ring-2 focus:ring-[#00685f]"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="font-bold text-gray-700 block mb-1">Tempat Pertemuan</label>
+                  <input
+                    type="text"
+                    value={attMeetingPlace}
+                    onChange={(e) => setAttMeetingPlace(e.target.value)}
+                    placeholder="Contoh: Ruang BK SMP N 2 Susukan"
                     className="w-full bg-white border border-gray-300 rounded-lg p-2 font-bold focus:ring-2 focus:ring-[#00685f]"
                     required
                   />
@@ -2431,8 +2814,10 @@ _{NAMA_SEKOLAH}_`);
                   >
                     <option value="Ibu Kandung">Ibu Kandung</option>
                     <option value="Ayah Kandung">Ayah Kandung</option>
-                    <option value="Wali Murid">Wali Murid / Paman / Bibi</option>
+                    <option value="Kakek / Nenek">Kakek / Nenek</option>
+                    <option value="Paman / Bibi (Wali)">Paman / Bibi (Wali)</option>
                     <option value="Kakak Kandung">Kakak Kandung</option>
+                    <option value="Wali Murid Lainnya">Wali Murid Lainnya</option>
                   </select>
                 </div>
                 <div>
@@ -2445,6 +2830,23 @@ _{NAMA_SEKOLAH}_`);
                     className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2 font-bold focus:ring-2 focus:ring-[#00685f]"
                   />
                 </div>
+              </div>
+
+              {/* Row 2b: Bidang Bimbingan */}
+              <div>
+                <label className="font-bold text-gray-700 block mb-1">Bidang Bimbingan <span className="text-red-500">*</span></label>
+                <select
+                  value={attBidangBimbingan}
+                  onChange={(e) => setAttBidangBimbingan(e.target.value as BidangBimbinganType)}
+                  className="w-full bg-gray-50 border border-gray-300 rounded-lg p-2 font-bold focus:ring-2 focus:ring-[#00685f]"
+                  required
+                >
+                  {BIDANG_BIMBINGAN_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      Bidang {opt.label} — {opt.description}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               {/* Row 3: Issues discussed */}
@@ -2523,21 +2925,67 @@ _{NAMA_SEKOLAH}_`);
                 </div>
               </div>
 
-              <div className="pt-3 border-t flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSelectedSummonForAttendance(null)}
-                  className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-xl cursor-pointer"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-[#00685f] hover:bg-[#005049] text-white font-extrabold rounded-xl shadow-md cursor-pointer flex items-center gap-1.5"
-                >
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>Simpan & Cetak Berita Acara PDF</span>
-                </button>
+              <div className="pt-3 border-t flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!selectedSummonForAttendance) return;
+                      const previewSummon: ParentSummon = {
+                        ...selectedSummonForAttendance,
+                        bidangBimbingan: attBidangBimbingan,
+                        attendanceDetails: {
+                          actualDate: attActualDate,
+                          actualTime: attActualTime,
+                          meetingPlace: attMeetingPlace,
+                          attendeeName: attAttendeeName,
+                          attendeeRelation: attAttendeeRelation,
+                          phone: attPhone,
+                          counselorName: activeCounselor.name,
+                          issuesDiscussed: attIssues,
+                          agreements: attAgreements,
+                          parentCommitment: attParentCommitment,
+                          studentCommitment: attStudentCommitment,
+                          followUpPlan: attFollowUpPlan,
+                          parentSignatureBase64: attParentSig,
+                          counselorSignatureBase64: attCounselorSig,
+                          documentedAt: new Date().toISOString(),
+                        }
+                      };
+                      downloadParentAttendancePDF(previewSummon, activeCounselor);
+                    }}
+                    className="px-3.5 py-2 bg-teal-50 hover:bg-teal-100 text-[#00685f] border border-[#00685f]/30 font-extrabold rounded-xl shadow-2xs cursor-pointer flex items-center gap-1.5 text-xs transition-all"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>Cetak PDF Sekarang</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => openAttendanceWaModal(selectedSummonForAttendance)}
+                    className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-extrabold rounded-xl shadow-2xs cursor-pointer flex items-center gap-1.5 text-xs transition-all"
+                  >
+                    <MessageSquare className="w-4 h-4 text-emerald-600" />
+                    <span>Kirim WA</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSummonForAttendance(null)}
+                    className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-xl cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 bg-[#00685f] hover:bg-[#005049] text-white font-extrabold rounded-xl shadow-md cursor-pointer flex items-center gap-1.5 transition-all active:scale-97"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Simpan & Unduh Berita Acara</span>
+                  </button>
+                </div>
               </div>
 
             </form>

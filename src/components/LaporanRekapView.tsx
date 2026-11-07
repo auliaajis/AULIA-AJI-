@@ -22,12 +22,27 @@ import {
   TrendingUp,
   FileSpreadsheet,
   Award,
-  BookOpen
+  BookOpen,
+  Layers,
+  Target,
+  ShieldAlert,
+  Settings
 } from 'lucide-react';
-import { Student, ViolationRecord, CounselingService, Counselor, StudentAchievement } from '../types';
-import { downloadPeriodicReportPDF } from '../utils/pdfGenerator';
+import { Student, ViolationRecord, CounselingService, Counselor, StudentAchievement, BKComponentType } from '../types';
+import { 
+  downloadPeriodicReportPDF, 
+  downloadRekapHomeVisitPDF, 
+  downloadRekapPelanggaranPDF, 
+  downloadRekapLayananPDF, 
+  downloadRekapSiswaKritisPDF 
+} from '../utils/pdfGenerator';
+import { loadSchoolData } from '../utils/schoolConfig';
+import { BK_COMPONENTS_DATA, getBKComponentForService, getComponentColorConfig, getPilarBadge } from '../utils/bkKomprehensif';
 import BehavioralDiagnosisModal from './BehavioralDiagnosisModal';
 import EmailNotificationModal from './EmailNotificationModal';
+import PageHeaderBanner from './PageHeaderBanner';
+import { RiwayatLayananView } from './RiwayatLayananView';
+import RekapSemesterView from './RekapSemesterView';
 
 interface LaporanRekapViewProps {
   students: Student[];
@@ -37,6 +52,7 @@ interface LaporanRekapViewProps {
   homeVisits?: any[];
   activeCounselor: Counselor;
   onNavigateToForm?: (form: string, studentId?: string) => void;
+  onNavigateToStudioPdf?: () => void;
 }
 
 export default function LaporanRekapView({
@@ -46,7 +62,8 @@ export default function LaporanRekapView({
   achievements = [],
   homeVisits = [],
   activeCounselor,
-  onNavigateToForm
+  onNavigateToForm,
+  onNavigateToStudioPdf
 }: LaporanRekapViewProps) {
   // Date filters - default to current month range
   const now = new Date();
@@ -57,7 +74,7 @@ export default function LaporanRekapView({
   const [endDate, setEndDate] = useState(todayStr);
   const [selectedClass, setSelectedClass] = useState<string>('semua');
   const [searchTerm, setSearchTerm] = useState('');
-  const [activeTab, setActiveTab] = useState<'ringkasan' | 'siswa-kritis' | 'riwayat-konseling' | 'pelanggaran-alpa'>('ringkasan');
+  const [activeTab, setActiveTab] = useState<'ringkasan' | 'siswa-kritis' | 'riwayat-konseling' | 'pelanggaran-alpa' | 'home-visit' | 'rekap-semester'>('ringkasan');
 
   // Copy text state
   const [copiedSummary, setCopiedSummary] = useState(false);
@@ -132,9 +149,9 @@ export default function LaporanRekapView({
         srv.students.some((st) => st.class.toUpperCase() === selectedClass.toUpperCase());
       const matchesSearch =
         !searchTerm ||
-        srv.problem.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        srv.serviceType.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        srv.students.some((st) => st.name.toLowerCase().includes(searchTerm.toLowerCase()));
+        String(srv.problem || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        String(srv.serviceType || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        srv.students.some((st) => st && String(st.name || '').toLowerCase().includes(searchTerm.toLowerCase()));
 
       return matchesDate && matchesClass && matchesSearch;
     });
@@ -165,17 +182,8 @@ export default function LaporanRekapView({
 
   // 4. Critical & High Attention Students (Filtered by Class & Period records or overall high points)
   const criticalStudentsList = useMemo(() => {
-    // Fetch all historical attendance logs from localStorage to calculate cumulative total Alfa from the beginning
-    const savedAtt = typeof window !== 'undefined' ? localStorage.getItem('bk_attendance_history') : null;
-    let allAttendanceHistory: any[] = [];
-    if (savedAtt) {
-      try {
-        const parsed = JSON.parse(savedAtt);
-        if (Array.isArray(parsed)) allAttendanceHistory = parsed;
-      } catch (e) {
-        console.error('Error parsing bk_attendance_history:', e);
-      }
-    }
+    // Fetch all historical attendance logs using loadSchoolData to calculate cumulative total Alfa from the beginning
+    const allAttendanceHistory: any[] = loadSchoolData<any[]>('bk_attendance_history', [], activeCounselor?.schoolId);
 
     return students
       .filter((st) => {
@@ -217,9 +225,11 @@ export default function LaporanRekapView({
         if (!isHighRisk) return false;
 
         if (searchTerm) {
+          const q = searchTerm.toLowerCase();
           return (
-            st.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            st.class.toLowerCase().includes(searchTerm.toLowerCase())
+            String(st.name || '').toLowerCase().includes(q) ||
+            String(st.class || '').toLowerCase().includes(q) ||
+            String(st.nis ?? '').toLowerCase().includes(q)
           );
         }
 
@@ -280,9 +290,22 @@ export default function LaporanRekapView({
     const totalViolationsCount = periodViolations.length;
     const totalViolationPoints = periodViolations.reduce((sum, v) => sum + (v.pointsAdded || 0), 0);
 
-    const individualCount = periodServices.filter((s) => s.serviceType.toLowerCase().includes('individual')).length;
-    const groupCount = periodServices.filter((s) => s.serviceType.toLowerCase().includes('kelompok')).length;
-    const classicalCount = periodServices.filter((s) => s.serviceType.toLowerCase().includes('klasikal')).length;
+    const individualCount = periodServices.filter((s) => s.serviceType.toLowerCase().includes('individual') || s.targetType === 'Individu').length;
+    const groupCount = periodServices.filter((s) => s.serviceType.toLowerCase().includes('kelompok') || s.targetType === 'Kelompok').length;
+    const classicalCount = periodServices.filter((s) => s.serviceType.toLowerCase().includes('klasikal') || s.targetType === 'Klasikal').length;
+
+    // 4 Pillars of Comprehensive BK aggregation
+    const pilarStats = BK_COMPONENTS_DATA.map((comp) => {
+      const pilarServices = periodServices.filter(
+        (s) => (s.bkComponent || getBKComponentForService(s.serviceType)) === comp.id
+      );
+      return {
+        ...comp,
+        count: pilarServices.length,
+        percentage: totalServices > 0 ? Math.round((pilarServices.length / totalServices) * 100) : 0,
+        completedCount: pilarServices.filter((s) => s.status === 'Selesai').length,
+      };
+    });
 
     const totalHomeVisitsCount = periodHomeVisits.length;
 
@@ -301,6 +324,7 @@ export default function LaporanRekapView({
       individualCount,
       groupCount,
       classicalCount,
+      pilarStats,
       totalHomeVisitsCount,
       uniqueStudentsCount: uniqueStudentsServed.size,
       criticalStudentsCount: criticalStudentsList.length
@@ -321,16 +345,50 @@ export default function LaporanRekapView({
 
   // PDF Export Trigger
   const handleExportPDF = () => {
-    downloadPeriodicReportPDF({
-      startDate,
-      endDate,
-      selectedClass,
-      periodServices,
-      periodViolations,
-      criticalStudentsList,
-      stats,
-      activeCounselor
-    });
+    if (activeTab === 'home-visit') {
+      downloadRekapHomeVisitPDF({
+        startDate,
+        endDate,
+        selectedClass,
+        homeVisits: periodHomeVisits,
+        activeCounselor
+      });
+    } else if (activeTab === 'pelanggaran-alpa') {
+      downloadRekapPelanggaranPDF({
+        startDate,
+        endDate,
+        selectedClass,
+        violations: periodViolations,
+        activeCounselor
+      });
+    } else if (activeTab === 'riwayat-konseling') {
+      downloadRekapLayananPDF({
+        startDate,
+        endDate,
+        selectedClass,
+        services: periodServices,
+        activeCounselor
+      });
+    } else if (activeTab === 'siswa-kritis') {
+      downloadRekapSiswaKritisPDF({
+        startDate,
+        endDate,
+        selectedClass,
+        criticalStudentsList,
+        activeCounselor
+      });
+    } else {
+      downloadPeriodicReportPDF({
+        startDate,
+        endDate,
+        selectedClass,
+        periodServices,
+        periodViolations,
+        criticalStudentsList,
+        stats,
+        activeCounselor
+      });
+    }
   };
 
   // Copy Plain Text Report for WhatsApp/Official Email
@@ -406,52 +464,107 @@ Laporan lengkap dapat diunduh melalui sistem Aplikasi BK Sekolah.`;
   };
 
   return (
-    <div className="space-y-6 animate-fade-in pb-12">
+    <div className="space-y-6 animate-fade-in pb-[100px]">
       {/* Top Header Title & Actions */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-6 rounded-2xl border border-[#bcc9c6]/30 shadow-xs">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="px-2.5 py-1 bg-[#00685f]/10 text-[#00685f] rounded-lg text-xs font-extrabold flex items-center gap-1.5">
-              <FileBarChart className="w-3.5 h-3.5" />
-              <span>Modul Pelaporan Resmi</span>
-            </span>
-            <span className="text-xs text-gray-500 font-semibold">• BK Sekolah</span>
+      <PageHeaderBanner
+        category="Laporan & Pengaturan"
+        title="Rekap Laporan Konseling & Kedisiplinan"
+        description={`Analisis terintegrasi periode ${formattedDateRange} untuk pelaporan evaluasi berkala, rapat dewan guru, dan pengawasan dinas.`}
+        icon={<FileBarChart className="w-5 h-5" />}
+        badge="Modul Resmi Dinas"
+        workflowHint="1. Tentukan Rentang Periode / Preset Cepat › 2. Pilih Tab Kategori Data › 3. Salin Ringkasan atau Cetak PDF Resmi"
+        stats={[
+          { label: 'Sesi Layanan', value: stats.totalServices },
+          { label: 'Siswa Terlayani', value: stats.uniqueStudentsCount },
+          { label: 'Total Pelanggaran', value: stats.totalViolationsCount },
+          { label: 'Siswa Kritis', value: stats.criticalStudentsCount, color: stats.criticalStudentsCount > 0 ? 'text-rose-600' : 'text-emerald-700' }
+        ]}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setActiveTab('rekap-semester')}
+              className={`px-3.5 py-2.5 rounded-xl text-xs font-black transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer active:scale-97 ${
+                activeTab === 'rekap-semester'
+                  ? 'bg-amber-400 text-amber-950 ring-2 ring-amber-500'
+                  : 'bg-gradient-to-r from-teal-700 to-[#00685f] hover:from-teal-800 hover:to-[#005049] text-white'
+              }`}
+              title="Buat rekapitulasi otomatis per semester (Ganjil/Genap)"
+            >
+              <Calendar className="w-4 h-4 text-amber-300" />
+              <span>Rekap Semester</span>
+              <span className="px-1.5 py-0.5 text-[9px] bg-amber-400 text-amber-950 font-black rounded-full">Baru</span>
+            </button>
+
+            {onNavigateToStudioPdf && (
+              <button
+                onClick={onNavigateToStudioPdf}
+                className="px-3.5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white rounded-xl text-xs font-black transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer active:scale-97"
+              >
+                <Sparkles className="w-4 h-4 text-amber-200" />
+                <span>Studio PDF Maker</span>
+              </button>
+            )}
+
+            <button
+              onClick={handleCopyTextReport}
+              className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer border border-slate-200"
+              title="Salin ringkasan ke format teks WhatsApp"
+            >
+              {copiedSummary ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedSummary ? 'Tersalin!' : 'Salin Text'}</span>
+            </button>
+
+            <button
+              onClick={handleExportCSV}
+              className="px-3.5 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer border border-emerald-200"
+            >
+              <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+              <span>CSV</span>
+            </button>
+
+            <button
+              onClick={handleExportPDF}
+              className="px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer active:scale-97"
+              title="Unduh dokumen PDF standar sesuai modul rekapitulasi yang aktif"
+            >
+              <Printer className="w-4 h-4" />
+              <span>
+                {activeTab === 'home-visit' && 'Cetak Rekap Home Visit'}
+                {activeTab === 'pelanggaran-alpa' && 'Cetak Rekap Pelanggaran'}
+                {activeTab === 'riwayat-konseling' && 'Cetak Rekap Layanan BK'}
+                {activeTab === 'siswa-kritis' && 'Cetak Rekap Siswa Kritis'}
+                {activeTab === 'ringkasan' && 'Cetak Laporan Lengkap'}
+              </span>
+            </button>
           </div>
-          <h2 className="text-2xl font-black text-[#0b1c30] mt-1.5 tracking-tight">
-            Rekap Laporan Konseling & Pembinaan
-          </h2>
-          <p className="text-xs text-[#3d4947] font-semibold mt-1">
-            Analisis terintegrasi periode {formattedDateRange} untuk laporan evaluasi berkala dan rapat dewan guru.
-          </p>
-        </div>
+        }
+      />
 
-        {/* Action Buttons */}
-        <div className="flex flex-wrap items-center gap-2 shrink-0 w-full md:w-auto">
+      {/* Feature Banner: Studio PDF Maker Recommendation */}
+      {onNavigateToStudioPdf && (
+        <div className="bg-gradient-to-r from-teal-900 via-[#00685f] to-teal-800 text-white p-4 sm:p-5 rounded-2xl shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5">
+            <div className="p-2.5 bg-white/10 rounded-xl backdrop-blur-xs shrink-0">
+              <Sparkles className="w-5 h-5 text-amber-300" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="text-sm font-black">Butuh Rekap PDF Format Resmi Standar Dinas?</h4>
+                <span className="px-2 py-0.5 bg-amber-400 text-amber-950 text-[10px] font-extrabold rounded-full">Baru</span>
+              </div>
+              <p className="text-xs text-teal-100 mt-0.5 max-w-2xl font-medium">
+                Gunakan <strong>Studio PDF Maker</strong> untuk kustomisasi ukuran kertas (A4/F4), kop surat dinas ganda, nomor dokumen, filter 4 bidang & 4 pilar, serta lembar pengesahan kepala sekolah.
+              </p>
+            </div>
+          </div>
           <button
-            onClick={handleCopyTextReport}
-            className="flex-1 md:flex-none px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer border border-slate-200"
+            onClick={onNavigateToStudioPdf}
+            className="px-4 py-2 bg-white hover:bg-teal-50 text-[#00685f] rounded-xl text-xs font-black shadow-xs whitespace-nowrap transition-all cursor-pointer active:scale-97 shrink-0"
           >
-            {copiedSummary ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
-            <span>{copiedSummary ? 'Tersalin!' : 'Salin Text'}</span>
-          </button>
-
-          <button
-            onClick={handleExportCSV}
-            className="flex-1 md:flex-none px-3.5 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer border border-emerald-200"
-          >
-            <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
-            <span>Export CSV</span>
-          </button>
-
-          <button
-            onClick={handleExportPDF}
-            className="flex-1 md:flex-none px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer active:scale-97"
-          >
-            <Printer className="w-4 h-4" />
-            <span>Cetak / Unduh PDF</span>
+            Buka Studio PDF Maker &rarr;
           </button>
         </div>
-      </div>
+      )}
 
       {/* Filter Toolbar: Date Range, Presets & Class Filter */}
       <div className="bg-white p-5 rounded-2xl border border-[#bcc9c6]/30 shadow-xs space-y-4">
@@ -589,7 +702,7 @@ Laporan lengkap dapat diunduh melalui sistem Aplikasi BK Sekolah.`;
           }`}
         >
           <HeartHandshake className="w-4 h-4" />
-          <span>Riwayat Catatan Konseling ({stats.totalServices})</span>
+          <span>Riwayat Layanan ({services.length})</span>
         </button>
 
         <button
@@ -600,6 +713,29 @@ Laporan lengkap dapat diunduh melalui sistem Aplikasi BK Sekolah.`;
         >
           <BookOpen className="w-4 h-4" />
           <span>Catatan Pelanggaran & Disiplin ({stats.totalViolationsCount})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('home-visit')}
+          className={`px-4 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-2 ${
+            activeTab === 'home-visit' ? 'bg-[#00685f] text-white shadow-sm' : 'text-gray-600 hover:text-gray-900'
+          }`}
+        >
+          <Home className="w-4 h-4" />
+          <span>Rekap Home Visit ({periodHomeVisits.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('rekap-semester')}
+          className={`px-4 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-2 ${
+            activeTab === 'rekap-semester'
+              ? 'bg-[#00685f] text-white shadow-sm'
+              : 'text-[#00685f] bg-teal-50 hover:bg-teal-100 font-black'
+          }`}
+        >
+          <Calendar className="w-4 h-4 text-amber-500" />
+          <span>Rekap Semester</span>
+          <span className="px-1.5 py-0.2 bg-amber-400 text-amber-950 text-[9px] font-black rounded-full">Baru</span>
         </button>
       </div>
 
@@ -668,6 +804,69 @@ Laporan lengkap dapat diunduh melalui sistem Aplikasi BK Sekolah.`;
               <p className="text-[11px] text-[#3d4947] font-semibold mt-2">
                 Akumulasi {stats.totalViolationPoints} bobot pembinaan
               </p>
+            </div>
+          </div>
+
+          {/* 4 Pillars of Comprehensive BK Section */}
+          <div className="bg-white p-6 rounded-2xl border border-[#bcc9c6]/30 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 pb-3">
+              <div>
+                <h3 className="font-extrabold text-sm text-[#0b1c30] flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-[#00685f]" />
+                  <span>Rekapitulasi 4 Komponen BK Komprehensif (Kurikulum Merdeka)</span>
+                </h3>
+                <p className="text-xs text-gray-500 font-medium mt-0.5">
+                  Distribusi proporsi pelaksanaan layanan berdasarkan 4 pilar standar bimbingan dan konseling.
+                </p>
+              </div>
+              <span className="text-[11px] font-extrabold text-[#00685f] bg-[#00685f]/10 px-3 py-1 rounded-full w-fit">
+                Total {stats.totalServices} Layanan Terlaksana
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {stats.pilarStats.map((pilar) => {
+                const colorConfig = getComponentColorConfig(pilar.id);
+                return (
+                  <div
+                    key={pilar.id}
+                    className={`p-4 rounded-2xl border transition-all ${colorConfig.lightBg} ${colorConfig.border}`}
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-md ${colorConfig.text} bg-white/80 border ${colorConfig.border}`}>
+                        Pilar {pilar.pilarNumber}
+                      </span>
+                      <span className={`text-xs font-black ${colorConfig.text}`}>
+                        {pilar.percentage}%
+                      </span>
+                    </div>
+
+                    <h4 className="font-black text-[#0b1c30] text-xs leading-snug mb-1">
+                      {pilar.name}
+                    </h4>
+                    <p className="text-[10px] text-gray-600 line-clamp-2 mb-3">
+                      {pilar.definition}
+                    </p>
+
+                    <div className="flex items-end justify-between pt-2 border-t border-gray-200/60">
+                      <div>
+                        <div className="text-xl font-black text-[#0b1c30]">
+                          {pilar.count} <span className="text-[10px] font-bold text-gray-500">Sesi</span>
+                        </div>
+                        <div className="text-[9px] font-bold text-gray-500">
+                          {pilar.completedCount} selesai
+                        </div>
+                      </div>
+                      <div className="w-16 bg-gray-200 h-2 rounded-full overflow-hidden">
+                        <div
+                          className="bg-[#00685f] h-full rounded-full transition-all duration-500"
+                          style={{ width: `${pilar.percentage}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -909,103 +1108,14 @@ Laporan lengkap dapat diunduh melalui sistem Aplikasi BK Sekolah.`;
         </div>
       )}
 
-      {/* SECTION 3: RIWAYAT CATATAN KONSELING & LAYANAN BK */}
+      {/* SECTION 3: RIWAYAT LAYANAN BK LENGKAP & EXPORT PDF */}
       {activeTab === 'riwayat-konseling' && (
-        <div className="bg-white rounded-2xl border border-[#bcc9c6]/30 shadow-xs overflow-hidden">
-          <div className="p-5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2">
-                <HeartHandshake className="w-5 h-5 text-[#00685f]" />
-                <span>Riwayat Sesi Konseling Periode {formattedDateRange}</span>
-              </h3>
-              <p className="text-xs text-gray-500 font-medium mt-0.5">
-                Daftar lengkap sesi bimbingan individual, kelompok, dan klasikal yang telah dilaksanakan.
-              </p>
-            </div>
-            <span className="px-3 py-1 bg-[#00685f]/10 text-[#00685f] font-extrabold text-xs rounded-full">
-              {periodServices.length} Records
-            </span>
-          </div>
-
-          {periodServices.length === 0 ? (
-            <div className="p-12 text-center space-y-2">
-              <HeartHandshake className="w-12 h-12 text-gray-300 mx-auto" />
-              <p className="font-bold text-sm text-[#0b1c30]">Belum Ada Rekam Layanan BK Pada Periode Ini</p>
-              <p className="text-xs text-gray-500">Coba sesuaikan tanggal atau filter kelas pada bilah atas.</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 border-b border-slate-200 text-[#0b1c30] font-extrabold uppercase text-[10px] tracking-wider">
-                  <tr>
-                    <th className="p-3.5 text-center w-12">No</th>
-                    <th className="p-3.5">Tanggal & Waktu</th>
-                    <th className="p-3.5">Nama Siswa & Kelas</th>
-                    <th className="p-3.5">Tipe Layanan</th>
-                    <th className="p-3.5">Topik / Permasalahan</th>
-                    <th className="p-3.5">Hasil & Tindak Lanjut</th>
-                    <th className="p-3.5 text-center">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {periodServices.map((srv, idx) => (
-                    <tr key={srv.id} className="hover:bg-slate-50/60 transition-colors">
-                      <td className="p-3.5 text-center font-bold text-gray-500">{idx + 1}</td>
-                      <td className="p-3.5 whitespace-nowrap">
-                        <div className="font-bold text-[#0b1c30] flex items-center gap-1">
-                          <Calendar className="w-3 h-3 text-[#00685f]" />
-                          <span>{srv.date}</span>
-                        </div>
-                        <div className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5">
-                          <Clock className="w-3 h-3" />
-                          <span>{srv.startTime} WIB</span>
-                        </div>
-                      </td>
-                      <td className="p-3.5">
-                        <div className="space-y-0.5">
-                          {srv.students.map((st) => (
-                            <p key={st.id} className="font-bold text-[#0b1c30]">
-                              {st.name} <span className="text-[#00685f]">({st.class})</span>
-                            </p>
-                          ))}
-                        </div>
-                      </td>
-                      <td className="p-3.5">
-                        <span className="px-2.5 py-1 bg-teal-50 text-[#00685f] rounded-lg font-extrabold text-[10px] border border-teal-200">
-                          {srv.serviceType}
-                        </span>
-                      </td>
-                      <td className="p-3.5 max-w-xs">
-                        <p className="font-bold text-[#0b1c30]">{srv.problem}</p>
-                        {srv.description && (
-                          <p className="text-[10px] text-gray-500 line-clamp-2 mt-0.5">{srv.description}</p>
-                        )}
-                      </td>
-                      <td className="p-3.5 max-w-xs">
-                        <p className="font-medium text-gray-800 line-clamp-2">
-                          {srv.followUp || 'Dalam pemantauan rutin.'}
-                        </p>
-                      </td>
-                      <td className="p-3.5 text-center">
-                        <span
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
-                            srv.status === 'Selesai'
-                              ? 'bg-purple-100 text-purple-800'
-                              : srv.status === 'Terjadwal'
-                              ? 'bg-teal-100 text-teal-800'
-                              : 'bg-red-100 text-red-800'
-                          }`}
-                        >
-                          {srv.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+        <RiwayatLayananView
+          services={services}
+          students={students}
+          activeCounselor={activeCounselor}
+          onNavigateToForm={onNavigateToForm}
+        />
       )}
 
       {/* SECTION 4: CATATAN PELANGGARAN & DISIPLIN */}
@@ -1071,7 +1181,95 @@ Laporan lengkap dapat diunduh melalui sistem Aplikasi BK Sekolah.`;
         </div>
       )}
 
-      {/* Behavioral Diagnosis Modal (Gemini AI) */}
+      {/* SECTION 5: REKAPITULASI KUNJUNGAN RUMAH (HOME VISIT) */}
+      {activeTab === 'home-visit' && (
+        <div className="bg-white rounded-2xl border border-[#bcc9c6]/30 shadow-xs overflow-hidden">
+          <div className="p-5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-extrabold text-base text-[#0b1c30] flex items-center gap-2">
+                <Home className="w-5 h-5 text-[#00685f]" />
+                <span>Buku Register Kunjungan Rumah (Home Visit) Periode {formattedDateRange}</span>
+              </h3>
+              <p className="text-xs text-gray-500 font-medium mt-0.5">
+                Rekapitulasi pelaksanaan kunjungan rumah ke tempat tinggal peserta didik dan kesepakatan orang tua/wali.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="px-3 py-1 bg-teal-100 text-[#00685f] font-extrabold text-xs rounded-full">
+                {periodHomeVisits.length} Kunjungan Terlaksana
+              </span>
+            </div>
+          </div>
+
+          {periodHomeVisits.length === 0 ? (
+            <div className="p-12 text-center space-y-2">
+              <Home className="w-12 h-12 text-gray-400 mx-auto" />
+              <p className="font-bold text-sm text-[#0b1c30]">Belum Ada Agenda Kunjungan Rumah Pada Periode Ini</p>
+              <p className="text-xs text-gray-500">Kunjungan rumah yang dicatat pada menu Home Visit akan terangkum otomatis di sini.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-[#f0f4f3] border-b border-gray-200 text-[#0b1c30] font-extrabold uppercase text-[10px] tracking-wider">
+                  <tr>
+                    <th className="p-3.5 text-center w-12">No</th>
+                    <th className="p-3.5">No. Laporan</th>
+                    <th className="p-3.5">Tanggal</th>
+                    <th className="p-3.5">Nama Siswa & Kelas</th>
+                    <th className="p-3.5">Wali yang Ditemui</th>
+                    <th className="p-3.5">Alamat Kunjungan</th>
+                    <th className="p-3.5">Maksud / Pokok Masalah</th>
+                    <th className="p-3.5">Hasil Temuan & Kesepakatan RTL</th>
+                    <th className="p-3.5 text-center">Petugas BK</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {periodHomeVisits.map((hv, idx) => (
+                    <tr key={hv.id || idx} className="hover:bg-slate-50/60 transition-colors">
+                      <td className="p-3.5 text-center font-bold text-gray-500">{idx + 1}</td>
+                      <td className="p-3.5 font-bold text-[#00685f] whitespace-nowrap">{hv.reportNumber || `HV-${idx + 1}`}</td>
+                      <td className="p-3.5 font-bold text-[#0b1c30] whitespace-nowrap">{hv.date || hv.visitDate || '-'}</td>
+                      <td className="p-3.5">
+                        <p className="font-bold text-[#0b1c30]">{hv.studentName}</p>
+                        <p className="text-[10px] text-gray-500 font-medium">Kelas: {hv.studentClass} | NIS: {hv.studentNis || '-'}</p>
+                      </td>
+                      <td className="p-3.5">
+                        <span className="font-bold text-gray-800 block">{hv.parentNameMet || hv.parentName || 'Orang Tua / Wali'}</span>
+                      </td>
+                      <td className="p-3.5 max-w-xs">
+                        <p className="text-[11px] text-gray-600 line-clamp-2">{hv.address || '-'}</p>
+                      </td>
+                      <td className="p-3.5 max-w-xs">
+                        <span className="text-[10px] bg-teal-50 text-[#00685f] font-extrabold px-1.5 py-0.5 rounded mr-1">
+                          Bidang {hv.bidangBimbingan || 'Pribadi'}
+                        </span>
+                        <p className="font-bold text-[#0b1c30] mt-0.5 line-clamp-2">{hv.purpose || hv.reason || '-'}</p>
+                      </td>
+                      <td className="p-3.5 max-w-xs">
+                        <p className="font-medium text-gray-700 line-clamp-2">{hv.agreement || hv.result || '-'}</p>
+                      </td>
+                      <td className="p-3.5 text-center whitespace-nowrap">
+                        <span className="text-[10px] font-bold text-gray-600">{hv.counselorName || 'Guru BK'}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* SECTION 6: REKAP OTOMATIS PER SEMESTER */}
+      {activeTab === 'rekap-semester' && (
+        <RekapSemesterView
+          services={services}
+          activeCounselor={activeCounselor}
+          students={students}
+          onBack={() => setActiveTab('ringkasan')}
+        />
+      )}
+
       {diagnosisStudentData && (
         <BehavioralDiagnosisModal
           studentName={diagnosisStudentData.name}

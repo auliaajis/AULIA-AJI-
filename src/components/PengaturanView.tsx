@@ -1,17 +1,31 @@
 import React, { useState, useEffect } from 'react';
-import { Counselor } from '../types';
+import { Counselor, Student } from '../types';
 import { 
   getSchoolConfig, 
   saveSchoolConfig, 
   resetSchoolConfigToDefault, 
-  getActiveSchoolId 
+  getActiveSchoolId,
+  setActiveSchoolId,
+  sanitizeSchoolId,
+  loadSchoolData,
+  saveSchoolData,
+  SchoolConfig,
+  PRESET_LOGOS
 } from '../utils/schoolConfig';
+import { initialStudents, initialViolations, initialServices, initialLogs, initialHomeVisits, initialAttendanceHistory, counselors } from '../data/mockData';
+import { CANONICAL_AULIA_STUDENTS } from '../data/canonicalStudents';
 import SchoolLogo from './SchoolLogo';
 import KabupatenLogo from './KabupatenLogo';
 import { getAutoJournalSettings, saveAutoJournalSettings, AutoJournalSettings } from '../utils/journalAutoLink';
 import { purgeDummyData } from '../utils/purgeDummyData';
 import { isAdministrator } from '../utils/accessControl';
-import { updateAccountRequestInCloud, listenToAccountRequests } from '../utils/firestoreSync';
+import { clearCanonicalDeletedIds } from '../utils/deletionTracker';
+import { 
+  updateAccountRequestInCloud, 
+  listenToAccountRequests, 
+  fetchAllPendingAccountRequestsFromCloud,
+  saveBulkToFirestore
+} from '../utils/firestoreSync';
 import { 
   Save, 
   RotateCcw, 
@@ -32,6 +46,8 @@ import {
   Settings,
   Check,
   X,
+  Filter,
+  CheckSquare,
   Info,
   Pencil,
   Database,
@@ -50,8 +66,15 @@ import {
   Copy,
   CopyCheck,
   CheckCheck,
-  Building2
+  Building2,
+  ArrowRight,
+  BookOpen,
+  Gavel
 } from 'lucide-react';
+import { generateUserManualPDF } from '../utils/userManualPdfGenerator';
+import PengaturanTataTertibPelanggaran from './PengaturanTataTertibPelanggaran';
+import { applyLatestBkGuideConfig } from '../utils/violationRulesConfig';
+import { PPKSP_2023_SOP } from '../data/juknisBskap2022';
 
 export interface WaliKelasConfig {
   class: string;
@@ -60,44 +83,32 @@ export interface WaliKelasConfig {
   phone?: string;
 }
 
-interface SchoolConfig {
-  schoolName: string;
-  schoolAddress: string;
-  principalName: string;
-  principalNip: string;
-  governmentName: string;
-  departmentName: string;
-}
-
 interface PengaturanViewProps {
   activeCounselor?: Counselor;
   allCounselors?: Counselor[];
+  students?: Student[];
   onUpdateCounselor?: (counselor: Counselor) => void;
   onChangeCounselor?: (counselor: Counselor) => void;
   onCreateCounselor?: (counselor: Counselor) => void;
   onDeleteCounselor?: (id: string) => void;
+  onResetToFreshSchool?: () => void;
 }
 
 export default function PengaturanView({
   activeCounselor,
   allCounselors = [],
+  students = [],
   onUpdateCounselor,
   onChangeCounselor,
   onCreateCounselor,
-  onDeleteCounselor
+  onDeleteCounselor,
+  onResetToFreshSchool
 }: PengaturanViewProps) {
   const isUserAdmin = isAdministrator(activeCounselor);
 
-  const [config, setConfig] = useState<SchoolConfig>({
-    schoolName: 'SMP N 2 Susukan',
-    schoolAddress: 'Desa Koripan, Kec. Susukan, Kab. Semarang, Jawa Tengah 50777',
-    principalName: 'Agus Setiawan, S.Pd. Fis',
-    principalNip: '19680831 199103 1 007',
-    governmentName: 'PEMERINTAH KABUPATEN SEMARANG',
-    departmentName: 'DINAS PENDIDIKAN, KEBUDAYAAN, KEPEMUDAAN DAN OLAHRAGA',
-  });
+  const [config, setConfig] = useState<SchoolConfig>(() => getSchoolConfig());
 
-  const [activeTab, setActiveTab] = useState<'identitas' | 'walikelas' | 'database' | 'akses' | 'otomatisasi' | 'profil' | 'database-personal'>(
+  const [activeTab, setActiveTab] = useState<'identitas' | 'walikelas' | 'tata-tertib' | 'database' | 'akses' | 'otomatisasi' | 'profil' | 'database-personal' | 'panduan'>(
     isUserAdmin ? 'identitas' : 'profil'
   );
 
@@ -114,8 +125,104 @@ export default function PengaturanView({
   const [profileEmail, setProfileEmail] = useState(activeCounselor?.email || '');
   const [profilePhone, setProfilePhone] = useState(activeCounselor?.phone || '');
   const [profilePassword, setProfilePassword] = useState(activeCounselor?.password || '');
+  
+  // Class selection and filter mode states
+  const [classFilterMode, setClassFilterMode] = useState<'all' | 'custom'>(() => {
+    if (!activeCounselor?.allowedClasses || activeCounselor.allowedClasses.length === 0) return 'all';
+    const classes = Array.isArray(activeCounselor.allowedClasses) ? activeCounselor.allowedClasses : [];
+    if (classes.includes('ALL') || classes.includes('SEMUA') || classes.length >= 19) return 'all';
+    return 'custom';
+  });
+
+  const [selectedClassesList, setSelectedClassesList] = useState<string[]>(() => {
+    if (Array.isArray(activeCounselor?.allowedClasses)) {
+      return activeCounselor.allowedClasses
+        .map(c => c.trim().toUpperCase())
+        .filter(c => c && c !== 'ALL' && c !== 'SEMUA');
+    }
+    return [];
+  });
+
+  const [customClassInput, setCustomClassInput] = useState('');
+  const [profileAllowedClasses, setProfileAllowedClasses] = useState<string>(() => {
+    return Array.isArray(activeCounselor?.allowedClasses) ? activeCounselor.allowedClasses.join(', ') : '';
+  });
   const [showMyPassword, setShowMyPassword] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
+  const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
+
+  // Distinct classes detected from student database + standard classes
+  const detectedClasses = React.useMemo(() => {
+    const set = new Set<string>();
+    (students || []).forEach(s => {
+      if (s.class) {
+        const clean = s.class.replace(/kelas\s*/i, '').trim().toUpperCase();
+        if (clean) set.add(clean);
+      }
+    });
+    // Add standard classes
+    ['7A', '7B', '7C', '7D', '7E', '7F', '8A', '8B', '8C', '8D', '8E', '8F', '8G', '9A', '9B', '9C', '9D', '9E', '9F', '9G'].forEach(c => set.add(c));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [students]);
+
+  const handleToggleClassSelect = (cls: string) => {
+    const cleanCls = cls.trim().toUpperCase();
+    setSelectedClassesList(prev => {
+      const exists = prev.includes(cleanCls);
+      const updated = exists ? prev.filter(c => c !== cleanCls) : [...prev, cleanCls];
+      setProfileAllowedClasses(updated.join(', '));
+      return updated;
+    });
+  };
+
+  const handleSelectAllGrade = (gradePrefix: string) => {
+    const matched = detectedClasses.filter(c => c.startsWith(gradePrefix));
+    setSelectedClassesList(prev => {
+      const combined = Array.from(new Set([...prev, ...matched]));
+      setProfileAllowedClasses(combined.join(', '));
+      return combined;
+    });
+  };
+
+  const handleSelectAllClasses = () => {
+    setSelectedClassesList(detectedClasses);
+    setProfileAllowedClasses(detectedClasses.join(', '));
+  };
+
+  const handleClearSelectedClasses = () => {
+    setSelectedClassesList([]);
+    setProfileAllowedClasses('');
+  };
+
+  const handleAddCustomClass = () => {
+    if (!customClassInput.trim()) return;
+    const clean = customClassInput.trim().toUpperCase().replace(/kelas\s*/i, '');
+    if (!selectedClassesList.includes(clean)) {
+      const updated = [...selectedClassesList, clean];
+      setSelectedClassesList(updated);
+      setProfileAllowedClasses(updated.join(', '));
+    }
+    setCustomClassInput('');
+  };
+
+  const handleApplyPresetLogo = (key: 'bk_custom_kabupaten_logo' | 'bk_custom_school_logo', dataUrl: string, name: string) => {
+    localStorage.setItem(key, dataUrl);
+    if (key === 'bk_custom_kabupaten_logo') {
+      setConfig(prev => ({ ...prev, customKabupatenLogo: dataUrl }));
+      setHasCustomKabupatenLogo(true);
+    } else {
+      setConfig(prev => ({ ...prev, customSchoolLogo: dataUrl }));
+      setHasCustomSchoolLogo(true);
+    }
+    saveSchoolConfig({
+      ...config,
+      [key === 'bk_custom_kabupaten_logo' ? 'customKabupatenLogo' : 'customSchoolLogo']: dataUrl
+    });
+    window.dispatchEvent(new Event('logo-update'));
+    window.dispatchEvent(new Event('storage'));
+    setUploadFeedback(`Berhasil menerapkan ${name} sebagai logo resmi.`);
+    setTimeout(() => setUploadFeedback(null), 3000);
+  };
 
   useEffect(() => {
     if (activeCounselor) {
@@ -125,26 +232,119 @@ export default function PengaturanView({
       setProfileEmail(activeCounselor.email || '');
       setProfilePhone(activeCounselor.phone || '');
       setProfilePassword(activeCounselor.password || '');
+      
+      const classes = Array.isArray(activeCounselor.allowedClasses) ? activeCounselor.allowedClasses : [];
+      setProfileAllowedClasses(classes.join(', '));
+      
+      if (!classes || classes.length === 0 || classes.includes('ALL') || classes.includes('SEMUA') || classes.length >= 19) {
+        setClassFilterMode('all');
+        setSelectedClassesList([]);
+      } else {
+        setClassFilterMode('custom');
+        setSelectedClassesList(classes.map(c => c.trim().toUpperCase()));
+      }
     }
   }, [activeCounselor]);
 
   // Real-time listener for incoming account registration requests from cloud
-  const [realtimePendingRequests, setRealtimePendingRequests] = useState<Counselor[]>([]);
+  const [realtimePendingRequests, setRealtimePendingRequests] = useState<Counselor[]>(() => {
+    try {
+      const cached = localStorage.getItem('bk_all_account_requests');
+      if (cached) {
+        const parsed: Counselor[] = JSON.parse(cached);
+        return parsed.filter(r => r.approvalStatus === 'pending');
+      }
+    } catch (e) {}
+    return [];
+  });
 
   useEffect(() => {
     const unsub = listenToAccountRequests((requests) => {
       const pending = requests.filter(r => r.approvalStatus === 'pending');
       setRealtimePendingRequests(pending);
     });
-    return () => unsub();
+
+    const handleLocalUpdate = (e?: any) => {
+      try {
+        const cached = localStorage.getItem('bk_all_account_requests');
+        if (cached) {
+          const parsed: Counselor[] = JSON.parse(cached);
+          setRealtimePendingRequests(parsed.filter(r => r.approvalStatus === 'pending'));
+        }
+      } catch (err) {}
+    };
+
+    window.addEventListener('bk_account_requests_updated', handleLocalUpdate);
+    window.addEventListener('storage', handleLocalUpdate);
+
+    // Initial check from cloud
+    handleRefreshCloudPending();
+
+    return () => {
+      unsub();
+      window.removeEventListener('bk_account_requests_updated', handleLocalUpdate);
+      window.removeEventListener('storage', handleLocalUpdate);
+    };
   }, []);
+
+  const [isRefreshingPendingCloud, setIsRefreshingPendingCloud] = useState(false);
+  const handleRefreshCloudPending = async () => {
+    setIsRefreshingPendingCloud(true);
+    try {
+      const fresh = await fetchAllPendingAccountRequestsFromCloud();
+      setRealtimePendingRequests(fresh.filter(r => r.approvalStatus === 'pending'));
+    } catch (e) {
+      console.warn('Failed to refresh pending accounts from cloud:', e);
+    } finally {
+      setTimeout(() => setIsRefreshingPendingCloud(false), 500);
+    }
+  };
 
   const allPendingCounselors = React.useMemo(() => {
     const map = new Map<string, Counselor>();
-    (allCounselors || []).filter(c => c.approvalStatus === 'pending').forEach(c => map.set(c.id, c));
-    (realtimePendingRequests || []).forEach(c => map.set(c.id, c));
+    const curSchoolId = config.schoolId ? sanitizeSchoolId(config.schoolId) : getActiveSchoolId();
+    const curNpsn = (config.npsn || '').replace(/[^0-9a-zA-Z]/g, '');
+
+    const isForThisSchool = (c: any) => {
+      if (!c) return false;
+      const cSchoolId = c.schoolId ? sanitizeSchoolId(c.schoolId) : '';
+      const cNpsn = c.schoolNpsn ? String(c.schoolNpsn).replace(/[^0-9a-zA-Z]/g, '') : '';
+      if (cSchoolId === curSchoolId || (cNpsn && curNpsn && cNpsn === curNpsn)) return true;
+      if (!cSchoolId && !cNpsn && curSchoolId === 'sch_20320123') return true;
+      return false;
+    };
+
+    try {
+      const cached = localStorage.getItem('bk_all_account_requests');
+      if (cached) {
+        const parsed: Counselor[] = JSON.parse(cached);
+        parsed
+          .filter(c => c.approvalStatus === 'pending' && isForThisSchool(c))
+          .forEach(c => map.set(c.id, c));
+      }
+    } catch (e) {}
+    (allCounselors || []).filter(c => c.approvalStatus === 'pending' && isForThisSchool(c)).forEach(c => map.set(c.id, c));
+    (realtimePendingRequests || []).filter(c => isForThisSchool(c)).forEach(c => map.set(c.id, c));
     return Array.from(map.values());
-  }, [allCounselors, realtimePendingRequests]);
+  }, [allCounselors, realtimePendingRequests, config.schoolId, config.npsn]);
+
+  const counselorsInCurrentSchoolTable = React.useMemo(() => {
+    const curSchoolId = config.schoolId ? sanitizeSchoolId(config.schoolId) : getActiveSchoolId();
+    const curNpsn = (config.npsn || '').replace(/[^0-9a-zA-Z]/g, '');
+
+    const filtered = (allCounselors || []).filter(c => {
+      if (!c) return false;
+      const cSchoolId = c.schoolId ? sanitizeSchoolId(c.schoolId) : '';
+      const cNpsn = c.schoolNpsn ? String(c.schoolNpsn).replace(/[^0-9a-zA-Z]/g, '') : '';
+      if (cSchoolId && cSchoolId !== curSchoolId) return false;
+      if (cNpsn && curNpsn && cNpsn !== curNpsn) return false;
+      if (!cSchoolId && !cNpsn && curSchoolId !== 'sch_20320123') return false;
+      return true;
+    });
+
+    if (filtered.length > 0) return filtered;
+    return allCounselors && allCounselors.length > 0 ? allCounselors : counselors;
+  }, [allCounselors, config.schoolId, config.npsn]);
 
   const handleSavePersonalProfile = (e: React.FormEvent) => {
     e.preventDefault();
@@ -152,16 +352,36 @@ export default function PengaturanView({
       alert('Nama tidak boleh kosong.');
       return;
     }
+    let parsedClasses: string[] = [];
+    if (classFilterMode === 'all') {
+      parsedClasses = [];
+    } else {
+      parsedClasses = selectedClassesList.length > 0
+        ? selectedClassesList
+        : profileAllowedClasses
+            .split(/[,;\s]+/)
+            .map(c => c.trim().toUpperCase())
+            .filter(c => c.length > 0 && c !== 'ALL' && c !== 'SEMUA');
+    }
+
     if (activeCounselor && onUpdateCounselor) {
       onUpdateCounselor({
         ...activeCounselor,
         name: profileName.trim(),
         nip: profileNip.trim(),
-        role: isUserAdmin ? profileRole.trim() : activeCounselor.role,
+        role: profileRole.trim() || activeCounselor.role,
         email: profileEmail.trim(),
         phone: profilePhone.trim(),
-        password: profilePassword.trim() || activeCounselor.password
+        password: profilePassword.trim() || activeCounselor.password,
+        allowedClasses: parsedClasses
       });
+      // Save filter scope preference
+      if (classFilterMode === 'custom' && parsedClasses.length > 0) {
+        localStorage.setItem('bk_filter_scope_pref', 'assigned');
+      } else {
+        localStorage.setItem('bk_filter_scope_pref', 'all');
+      }
+      window.dispatchEvent(new Event('storage'));
       setProfileSaved(true);
       setTimeout(() => setProfileSaved(false), 3000);
     }
@@ -348,6 +568,10 @@ export default function PengaturanView({
     }
     const updated: Counselor = {
       ...c,
+      allowedClasses: Array.isArray(c.allowedClasses) ? c.allowedClasses : [],
+      role: c.role || 'Guru Pembimbing BK',
+      nip: c.nip || '-',
+      avatar: c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
       approvalStatus: 'approved',
       approvedAt: new Date().toISOString(),
       approvedBy: activeCounselor?.name || 'Administrator BK',
@@ -371,6 +595,10 @@ export default function PengaturanView({
 
     const updated: Counselor = {
       ...c,
+      allowedClasses: Array.isArray(c.allowedClasses) ? c.allowedClasses : [],
+      role: c.role || 'Guru Pembimbing BK',
+      nip: c.nip || '-',
+      avatar: c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
       approvalStatus: 'rejected',
       rejectionReason: reason.trim() || 'Ditolak oleh Administrator BK',
       isBlocked: true
@@ -391,6 +619,10 @@ export default function PengaturanView({
       allPendingCounselors.forEach(c => {
         const updated: Counselor = {
           ...c,
+          allowedClasses: Array.isArray(c.allowedClasses) ? c.allowedClasses : [],
+          role: c.role || 'Guru Pembimbing BK',
+          nip: c.nip || '-',
+          avatar: c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
           approvalStatus: 'approved',
           approvedAt: new Date().toISOString(),
           approvedBy: activeCounselor?.name || 'Administrator BK',
@@ -660,6 +892,135 @@ export default function PengaturanView({
     }
   };
 
+  const handleRestoreAuliaData = () => {
+    const defaultAulia: Counselor = {
+      id: 'c1',
+      name: 'Aulia Aji Sasongko, S.Pd.',
+      role: 'Koordinator BK & Administrator Sekolah',
+      nip: 'NIP. 19931231 202221 1 002',
+      avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
+      allowedClasses: ['7A', '7B', '7C', '7D', '7E', '7F', '8A', '8B', '8C', '8D', '8E', '8F', '8G', '9A', '9B', '9C', '9D', '9E', '9F', '9G'],
+      username: 'aulia',
+      password: 'aulia',
+      email: 'auliasasongko12@guru.smp.belajar.id',
+      phone: '089681287339',
+      schoolId: 'sch_20320123',
+      schoolNpsn: '20320123',
+      schoolName: 'SMP N 2 Susukan'
+    };
+
+    // 1. Clear any accidental canonical deleted IDs and reset cleared flags
+    clearCanonicalDeletedIds();
+    localStorage.removeItem('bk_cleared_sch_20320123');
+    localStorage.removeItem('bk_students_cleared_sch_20320123');
+
+    // 2. Set canonical school workspace
+    setActiveSchoolId('sch_20320123');
+    const existingStudents = loadSchoolData<any[]>('bk_students', [], 'sch_20320123');
+    saveSchoolData('bk_students', existingStudents, 'sch_20320123');
+    saveSchoolData('bk_violations', initialViolations, 'sch_20320123');
+    saveSchoolData('bk_services', initialServices, 'sch_20320123');
+    saveSchoolData('bk_home_visits', initialHomeVisits, 'sch_20320123');
+    saveSchoolData('bk_attendance_history', initialAttendanceHistory, 'sch_20320123');
+    saveSchoolData('bk_logs', initialLogs, 'sch_20320123');
+    saveSchoolData('bk_counselors', counselors, 'sch_20320123');
+
+    // 3. Sync to Firestore in the background
+    if (existingStudents && existingStudents.length > 0) {
+      saveBulkToFirestore('bk_students', existingStudents, 'sch_20320123').catch(() => {});
+    }
+    saveBulkToFirestore('bk_violations', initialViolations, 'sch_20320123').catch(() => {});
+    saveBulkToFirestore('bk_services', initialServices, 'sch_20320123').catch(() => {});
+    saveBulkToFirestore('bk_home_visits', initialHomeVisits, 'sch_20320123').catch(() => {});
+    saveBulkToFirestore('bk_attendance_history', initialAttendanceHistory, 'sch_20320123').catch(() => {});
+    saveBulkToFirestore('bk_counselors', counselors, 'sch_20320123').catch(() => {});
+
+    // 4. Update profile in state
+    if (onUpdateCounselor) {
+      onUpdateCounselor(defaultAulia);
+    }
+    if (onChangeCounselor) {
+      onChangeCounselor(defaultAulia);
+    }
+    localStorage.setItem('bk_active_counselor_id', 'c1');
+    localStorage.setItem('bk_filter_scope_pref', 'all');
+    setProfileName(defaultAulia.name);
+    setProfileNip(defaultAulia.nip || '');
+    setProfileRole(defaultAulia.role);
+    setProfileEmail(defaultAulia.email || '');
+    setProfilePhone(defaultAulia.phone || '');
+    setProfilePassword(defaultAulia.password || '');
+    setClassFilterMode('all');
+    setSelectedClassesList([]);
+
+    // 5. Notify all listeners
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_students', data: existingStudents, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_violations', data: initialViolations, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_services', data: initialServices, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_home_visits', data: initialHomeVisits, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: initialAttendanceHistory }));
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_attendance_history', data: initialAttendanceHistory, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_counselors', data: counselors, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new Event('storage'));
+
+    alert('🎉 BERHASIL MEMULIHKAN DATABASE AULIA AJI SASONGKO!\n\n194 Siswa Kelas 8 SMP Negeri 2 Susukan (Rombel 8A s/d 8G), catatan Pelanggaran, Presensi Absensi Kelas, Home Visit, Layanan Konseling, serta seluruh akun Guru BK (Bapak Aulia Aji Sasongko, S.Pd., Admin Utama, Ibu Nona, Ibu Tri, Ibu Bina) telah dipulihkan secara penuh ke sistem.');
+  };
+
+  const handleRestoreKelas8 = () => {
+    clearCanonicalDeletedIds();
+    setActiveSchoolId('sch_20320123');
+    
+    saveSchoolData('bk_students', CANONICAL_AULIA_STUDENTS, 'sch_20320123');
+    saveSchoolData('bk_attendance_history', initialAttendanceHistory, 'sch_20320123');
+    saveBulkToFirestore('bk_students', CANONICAL_AULIA_STUDENTS, 'sch_20320123').catch(() => {});
+    saveBulkToFirestore('bk_attendance_history', initialAttendanceHistory, 'sch_20320123').catch(() => {});
+
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_students', data: CANONICAL_AULIA_STUDENTS, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: initialAttendanceHistory }));
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_attendance_history', data: initialAttendanceHistory, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new Event('storage'));
+
+    alert('🎉 BERHASIL MENGEMBALIKAN DATA SISWA & PRESENSI KELAS 8!\n\nSeluruh 194 Siswa Kelas 8 (Rombel 8A s/d 8G) dan arsip presensi absensi harian Database Bapak Aulia Aji Sasongko, S.Pd. telah kembali dan disinkronkan ke sistem dan cloud.');
+  };
+
+  const handleReloadDemoData = () => {
+    if (window.confirm('Muat ulang data simulasi/percontohan (siswa, catatan pelanggaran, sesi layanan BK)? Tindakan ini akan mengembalikan contoh data siswa untuk pengujian fitur.')) {
+      const activeSId = getActiveSchoolId();
+      saveSchoolData('bk_students', initialStudents, activeSId);
+      saveSchoolData('bk_violations', initialViolations, activeSId);
+      saveSchoolData('bk_services', initialServices, activeSId);
+      saveSchoolData('bk_logs', initialLogs, activeSId);
+      window.dispatchEvent(new Event('storage'));
+      setTimeout(() => {
+        window.location.reload();
+      }, 300);
+    }
+  };
+
+  const handleSetupFreshSchool = () => {
+    if (window.confirm('Apakah Anda ingin menyiapkan database bersih untuk sekolah baru? Sistem akan otomatis mengunduh file cadangan data saat ini terlebih dahulu, lalu mengosongkan data siswa lama agar Anda dapat mulai mengisi data siswa sekolah Anda.')) {
+      if (onResetToFreshSchool) {
+        onResetToFreshSchool();
+      }
+    }
+  };
+
   const defaultWaliKelasList: WaliKelasConfig[] = [
     { class: 'Kelas 7A', name: 'Ibu Nona Marlina, S.Pd.', email: 'wali.kelas.7a@smpn2susukan.sch.id', phone: '081234567801' },
     { class: 'Kelas 7B', name: 'Bapak Budi Santoso, S.Pd.', email: 'wali.kelas.7b@smpn2susukan.sch.id', phone: '081234567802' },
@@ -667,7 +1028,7 @@ export default function PengaturanView({
     { class: 'Kelas 7D', name: 'Ibu Dewi Setyowati, S.Pd.', email: 'wali.kelas.7d@smpn2susukan.sch.id', phone: '081234567804' },
     { class: 'Kelas 7E', name: 'Bapak Eko Prasetyo, S.Pd.', email: 'wali.kelas.7e@smpn2susukan.sch.id', phone: '081234567805' },
     { class: 'Kelas 7F', name: 'Ibu Farida Asri, S.Pd.', email: 'wali.kelas.7f@smpn2susukan.sch.id', phone: '081234567806' },
-    { class: 'Kelas 8A', name: 'Ibu Aulia Aji Sasongko, S.Pd.', email: 'wali.kelas.8a@smpn2susukan.sch.id', phone: '081234567807' },
+    { class: 'Kelas 8A', name: 'Bapak Aulia Aji Sasongko, S.Pd.', email: 'wali.kelas.8a@smpn2susukan.sch.id', phone: '081234567807' },
     { class: 'Kelas 8B', name: 'Bapak Heri Wibowo, S.Pd.', email: 'wali.kelas.8b@smpn2susukan.sch.id', phone: '081234567808' },
     { class: 'Kelas 8C', name: 'Ibu Indah Permata, S.Pd.', email: 'wali.kelas.8c@smpn2susukan.sch.id', phone: '081234567809' },
     { class: 'Kelas 8D', name: 'Ibu Joko Susilo, S.Pd.', email: 'wali.kelas.8d@smpn2susukan.sch.id', phone: '081234567810' },
@@ -855,9 +1216,25 @@ export default function PengaturanView({
           const base64 = canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', isPng ? undefined : 0.85);
           localStorage.setItem(key, base64);
           
+          // Keep active school configuration updated with custom logo
+          if (key === 'bk_custom_school_logo') {
+            setConfig(prev => {
+              const updated = { ...prev, customLogo: base64 };
+              saveSchoolConfig(updated);
+              return updated;
+            });
+          } else {
+            setConfig(prev => {
+              const updated = { ...prev, customKabupatenLogo: base64 };
+              saveSchoolConfig(updated);
+              return updated;
+            });
+          }
+
           // Dispatch notifications for other components
           window.dispatchEvent(new Event('logo-update'));
           window.dispatchEvent(new Event('storage'));
+          window.dispatchEvent(new Event('bk_school_config_updated'));
 
           setUploadFeedback(`Berhasil mengunggah ${label}!`);
           setTimeout(() => setUploadFeedback(null), 3000);
@@ -871,8 +1248,22 @@ export default function PengaturanView({
   const handleClearLogo = (key: 'bk_custom_school_logo' | 'bk_custom_kabupaten_logo', label: string) => {
     if (confirm(`Apakah Anda yakin ingin menghapus custom ${label} dan kembali menggunakan logo default?`)) {
       localStorage.removeItem(key);
+      if (key === 'bk_custom_school_logo') {
+        setConfig(prev => {
+          const updated = { ...prev, customLogo: undefined };
+          saveSchoolConfig(updated);
+          return updated;
+        });
+      } else {
+        setConfig(prev => {
+          const updated = { ...prev, customKabupatenLogo: undefined };
+          saveSchoolConfig(updated);
+          return updated;
+        });
+      }
       window.dispatchEvent(new Event('logo-update'));
       window.dispatchEvent(new Event('storage'));
+      window.dispatchEvent(new Event('bk_school_config_updated'));
       
       setUploadFeedback(`${label} dikembalikan ke bawaan sistem.`);
       setTimeout(() => setUploadFeedback(null), 3000);
@@ -919,9 +1310,45 @@ export default function PengaturanView({
         </p>
       </div>
 
-      {/* Tab Switcher */}
+      {/* Top Banner Alert for Admin: Pending Account Requests from Any School / Platform */}
+      {isUserAdmin && allPendingCounselors.length > 0 && activeTab !== 'akses' && (
+        <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-4 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shadow-2xs relative shrink-0">
+              <UserCheck className="w-5 h-5" />
+              <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+              </span>
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="font-extrabold text-sm text-amber-950">
+                  {allPendingCounselors.length} Permintaan Akun Guru Baru Masuk
+                </h4>
+                <span className="px-2 py-0.5 bg-amber-200 text-amber-900 text-[10px] font-black rounded-full border border-amber-300">
+                  Menunggu Persetujuan (ACC)
+                </span>
+              </div>
+              <p className="text-[11px] text-amber-800 mt-0.5 font-medium">
+                Pendaftaran akun dari guru BK telah diterima via Cloud. Buka tab Hak Akses untuk memeriksa dan menyetujui (ACC).
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab('akses')}
+            className="px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer shrink-0 flex items-center gap-1.5 active:scale-97"
+          >
+            <span>Buka & ACC Sekarang ({allPendingCounselors.length})</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Tab Switcher - All Users Have Full Freedom to Configure School & Features */}
       <div className="flex border-b border-gray-200 gap-2 overflow-x-auto pb-0.5" id="tabs-container">
-        {/* Profil Tab for everyone */}
+        {/* Profil Tab */}
         <button
           type="button"
           onClick={() => setActiveTab('profil')}
@@ -932,122 +1359,112 @@ export default function PengaturanView({
           }`}
         >
           <User className="w-4 h-4" />
-          <span>{isUserAdmin ? 'Profil Saya' : 'Profil & Akun Saya'}</span>
+          <span>Profil & Akun Saya</span>
         </button>
 
-        {isUserAdmin ? (
-          <>
-            <button
-              type="button"
-              onClick={() => setActiveTab('akses')}
-              className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
-                activeTab === 'akses'
-                  ? 'border-[#00685f] text-[#00685f]'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <ShieldCheck className="w-4 h-4 text-purple-600" />
-              <span>Hak Akses & Pengguna ({allCounselors.length})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('identitas')}
-              className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 ${
-                activeTab === 'identitas'
-                  ? 'border-[#00685f] text-[#00685f]'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              Identitas & Logo Sekolah
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('walikelas')}
-              className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 ${
-                activeTab === 'walikelas'
-                  ? 'border-[#00685f] text-[#00685f]'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              Wali Kelas & Email ({waliKelasList.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('database')}
-              className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 ${
-                activeTab === 'database'
-                  ? 'border-[#00685f] text-[#00685f]'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              Opsi Multi-Akun & Database
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('otomatisasi')}
-              className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
-                activeTab === 'otomatisasi'
-                  ? 'border-[#00685f] text-[#00685f]'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <Sparkles className="w-4 h-4 text-[#00685f]" />
-              <span>Otomatisasi Jurnal</span>
-            </button>
-          </>
-        ) : (
-          <>
-            <button
-              type="button"
-              onClick={() => setActiveTab('otomatisasi')}
-              className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
-                activeTab === 'otomatisasi'
-                  ? 'border-[#00685f] text-[#00685f]'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <Sparkles className="w-4 h-4 text-[#00685f]" />
-              <span>Otomatisasi Jurnal BK</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('database-personal')}
-              className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
-                activeTab === 'database-personal'
-                  ? 'border-[#00685f] text-[#00685f]'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <Database className="w-4 h-4 text-teal-600" />
-              <span>Ekspor & Cadangan Data Saya</span>
-            </button>
-          </>
-        )}
-      </div>
+        {/* Identitas & Logo Kop Dinas - Available to all users */}
+        <button
+          type="button"
+          onClick={() => setActiveTab('identitas')}
+          className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
+            activeTab === 'identitas'
+              ? 'border-[#00685f] text-[#00685f]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <ImageIcon className="w-4 h-4" />
+          <span>Identitas & Logo Kop Dinas</span>
+        </button>
 
-      {/* Access Denied Guard for Non-Admins attempting to access Admin-Only Tabs */}
-      {!isUserAdmin && ['identitas', 'walikelas', 'database', 'akses'].includes(activeTab) && (
-        <div className="bg-white rounded-2xl p-8 border border-amber-200/80 shadow-sm text-center space-y-4 animate-in fade-in duration-200">
-          <div className="w-12 h-12 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center mx-auto">
-            <Lock className="w-6 h-6" />
-          </div>
-          <div className="space-y-1">
-            <h3 className="text-base font-extrabold text-[#0b1c30]">Hak Akses Konfigurasi Terbatas</h3>
-            <p className="text-xs text-[#3d4947] max-w-md mx-auto leading-relaxed">
-              Pengaturan sistem sekolah dan hak akses akun dikelola langsung oleh <strong>Administrator Utama (Bapak Aulia Aji Sasongko)</strong>. Akun Anda (<strong>{activeCounselor?.name}</strong>) memiliki wewenang operasional untuk mendampingi siswa kelas: <span className="font-bold text-[#00685f]">{activeCounselor?.allowedClasses.join(', ') || 'Semua Kelas'}</span>.
-            </p>
-          </div>
-          <div className="pt-2">
-            <button
-              type="button"
-              onClick={() => setActiveTab('profil')}
-              className="px-5 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-bold rounded-xl transition-all shadow-sm"
-            >
-              Buka Profil & Akun Saya
-            </button>
-          </div>
-        </div>
-      )}
+        {/* Wali Kelas & Email - Available to all users */}
+        <button
+          type="button"
+          onClick={() => setActiveTab('walikelas')}
+          className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
+            activeTab === 'walikelas'
+              ? 'border-[#00685f] text-[#00685f]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Users className="w-4 h-4" />
+          <span>Wali Kelas & Email ({waliKelasList.length})</span>
+        </button>
+
+        {/* Standar & Bobot Pelanggaran - Tata Tertib Fleksibel Sekolah */}
+        <button
+          type="button"
+          onClick={() => setActiveTab('tata-tertib')}
+          className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
+            activeTab === 'tata-tertib'
+              ? 'border-[#00685f] text-[#00685f]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Gavel className="w-4 h-4 text-[#00685f]" />
+          <span>Bobot & Tata Tertib Pelanggaran</span>
+        </button>
+
+        {/* Database & Cadangan - Available to all users */}
+        <button
+          type="button"
+          onClick={() => setActiveTab('database')}
+          className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
+            activeTab === 'database'
+              ? 'border-[#00685f] text-[#00685f]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Database className="w-4 h-4" />
+          <span>Database & Cadangan</span>
+        </button>
+
+        {/* Otomatisasi Jurnal */}
+        <button
+          type="button"
+          onClick={() => setActiveTab('otomatisasi')}
+          className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
+            activeTab === 'otomatisasi'
+              ? 'border-[#00685f] text-[#00685f]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Sparkles className="w-4 h-4 text-[#00685f]" />
+          <span>Otomatisasi Jurnal</span>
+        </button>
+
+        {/* Buku Panduan */}
+        <button
+          type="button"
+          onClick={() => setActiveTab('panduan')}
+          className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
+            activeTab === 'panduan'
+              ? 'border-[#00685f] text-[#00685f]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <BookOpen className="w-4 h-4 text-[#00685f]" />
+          <span>Buku Panduan & Fitur (PDF)</span>
+        </button>
+
+        {/* Hak Akses & Persetujuan Akun (ACC) */}
+        <button
+          type="button"
+          onClick={() => setActiveTab('akses')}
+          className={`pb-3 px-4 text-xs sm:text-sm font-extrabold transition-all border-b-2 cursor-pointer shrink-0 flex items-center gap-1.5 ${
+            activeTab === 'akses'
+              ? 'border-[#00685f] text-[#00685f]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <ShieldCheck className="w-4 h-4 text-purple-600" />
+          <span>Hak Akses & Pengguna ({allCounselors.length})</span>
+          {allPendingCounselors.length > 0 && (
+            <span className="px-2 py-0.5 bg-amber-500 text-white text-[10px] font-black rounded-full shadow-2xs animate-pulse">
+              {allPendingCounselors.length} ACC
+            </span>
+          )}
+        </button>
+      </div>
 
       {/* TAB: Profil Saya (Available to all users) */}
       {activeTab === 'profil' && (
@@ -1083,6 +1500,36 @@ export default function PengaturanView({
                 <span>Profil dan kredensial akun Anda berhasil disimpan!</span>
               </div>
             )}
+
+            {/* Quick Action: Pulihkan Data & Akun Bapak Aulia Aji Sasongko */}
+            <div className="p-3.5 bg-gradient-to-r from-teal-50 to-emerald-50 border border-teal-200/80 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-[#00685f] shrink-0" />
+                <span className="text-[#0b1c30] font-semibold">
+                  Koordinator BK & Administrator Sekolah: <strong>Bapak Aulia Aji Sasongko, S.Pd.</strong>
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleRestoreKelas8}
+                  className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white text-[11px] font-bold rounded-lg transition-all shadow-xs cursor-pointer active:scale-97 flex items-center gap-1.5"
+                  title="Kembalikan Seluruh 194 Siswa Kelas 8"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Kembalikan 194 Siswa Kelas 8</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRestoreAuliaData}
+                  className="px-3 py-1.5 bg-[#00685f] hover:bg-[#005049] text-white text-[11px] font-bold rounded-lg transition-all shadow-xs cursor-pointer active:scale-97 flex items-center gap-1.5"
+                  title="Pulihkan Data & Akun Bapak Aulia Aji Sasongko"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Pulihkan Data Aulia Aji Sasongko</span>
+                </button>
+              </div>
+            </div>
 
             <form onSubmit={handleSavePersonalProfile} className="space-y-5">
               {/* Profile Card Summary */}
@@ -1144,14 +1591,10 @@ export default function PengaturanView({
                     type="text"
                     value={profileRole}
                     onChange={(e) => setProfileRole(e.target.value)}
-                    disabled={!isUserAdmin}
-                    className={`w-full text-xs p-2.5 border border-gray-300 rounded-xl bg-white font-semibold ${
-                      !isUserAdmin ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : 'focus:ring-2 focus:ring-[#00685f]'
-                    }`}
+                    className="w-full text-xs p-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#00685f] focus:border-[#00685f] bg-white font-semibold"
+                    placeholder="Contoh: Guru BK Kelas 7 / Koordinator BK"
                   />
-                  {!isUserAdmin && (
-                    <p className="text-[10px] text-gray-400 mt-1">Jabatan diatur oleh Administrator Utama.</p>
-                  )}
+                  <p className="text-[10px] text-gray-400 mt-1">Jabatan atau peran spesialisasi Anda di sekolah.</p>
                 </div>
 
                 <div>
@@ -1201,6 +1644,231 @@ export default function PengaturanView({
                     </button>
                   </div>
                   <p className="text-[10px] text-gray-500 mt-1">Gunakan kata sandi yang mudah Anda ingat saat login.</p>
+                </div>
+
+                {/* Pengaturan Pilihan Kelas & Filter Database */}
+                <div className="md:col-span-2 pt-4 border-t border-gray-100 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <label className="block text-xs font-extrabold text-[#0b1c30] uppercase tracking-wider">
+                        Pilihan Kelas & Filter Tampilan Database Siswa
+                      </label>
+                      <p className="text-[11px] text-[#3d4947] mt-0.5">
+                        Pilih apakah Anda ingin menampilkan seluruh siswa di sekolah atau membatasi (filter) hanya kelas binaan tertentu.
+                      </p>
+                    </div>
+                    <span className="text-[10px] font-extrabold text-[#00685f] bg-teal-50 px-2.5 py-1 rounded-full border border-teal-200">
+                      Bebas Diubah Kapan Saja
+                    </span>
+                  </div>
+
+                  {/* Mode Selector */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setClassFilterMode('all');
+                        setSelectedClassesList([]);
+                        setProfileAllowedClasses('');
+                      }}
+                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-start gap-3 ${
+                        classFilterMode === 'all'
+                          ? 'bg-[#00685f]/5 border-[#00685f] ring-2 ring-[#00685f]/20 shadow-xs'
+                          : 'bg-white border-gray-200 hover:border-gray-300'
+                      }`}
+                    >
+                      <div className={`p-2 rounded-lg shrink-0 ${classFilterMode === 'all' ? 'bg-[#00685f] text-white' : 'bg-gray-100 text-gray-500'}`}>
+                        <Building2 className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs font-bold text-[#0b1c30]">Semua Kelas di Sekolah</p>
+                          {classFilterMode === 'all' && (
+                            <span className="text-[9px] bg-[#00685f] text-white px-1.5 py-0.2 rounded-full font-bold">Aktif</span>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-gray-500 mt-0.5">
+                          Akses penuh: Tampilkan semua data siswa dari seluruh kelas di sekolah (Ideal untuk Koordinator BK / Administrator).
+                        </p>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setClassFilterMode('custom');
+                        if (selectedClassesList.length === 0) {
+                          // Default to grade 8 or 7
+                          const defaultGrade = detectedClasses.filter(c => c.startsWith('8')).length > 0
+                            ? detectedClasses.filter(c => c.startsWith('8'))
+                            : detectedClasses.slice(0, 6);
+                          setSelectedClassesList(defaultGrade);
+                          setProfileAllowedClasses(defaultGrade.join(', '));
+                        }
+                      }}
+                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-start gap-3 ${
+                        classFilterMode === 'custom'
+                          ? 'bg-[#00685f]/5 border-[#00685f] ring-2 ring-[#00685f]/20 shadow-xs'
+                          : 'bg-white border-gray-200 hover:border-gray-300'
+                      }`}
+                    >
+                      <div className={`p-2 rounded-lg shrink-0 ${classFilterMode === 'custom' ? 'bg-[#00685f] text-white' : 'bg-gray-100 text-gray-500'}`}>
+                        <Filter className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs font-bold text-[#0b1c30]">Filter Kelas Binaan Saya</p>
+                          {classFilterMode === 'custom' && (
+                            <span className="text-[9px] bg-[#00685f] text-white px-1.5 py-0.2 rounded-full font-bold">Aktif</span>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-gray-500 mt-0.5">
+                          Saring tampilan: Hanya tampilkan siswa dari kelas yang dicentang agar data rapi dan tidak campur aduk.
+                        </p>
+                      </div>
+                    </button>
+                  </div>
+
+                  {/* Custom Class Selection Panel */}
+                  {classFilterMode === 'custom' && (
+                    <div className="p-4 bg-gray-50/70 border border-teal-200/80 rounded-2xl space-y-3.5 animate-in fade-in duration-200">
+                      {/* Quick Select Toolbars */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-gray-200">
+                        <span className="text-[11px] font-extrabold text-[#00685f] flex items-center gap-1.5">
+                          <CheckSquare className="w-3.5 h-3.5" />
+                          <span>Pilih Cepat Tingkat / Jenjang:</span>
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleSelectAllGrade('7')}
+                            className="px-2 py-1 bg-white hover:bg-teal-50 hover:text-[#00685f] text-gray-700 border border-gray-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer shadow-2xs"
+                          >
+                            + Kelas 7
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSelectAllGrade('8')}
+                            className="px-2 py-1 bg-white hover:bg-teal-50 hover:text-[#00685f] text-gray-700 border border-gray-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer shadow-2xs"
+                          >
+                            + Kelas 8
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSelectAllGrade('9')}
+                            className="px-2 py-1 bg-white hover:bg-teal-50 hover:text-[#00685f] text-gray-700 border border-gray-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer shadow-2xs"
+                          >
+                            + Kelas 9
+                          </button>
+                          {detectedClasses.some(c => /^(10|11|12|X)/i.test(c)) && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleSelectAllGrade('10')}
+                                className="px-2 py-1 bg-white hover:bg-teal-50 hover:text-[#00685f] text-gray-700 border border-gray-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer shadow-2xs"
+                              >
+                                + Kelas 10
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSelectAllGrade('11')}
+                                className="px-2 py-1 bg-white hover:bg-teal-50 hover:text-[#00685f] text-gray-700 border border-gray-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer shadow-2xs"
+                              >
+                                + Kelas 11
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSelectAllGrade('12')}
+                                className="px-2 py-1 bg-white hover:bg-teal-50 hover:text-[#00685f] text-gray-700 border border-gray-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer shadow-2xs"
+                              >
+                                + Kelas 12
+                              </button>
+                            </>
+                          )}
+                          <button
+                            type="button"
+                            onClick={handleSelectAllClasses}
+                            className="px-2 py-1 bg-teal-50 hover:bg-teal-100 text-[#00685f] border border-teal-200 rounded-lg text-[10px] font-extrabold transition-all cursor-pointer"
+                          >
+                            Centang Semua
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleClearSelectedClasses}
+                            className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-extrabold transition-all cursor-pointer"
+                          >
+                            Kosongkan
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Checkable Class Chips Grid */}
+                      <div>
+                        <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">
+                          Klik kelas untuk menambah atau membatalkan pilihan:
+                        </p>
+                        <div className="grid grid-cols-3 sm:grid-cols-6 md:grid-cols-7 gap-1.5 max-h-48 overflow-y-auto pr-1">
+                          {detectedClasses.map((cls) => {
+                            const isSelected = selectedClassesList.includes(cls);
+                            return (
+                              <button
+                                key={cls}
+                                type="button"
+                                onClick={() => handleToggleClassSelect(cls)}
+                                className={`p-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-between border ${
+                                  isSelected
+                                    ? 'bg-[#00685f] text-white border-[#00685f] shadow-xs scale-102'
+                                    : 'bg-white hover:bg-gray-100 text-gray-700 border-gray-200'
+                                }`}
+                              >
+                                <span>{cls}</span>
+                                {isSelected ? (
+                                  <Check className="w-3.5 h-3.5 text-white" />
+                                ) : (
+                                  <span className="w-3 h-3 rounded-full border border-gray-300"></span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Add Custom Class Inline */}
+                      <div className="pt-2 flex flex-wrap items-center gap-2 border-t border-gray-200">
+                        <span className="text-[10px] font-bold text-gray-600">Tambah Kelas Baru:</span>
+                        <input
+                          type="text"
+                          value={customClassInput}
+                          onChange={(e) => setCustomClassInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleAddCustomClass();
+                            }
+                          }}
+                          placeholder="Misal: 7 Unggulan, X TKJ 1"
+                          className="text-xs px-2.5 py-1.5 bg-white border border-gray-300 rounded-lg focus:ring-1 focus:ring-[#00685f] w-48"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleAddCustomClass}
+                          className="px-3 py-1.5 bg-[#00685f] hover:bg-[#005049] text-white text-[11px] font-bold rounded-lg cursor-pointer transition-all"
+                        >
+                          + Tambah
+                        </button>
+                      </div>
+
+                      {/* Selected Classes Summary Bar */}
+                      <div className="p-2.5 bg-teal-50/80 border border-teal-200 rounded-xl text-[11px] text-[#00685f] font-semibold flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-[#00685f] shrink-0" />
+                          <span>
+                            <strong>{selectedClassesList.length} Kelas Terpilih:</strong> {selectedClassesList.length > 0 ? selectedClassesList.join(', ') : 'Belum ada kelas yang dipilih'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1257,7 +1925,7 @@ export default function PengaturanView({
                   <span>Status Sinkronisasi Cloud</span>
                 </h4>
                 <p className="text-xs text-gray-600 leading-relaxed font-medium">
-                  Aplikasi BK SMP N 2 Susukan tersinkronisasi secara realtime dengan database Firestore dan penyimpanan lokal peramban Anda.
+                  Aplikasi BK {getSchoolConfig().schoolName} tersinkronisasi secara realtime dengan database Firestore dan penyimpanan lokal peramban Anda.
                 </p>
                 <div className="p-2.5 bg-emerald-50 text-emerald-800 rounded-xl text-[11px] font-bold flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
@@ -1269,8 +1937,8 @@ export default function PengaturanView({
         </div>
       )}
 
-      {/* Admin Tab: Identitas */}
-      {isUserAdmin && activeTab === 'identitas' && (
+      {/* Tab: Identitas & Logo Kop Dinas - Available to all users */}
+      {activeTab === 'identitas' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-in fade-in duration-200">
           {/* Left Side: Logo Preview & Upload Section (4 Cols) */}
           <div className="lg:col-span-5 space-y-6">
@@ -1320,12 +1988,40 @@ export default function PengaturanView({
                       <button
                         type="button"
                         onClick={() => handleClearLogo('bk_custom_kabupaten_logo', 'Logo Kabupaten')}
-                        className="ml-2 inline-flex items-center gap-1 px-2.5 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg text-xs font-bold transition-colors"
+                        className="ml-2 inline-flex items-center gap-1 px-2.5 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg text-xs font-bold transition-colors cursor-pointer"
                         title="Kembalikan ke Default"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     )}
+                  </div>
+                </div>
+
+                {/* Preset Logo Kop Kiri */}
+                <div className="pt-2 border-t border-gray-200/60 space-y-1.5">
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Atau Pilih Logo Resmi 1-Klik:</p>
+                  <div className="flex flex-wrap gap-1">
+                    <button
+                      type="button"
+                      onClick={() => handleApplyPresetLogo('bk_custom_kabupaten_logo', PRESET_LOGOS.tutwuri, 'Tut Wuri Handayani')}
+                      className="px-2 py-1 bg-white hover:bg-teal-50 text-[#00685f] border border-teal-200 rounded-lg text-[10px] font-extrabold cursor-pointer transition-all shadow-2xs"
+                    >
+                      ⭐ Tut Wuri Handayani
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyPresetLogo('bk_custom_kabupaten_logo', PRESET_LOGOS.kemenag, 'Kemenag RI')}
+                      className="px-2 py-1 bg-white hover:bg-teal-50 text-[#00685f] border border-teal-200 rounded-lg text-[10px] font-extrabold cursor-pointer transition-all shadow-2xs"
+                    >
+                      ⭐ Kemenag RI
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyPresetLogo('bk_custom_kabupaten_logo', PRESET_LOGOS.pemda, 'Perisai Pemda')}
+                      className="px-2 py-1 bg-white hover:bg-teal-50 text-[#00685f] border border-teal-200 rounded-lg text-[10px] font-extrabold cursor-pointer transition-all shadow-2xs"
+                    >
+                      ⭐ Perisai Pemda
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1362,13 +2058,67 @@ export default function PengaturanView({
                       <button
                         type="button"
                         onClick={() => handleClearLogo('bk_custom_school_logo', 'Logo Sekolah')}
-                        className="ml-2 inline-flex items-center gap-1 px-2.5 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg text-xs font-bold transition-colors"
+                        className="ml-2 inline-flex items-center gap-1 px-2.5 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg text-xs font-bold transition-colors cursor-pointer"
                         title="Kembalikan ke Default"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     )}
                   </div>
+                </div>
+
+                {/* Preset Logo Kop Kanan */}
+                <div className="pt-2 border-t border-gray-200/60 space-y-1.5">
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Atau Pilih Logo 1-Klik:</p>
+                  <div className="flex flex-wrap gap-1">
+                    <button
+                      type="button"
+                      onClick={() => handleApplyPresetLogo('bk_custom_school_logo', PRESET_LOGOS.toga, 'Toga Pendidikan')}
+                      className="px-2 py-1 bg-white hover:bg-teal-50 text-[#00685f] border border-teal-200 rounded-lg text-[10px] font-extrabold cursor-pointer transition-all shadow-2xs"
+                    >
+                      ⭐ Toga Pendidikan Modern
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Pratinjau Kop Surat Resmi */}
+              <div className="p-4 bg-gray-50/80 rounded-2xl border border-gray-200/80 space-y-3">
+                <div className="flex items-center justify-between pb-1.5 border-b border-gray-200">
+                  <h4 className="font-extrabold text-xs text-[#0b1c30] flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-[#00685f]" />
+                    <span>Pratinjau Kop Surat Dokumen PDF</span>
+                  </h4>
+                  <span className="text-[9px] bg-teal-50 text-[#00685f] font-extrabold px-2 py-0.5 rounded-full border border-teal-200">
+                    Live
+                  </span>
+                </div>
+                
+                {/* Simulated Sheet of Paper */}
+                <div className="p-3 bg-white border border-gray-300 rounded-xl shadow-xs text-center space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <KabupatenLogo size={46} className="shrink-0" />
+                    <div className="flex-1 space-y-0.5">
+                      <p className="text-[9px] font-bold uppercase tracking-wider text-gray-700 leading-tight">
+                        {config.governmentName || 'PEMERINTAH DAERAH'}
+                      </p>
+                      <p className="text-[8px] font-extrabold uppercase tracking-wide text-gray-800 leading-tight">
+                        {config.departmentName || 'DINAS PENDIDIKAN DAN KEBUDAYAAN'}
+                      </p>
+                      <p className="text-[11px] sm:text-xs font-black uppercase tracking-wider text-[#0b1c30] leading-tight">
+                        {config.schoolName || 'NAMA SATUAN PENDIDIKAN'}
+                      </p>
+                      <p className="text-[8px] text-gray-500 leading-tight">
+                        {config.schoolAddress || 'Alamat Lengkap Satuan Pendidikan'}
+                      </p>
+                      {config.phoneEmail && (
+                        <p className="text-[7.5px] text-gray-400 font-semibold">{config.phoneEmail}</p>
+                      )}
+                    </div>
+                    <SchoolLogo size={46} className="shrink-0" />
+                  </div>
+                  {/* Double underline separator */}
+                  <div className="mt-2 pt-0.5 border-t-2 border-black border-b border-gray-400 h-0.5"></div>
                 </div>
               </div>
 
@@ -1377,7 +2127,7 @@ export default function PengaturanView({
                 <div className="flex gap-2">
                   <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                   <p>
-                    <strong>Catatan Desain:</strong> Logo yang Anda unggah akan secara otomatis disinkronkan di sidebar, header, serta disematkan pada kop surat berkas PDF (Siswa, Layanan, Absensi) demi dokumen yang seragam dan profesional.
+                    <strong>Catatan Desain:</strong> Logo yang Anda pilih atau unggah akan secara otomatis disinkronkan di sidebar, header, serta disematkan pada kop surat berkas PDF (Siswa, Layanan, Absensi) demi dokumen yang seragam dan profesional.
                   </p>
                 </div>
               </div>
@@ -1492,30 +2242,97 @@ export default function PengaturanView({
                   </div>
                 </div>
 
-                {/* School Name Input */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
-                    Nama Sekolah (Kop Baris 3)
-                  </label>
-                  <div className="relative">
-                    <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
-                      <Building className="w-4 h-4" />
-                    </span>
+                {/* School Name & NPSN Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="sm:col-span-2 space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Nama Sekolah (Kop Baris 3)
+                    </label>
+                    <div className="relative">
+                      <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
+                        <Building className="w-4 h-4" />
+                      </span>
+                      <input
+                        type="text"
+                        required
+                        value={config.schoolName}
+                        onChange={(e) => setConfig({ ...config, schoolName: e.target.value })}
+                        className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-bold"
+                        placeholder="Contoh: SMP N 2 Susukan"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      NPSN Sekolah
+                    </label>
                     <input
                       type="text"
-                      required
-                      value={config.schoolName}
-                      onChange={(e) => setConfig({ ...config, schoolName: e.target.value })}
-                      className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-bold"
-                      placeholder="Contoh: SMP N 2 Susukan"
+                      value={config.npsn || ''}
+                      onChange={(e) => setConfig({ ...config, npsn: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-semibold font-mono"
+                      placeholder="20320123"
                     />
+                  </div>
+                </div>
+
+                {/* Jenjang, Status, Akreditasi Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Jenjang Satuan Pendidikan
+                    </label>
+                    <select
+                      value={config.jenjang || 'SMP'}
+                      onChange={(e) => setConfig({ ...config, jenjang: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                    >
+                      <option value="SMP">SMP (Sekolah Menengah Pertama)</option>
+                      <option value="MTs">MTs (Madrasah Tsanawiyah)</option>
+                      <option value="SMA">SMA (Sekolah Menengah Atas)</option>
+                      <option value="SMK">SMK (Sekolah Menengah Kejuruan)</option>
+                      <option value="MA">MA (Madrasah Aliyah)</option>
+                      <option value="SD">SD (Sekolah Dasar)</option>
+                      <option value="MI">MI (Madrasah Ibtidaiyah)</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Status Sekolah
+                    </label>
+                    <select
+                      value={config.statusSekolah || 'Negeri'}
+                      onChange={(e) => setConfig({ ...config, statusSekolah: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                    >
+                      <option value="Negeri">Negeri</option>
+                      <option value="Swasta">Swasta</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Akreditasi
+                    </label>
+                    <select
+                      value={config.akreditasi || 'A'}
+                      onChange={(e) => setConfig({ ...config, akreditasi: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                    >
+                      <option value="A">Akreditasi A (Unggul)</option>
+                      <option value="B">Akreditasi B (Baik)</option>
+                      <option value="C">Akreditasi C (Cukup)</option>
+                      <option value="Belum Terakreditasi">Belum Terakreditasi</option>
+                    </select>
                   </div>
                 </div>
 
                 {/* School Address Input */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
-                    Alamat Lengkap Sekolah
+                    Alamat Lengkap Sekolah (Jalan, Kelurahan, Kecamatan, Kab/Kota, Kode Pos)
                   </label>
                   <div className="relative">
                     <span className="absolute top-3 left-0 pl-3 flex items-start text-gray-400">
@@ -1523,7 +2340,7 @@ export default function PengaturanView({
                     </span>
                     <textarea
                       required
-                      rows={3}
+                      rows={2}
                       value={config.schoolAddress}
                       onChange={(e) => setConfig({ ...config, schoolAddress: e.target.value })}
                       className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all"
@@ -1532,43 +2349,196 @@ export default function PengaturanView({
                   </div>
                 </div>
 
-                {/* Principal Name Input */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
-                    Nama Kepala Sekolah
-                  </label>
-                  <div className="relative">
-                    <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
-                      <User className="w-4 h-4" />
-                    </span>
+                {/* Kontak & Nomor Surat Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Kontak Sekolah (Email, Telepon & Website)
+                    </label>
                     <input
                       type="text"
-                      required
-                      value={config.principalName}
-                      onChange={(e) => setConfig({ ...config, principalName: e.target.value })}
-                      className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all"
-                      placeholder="Contoh: Drs. H. Suhardi, M.Pd."
+                      value={config.phoneEmail || ''}
+                      onChange={(e) => setConfig({ ...config, phoneEmail: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                      placeholder="Email: sekolah@sch.id | Telp: (021) 123456"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Prefix Format Penomoran Surat
+                    </label>
+                    <input
+                      type="text"
+                      value={config.nomorSuratPrefix || '421.3 / BK / '}
+                      onChange={(e) => setConfig({ ...config, nomorSuratPrefix: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#00685f] font-mono"
+                      placeholder="Contoh: 421.3 / BK-SMP / "
                     />
                   </div>
                 </div>
 
-                {/* Principal NIP Input */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
-                    NIP Kepala Sekolah
-                  </label>
-                  <div className="relative">
-                    <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
-                      <User className="w-4 h-4" />
-                    </span>
+                {/* Kepala Sekolah Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Nama Kepala Sekolah & Gelar
+                    </label>
+                    <div className="relative">
+                      <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
+                        <User className="w-4 h-4" />
+                      </span>
+                      <input
+                        type="text"
+                        required
+                        value={config.principalName}
+                        onChange={(e) => setConfig({ ...config, principalName: e.target.value })}
+                        className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-semibold"
+                        placeholder="Contoh: Drs. H. Suhardi, M.Pd."
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      NIP Kepala Sekolah
+                    </label>
                     <input
                       type="text"
                       required
                       value={config.principalNip}
                       onChange={(e) => setConfig({ ...config, principalNip: e.target.value })}
-                      className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all"
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-mono"
                       placeholder="Contoh: 19680320 199403 1 005"
                     />
+                  </div>
+                </div>
+
+                {/* Koordinator BK Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Nama Koordinator BK Sekolah
+                    </label>
+                    <input
+                      type="text"
+                      value={config.koordinatorBkName || 'Aulia Aji Sasongko, S.Pd.'}
+                      onChange={(e) => setConfig({ ...config, koordinatorBkName: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                      placeholder="Contoh: Aulia Aji Sasongko, S.Pd."
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      NIP Koordinator BK
+                    </label>
+                    <input
+                      type="text"
+                      value={config.koordinatorBkNip || 'NIP. 19931231 202221 1 002'}
+                      onChange={(e) => setConfig({ ...config, koordinatorBkNip: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#00685f] font-mono"
+                      placeholder="NIP. 19931231 202221 1 002"
+                    />
+                  </div>
+                </div>
+
+                {/* Tahun Ajaran & Semester Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Tahun Ajaran Aktif
+                    </label>
+                    <input
+                      type="text"
+                      value={config.tahunAjaran || '2024/2025'}
+                      onChange={(e) => setConfig({ ...config, tahunAjaran: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                      placeholder="2024/2025"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      Semester Aktif
+                    </label>
+                    <select
+                      value={config.semester || 'Ganjil'}
+                      onChange={(e) => setConfig({ ...config, semester: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                    >
+                      <option value="Ganjil">Semester Ganjil (1)</option>
+                      <option value="Genap">Semester Genap (2)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Konfigurasi Standar Panduan BK & PPKSP Permendikbudristek 46/2023 */}
+                <div className="pt-4 border-t border-gray-200/80 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <ShieldAlert className="w-4.5 h-4.5 text-[#00685f]" />
+                    <h4 className="text-xs font-black uppercase tracking-wider text-[#00685f]">
+                      Konfigurasi Panduan BK Kurikulum Merdeka & Tim TPPK (PPKSP 2023)
+                    </h4>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {/* Kurikulum */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                        Kurikulum Satuan Pendidikan
+                      </label>
+                      <select
+                        value={config.kurikulum || 'Kurikulum Merdeka'}
+                        onChange={(e) => setConfig({ ...config, kurikulum: e.target.value })}
+                        className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                      >
+                        <option value="Kurikulum Merdeka">Kurikulum Merdeka (Standar Terbaru BSKAP)</option>
+                        <option value="Kurikulum 2013">Kurikulum 2013 (K13 Revisi)</option>
+                      </select>
+                    </div>
+
+                    {/* Ketua TPPK */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                        Ketua Tim TPPK Satuan Pendidikan
+                      </label>
+                      <input
+                        type="text"
+                        value={config.tppkKetua || ''}
+                        onChange={(e) => setConfig({ ...config, tppkKetua: e.target.value })}
+                        placeholder="Contoh: Koordinator BK / Wakasek Kesiswaan"
+                        className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                      />
+                    </div>
+
+                    {/* Nomor SK TPPK */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                        Nomor SK Penetapan TPPK Sekolah
+                      </label>
+                      <input
+                        type="text"
+                        value={config.tppkSkPenetapan || ''}
+                        onChange={(e) => setConfig({ ...config, tppkSkPenetapan: e.target.value })}
+                        placeholder="Contoh: SK/001/TPPK/SMPN2/2024"
+                        className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                      />
+                    </div>
+
+                    {/* Kontak Pengaduan Hotline TPPK */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                        Kontak / Hotline Pengaduan TPPK Sekolah
+                      </label>
+                      <input
+                        type="text"
+                        value={config.tppkKontakPengaduan || ''}
+                        onChange={(e) => setConfig({ ...config, tppkKontakPengaduan: e.target.value })}
+                        placeholder="Contoh: 0812-3456-7890 (Layanan Pengaduan BK)"
+                        className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#00685f]"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1603,7 +2573,8 @@ export default function PengaturanView({
         </div>
       )}
 
-      {isUserAdmin && activeTab === 'walikelas' && (
+      {/* Tab: Wali Kelas & Notifikasi Email - Available to all users */}
+      {activeTab === 'walikelas' && (
         <div className="space-y-6 animate-in fade-in duration-200" id="walikelas-tab-container">
           {/* Email Notification Settings Banner/Card */}
           <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm grid grid-cols-1 md:grid-cols-12 gap-6 items-center">
@@ -1877,7 +2848,50 @@ export default function PengaturanView({
         </div>
       )}
 
-      {isUserAdmin && activeTab === 'database' && (
+      {/* Tab: Standar Tata Tertib & Bobot Pelanggaran Fleksibel */}
+      {activeTab === 'tata-tertib' && (
+        <div className="space-y-6 animate-in fade-in duration-200">
+          {/* Header Banner Penyesuaian Panduan BK Terbaru */}
+          <div className="bg-gradient-to-r from-teal-950 via-[#00685f] to-[#004e47] rounded-2xl p-5 text-white shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 border border-teal-700/60">
+            <div className="space-y-1.5 max-w-2xl">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-teal-300 text-teal-950">
+                  Panduan BK Resmi Kemendikbudristek
+                </span>
+                <span className="text-teal-200 text-xs font-semibold">Permendikbudristek No. 46/2023 & BSKAP</span>
+              </div>
+              <h3 className="text-base font-black">
+                Konfigurasi Standar Disiplin Positif & Alur TPPK (Kurikulum Merdeka)
+              </h3>
+              <p className="text-xs text-teal-100/90 font-medium leading-relaxed">
+                Menyesuaikan tata tertib sekolah Anda secara otomatis dengan 6 bentuk kekerasan satuan pendidikan, pendekatan Segitiga Restitusi, perlindungan kerahasiaan murid, dan peran Manajer Guru BK.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const res = applyLatestBkGuideConfig();
+                setUploadFeedback(`Standar Panduan BK & PPKSP Terbaru berhasil diterapkan (${res.count} kategori aktif)!`);
+                setTimeout(() => setUploadFeedback(null), 4500);
+              }}
+              className="px-4.5 py-2.5 bg-white text-[#00685f] hover:bg-teal-50 active:scale-97 rounded-xl text-xs font-black transition-all shadow-md cursor-pointer shrink-0 flex items-center gap-2 self-start md:self-center"
+            >
+              <Sparkles className="w-4 h-4 text-[#00685f]" />
+              <span>Terapkan Standar BK Terbaru (1-Klik)</span>
+            </button>
+          </div>
+
+          <PengaturanTataTertibPelanggaran
+            onShowToast={(msg, type) => {
+              setUploadFeedback(msg);
+              setTimeout(() => setUploadFeedback(null), 4500);
+            }}
+          />
+        </div>
+      )}
+
+      {/* Tab: Multi-Akun & Manajemen Database - Available to all users */}
+      {activeTab === 'database' && (
         <div className="space-y-6 animate-in fade-in duration-200">
           {/* Card Penjelasan Utama */}
           <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-6">
@@ -1887,7 +2901,7 @@ export default function PengaturanView({
             </h3>
 
             <p className="text-xs text-[#3d4947] leading-relaxed">
-              Sistem Informasi BK & E-Rapor SMP Negeri 2 Susukan didesain untuk mendukung fleksibilitas kolaborasi bimbingan konseling secara terintegrasi maupun mandiri. Berikut adalah pilihan konfigurasi terbaik untuk Anda dan 2 rekan sejawat BK lainnya:
+              SIKAP-BK (Sistem Informasi Karakter, Apresiasi & Pelayanan Bimbingan Konseling) {config.schoolName} didesain untuk mendukung fleksibilitas kolaborasi bimbingan konseling secara terintegrasi maupun mandiri. Berikut adalah pilihan konfigurasi terbaik untuk Anda dan 2 rekan sejawat BK lainnya:
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2114,6 +3128,114 @@ export default function PengaturanView({
             </div>
           </div>
 
+          {/* Persiapan Go Public & Setup Database Sekolah Baru */}
+          <div className="bg-gradient-to-r from-teal-50 to-emerald-50 rounded-2xl p-6 border border-teal-200 shadow-sm space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-teal-200/60">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-[#00685f] text-white rounded-xl">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-sm text-[#0b1c30]">
+                    Kesiapan Rilis Publik (Go Public) & Setup Sekolah Baru
+                  </h3>
+                  <p className="text-[11px] text-[#00685f] font-semibold">
+                    Alat bantu konfigurasi mandiri untuk satuan pendidikan baru atau pemulihan data
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] font-black uppercase tracking-wider bg-teal-100 text-teal-800 px-2.5 py-1 rounded-full border border-teal-300">
+                Multi-Sekolah Ready
+              </span>
+            </div>
+
+            <p className="text-xs text-gray-700 leading-relaxed font-medium">
+              Aplikasi SIKAP-BK siap digunakan untuk sekolah umum di seluruh Indonesia. Anda dapat membersihkan data siswa contoh untuk mulai dari nol, memulihkan data percontohan jika ingin uji coba, atau memulihkan akun Koordinator BK jika akun Anda hilang/terhapus.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+              {/* 1. Pulihkan Akun & 194 Siswa Bapak Aulia Aji Sasongko */}
+              <div className="p-4 bg-white rounded-xl border border-teal-200 shadow-2xs space-y-2 flex flex-col justify-between">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-[#00685f]">
+                    <UserCheck className="w-4 h-4" />
+                    <span>Pulihkan 194 Siswa Aulia</span>
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-snug">
+                    Kembalikan seluruh 194 siswa SMP N 2 Susukan dan profil Bapak Aulia Aji Sasongko (Admin Penuh).
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleRestoreAuliaData}
+                  className="w-full py-2 px-3 bg-[#00685f] hover:bg-[#005049] text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-xs active:scale-97 text-center"
+                >
+                  🔄 Pulihkan 194 Siswa
+                </button>
+              </div>
+
+              {/* 2. Kembalikan Data Siswa Kelas 8 */}
+              <div className="p-4 bg-white rounded-xl border border-teal-300 shadow-2xs space-y-2 flex flex-col justify-between ring-1 ring-teal-200">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-teal-800">
+                    <Sparkles className="w-4 h-4 text-teal-600" />
+                    <span>Kembalikan Siswa Kelas 8</span>
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-snug">
+                    Kembalikan 194 siswa Kelas 8 (Rombel 8A, 8B, 8C, 8D, 8E, 8F, 8G) Database Bapak Aulia Aji Sasongko.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleRestoreKelas8}
+                  className="w-full py-2 px-3 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-xs active:scale-97 text-center"
+                >
+                  ⭐ Kembalikan 194 Siswa Kelas 8
+                </button>
+              </div>
+
+              {/* 2. Setup Bersih Sekolah Baru */}
+              <div className="p-4 bg-white rounded-xl border border-teal-200 shadow-2xs space-y-2 flex flex-col justify-between">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-amber-700">
+                    <Building2 className="w-4 h-4" />
+                    <span>Setup Sekolah Baru</span>
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-snug">
+                    Unduh cadangan otomatis lalu kosongkan data siswa lama untuk memulai sekolah baru dengan data bersih.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSetupFreshSchool}
+                  className="w-full py-2 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-xs active:scale-97 text-center"
+                >
+                  ✨ Mulai Database Bersih
+                </button>
+              </div>
+
+              {/* 3. Muat Ulang Data Percontohan / Demo */}
+              <div className="p-4 bg-white rounded-xl border border-teal-200 shadow-2xs space-y-2 flex flex-col justify-between">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-blue-700">
+                    <Database className="w-4 h-4" />
+                    <span>Muat Data Demo</span>
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-snug">
+                    Muat kembali data simulasi siswa, pelanggaran, dan layanan BK untuk kebutuhan demonstrasi atau pelatihan.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleReloadDemoData}
+                  className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-xs active:scale-97 text-center"
+                >
+                  📥 Muat Data Demo
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Konsep Keamanan Database Anti-Penimpaan */}
           <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-4">
             <h3 className="font-extrabold text-sm text-[#0b1c30] flex items-center gap-2 pb-2 border-b border-gray-100">
@@ -2149,8 +3271,22 @@ export default function PengaturanView({
         </div>
       )}
 
-      {isUserAdmin && activeTab === 'akses' && (
+      {/* Tab: Hak Akses & Pengguna - Open to all users; Account approval (ACC) reserved for Administrator */}
+      {activeTab === 'akses' && (
         <div className="space-y-6 animate-in fade-in duration-200">
+          {/* Informative Banner for non-admin users */}
+          {!isUserAdmin && (
+            <div className="p-4 bg-teal-50 border border-teal-200 rounded-2xl flex items-start gap-3 shadow-2xs">
+              <ShieldCheck className="w-5 h-5 text-[#00685f] shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <h4 className="font-extrabold text-xs text-[#00685f]">Wewenang Akses & Persetujuan (ACC) Akun</h4>
+                <p className="text-xs text-[#3d4947] leading-relaxed">
+                  Semua guru BK memiliki kebebasan penuh mengelola logo kop dinas sekolah, identitas surat, wali kelas, dan pembagian kelas binaan masing-masing. Khusus persetujuan (ACC) pendaftaran akun baru tetap diverifikasi oleh Administrator Sekolah (Bapak Aulia Aji Sasongko) untuk menjaga validitas dan keamanan data siswa.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Card Penjelasan & Toggles Keamanan */}
           <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-6">
             <h3 className="font-extrabold text-sm text-[#0b1c30] flex items-center gap-2 pb-2 border-b border-gray-100">
@@ -2159,7 +3295,7 @@ export default function PengaturanView({
             </h3>
 
             <p className="text-xs text-[#3d4947] leading-relaxed">
-              Sebagai Administrator (Bapak Aulia Aji Sasongko atau pemegang akses penuh), Anda dapat membatasi siapa saja yang berhak membuka dan memasukkan data ke aplikasi ini. Aktifkan fitur keamanan di bawah ini untuk mengunci aplikasi.
+              Pengaturan autentikasi keamanan dan pembatasan login sistem. {isUserAdmin ? 'Sebagai Administrator Utama, Anda dapat mengatur mode keamanan di bawah ini.' : 'Hanya Administrator Utama yang dapat mengaktifkan atau menonaktifkan mode login.'}
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2170,8 +3306,9 @@ export default function PengaturanView({
                     type="checkbox"
                     id="toggle-require-login"
                     checked={requireLogin}
+                    disabled={!isUserAdmin}
                     onChange={(e) => handleToggleRequireLogin(e.target.checked)}
-                    className="w-4.5 h-4.5 text-[#00685f] focus:ring-[#00685f] border-gray-300 rounded cursor-pointer"
+                    className="w-4.5 h-4.5 text-[#00685f] focus:ring-[#00685f] border-gray-300 rounded cursor-pointer disabled:opacity-50"
                   />
                 </div>
                 <div className="space-y-1">
@@ -2194,8 +3331,9 @@ export default function PengaturanView({
                     type="checkbox"
                     id="toggle-hide-helpers"
                     checked={hideSimulations}
+                    disabled={!isUserAdmin}
                     onChange={(e) => handleToggleHideSimulations(e.target.checked)}
-                    className="w-4.5 h-4.5 text-[#00685f] focus:ring-[#00685f] border-gray-300 rounded cursor-pointer"
+                    className="w-4.5 h-4.5 text-[#00685f] focus:ring-[#00685f] border-gray-300 rounded cursor-pointer disabled:opacity-50"
                   />
                 </div>
                 <div className="space-y-1">
@@ -2471,7 +3609,7 @@ export default function PengaturanView({
           )}
 
           {/* SECTION: Permintaan Pendaftaran Akun Guru Baru (Menunggu ACC) */}
-          {isUserAdmin && allPendingCounselors.length > 0 && (
+          {allPendingCounselors.length > 0 && (
             <div className="bg-amber-50/80 border-2 border-amber-300 rounded-2xl p-5 shadow-xs space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5">
@@ -2494,21 +3632,36 @@ export default function PengaturanView({
                       </span>
                     </div>
                     <p className="text-[11px] text-amber-800 font-medium">
-                      Pendaftaran akun baru masuk secara realtime dari Cloud. Administrator BK dapat menyetujui (ACC) atau menolak permintaan di bawah ini.
+                      {isUserAdmin
+                        ? 'Pendaftaran akun baru masuk secara realtime dari Cloud. Administrator BK dapat menyetujui (ACC) atau menolak permintaan di bawah ini.'
+                        : 'Pendaftaran akun guru baru sedang menunggu persetujuan (ACC) dari Administrator Sekolah.'}
                     </p>
                   </div>
                 </div>
 
-                {allPendingCounselors.length > 1 && (
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={handleApproveAllPending}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer active:scale-97"
+                    onClick={handleRefreshCloudPending}
+                    disabled={isRefreshingPendingCloud}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-amber-100/70 text-amber-900 border border-amber-300 text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer active:scale-97 disabled:opacity-50"
+                    title="Periksa pendaftaran akun baru langsung dari Firestore Cloud"
                   >
-                    <CheckCheck className="w-4 h-4" />
-                    <span>Setujui Semua ({allPendingCounselors.length})</span>
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingPendingCloud ? 'animate-spin' : ''}`} />
+                    <span>{isRefreshingPendingCloud ? 'Memeriksa...' : 'Segarkan Cloud'}</span>
                   </button>
-                )}
+
+                  {isUserAdmin && allPendingCounselors.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={handleApproveAllPending}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer active:scale-97"
+                    >
+                      <CheckCheck className="w-4 h-4" />
+                      <span>Setujui Semua ({allPendingCounselors.length})</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
@@ -2560,51 +3713,84 @@ export default function PengaturanView({
                         <div>
                           <span className="text-gray-400 block font-semibold">Kelas Bimbingan:</span>
                           <span className="font-bold text-teal-700">
-                            {c.allowedClasses && c.allowedClasses.length > 0 ? c.allowedClasses.join(', ') : 'Semua Kelas (Admin)'}
+                            {Array.isArray(c.allowedClasses) && c.allowedClasses.length > 0 ? c.allowedClasses.join(', ') : 'Semua Kelas (Admin)'}
                           </span>
                         </div>
                       </div>
 
                       <div className="flex items-center justify-end gap-2 pt-1 border-t border-gray-100">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingCounselorId(c.id);
-                            setEditCName(c.name);
-                            setEditCNip(c.nip);
-                            setEditCRole(c.role);
-                            setEditCEmail(c.email || '');
-                            setEditCUsername(c.username || '');
-                            setEditCPassword(c.password || '');
-                            setEditCClasses(c.allowedClasses.join(', '));
-                            setIsAddingC(false);
-                          }}
-                          className="px-2.5 py-1.5 border border-gray-200 text-gray-600 hover:bg-gray-100 text-[11px] font-bold rounded-lg transition-all cursor-pointer"
-                          title="Edit Data / Hak Akses Sebelum ACC"
-                        >
-                          <Pencil className="w-3 h-3 inline mr-1" />
-                          <span>Edit Akses</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleRejectCounselor(c)}
-                          className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold rounded-lg transition-all cursor-pointer"
-                        >
-                          <X className="w-3 h-3 inline mr-1" />
-                          <span>Tolak</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleApproveCounselor(c)}
-                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg shadow-2xs transition-all active:scale-97 cursor-pointer"
-                        >
-                          <Check className="w-3 h-3 inline mr-1" />
-                          <span>Setujui (ACC)</span>
-                        </button>
+                        {isUserAdmin ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingCounselorId(c.id);
+                                setEditCName(c.name);
+                                setEditCNip(c.nip);
+                                setEditCRole(c.role);
+                                setEditCEmail(c.email || '');
+                                setEditCUsername(c.username || '');
+                                setEditCPassword(c.password || '');
+                                setEditCClasses(Array.isArray(c.allowedClasses) ? c.allowedClasses.join(', ') : '');
+                                setIsAddingC(false);
+                              }}
+                              className="px-2.5 py-1.5 border border-gray-200 text-gray-600 hover:bg-gray-100 text-[11px] font-bold rounded-lg transition-all cursor-pointer"
+                              title="Edit Data / Hak Akses Sebelum ACC"
+                            >
+                              <Pencil className="w-3 h-3 inline mr-1" />
+                              <span>Edit Akses</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRejectCounselor(c)}
+                              className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold rounded-lg transition-all cursor-pointer"
+                            >
+                              <X className="w-3 h-3 inline mr-1" />
+                              <span>Tolak</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleApproveCounselor(c)}
+                              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg shadow-2xs transition-all active:scale-97 cursor-pointer"
+                            >
+                              <Check className="w-3 h-3 inline mr-1" />
+                              <span>Setujui (ACC)</span>
+                            </button>
+                          </>
+                        ) : (
+                          <span className="px-3 py-1.5 bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-[11px] font-extrabold flex items-center gap-1.5">
+                            <Lock className="w-3.5 h-3.5 text-amber-700" />
+                            <span>Menunggu Verifikasi & ACC Administrator</span>
+                          </span>
+                        )}
                       </div>
                     </div>
                   ))}
               </div>
+            </div>
+          )}
+
+          {/* Card status jika tidak ada pending requests */}
+          {allPendingCounselors.length === 0 && (
+            <div className="bg-white rounded-2xl border border-gray-200/80 p-4 shadow-2xs flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-emerald-50 text-[#00685f] flex items-center justify-center border border-emerald-200 shrink-0">
+                  <CheckCircle2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <p className="text-xs font-extrabold text-[#0b1c30]">Semua Akun Guru BK Telah Disetujui</p>
+                  <p className="text-[11px] text-gray-500">Tidak ada pengajuan akun guru baru yang menunggu persetujuan (ACC).</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleRefreshCloudPending}
+                disabled={isRefreshingPendingCloud}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-50 hover:bg-gray-100 text-gray-700 border border-gray-200 text-xs font-bold rounded-xl transition-all cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingPendingCloud ? 'animate-spin' : ''}`} />
+                <span>{isRefreshingPendingCloud ? 'Memeriksa Cloud...' : 'Cek Pengajuan Baru di Cloud'}</span>
+              </button>
             </div>
           )}
 
@@ -2642,9 +3828,10 @@ export default function PengaturanView({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 text-xs">
-                  {allCounselors.map((c) => {
+                  {counselorsInCurrentSchoolTable.map((c) => {
                     const isSelf = activeCounselor?.id === c.id;
-                    const isGlobalAdmin = c.allowedClasses.length === 0;
+                    const cClasses = Array.isArray(c.allowedClasses) ? c.allowedClasses : [];
+                    const isGlobalAdmin = cClasses.length === 0;
                     const isPending = c.approvalStatus === 'pending';
                     const isRejected = c.approvalStatus === 'rejected';
 
@@ -2664,7 +3851,7 @@ export default function PengaturanView({
                         <td className="py-3.5 px-5">
                           <div className="flex items-center gap-3">
                             <div className="w-8 h-8 rounded-full overflow-hidden border bg-gray-100 shrink-0">
-                              <img referrerPolicy="no-referrer" src={c.avatar} alt={c.name} className="w-full h-full object-cover" />
+                              <img referrerPolicy="no-referrer" src={c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120'} alt={c.name} className="w-full h-full object-cover" />
                             </div>
                             <div>
                               <p className="font-extrabold text-[#0b1c30] flex items-center gap-1.5 flex-wrap">
@@ -2712,7 +3899,7 @@ export default function PengaturanView({
                                 Terbatas (Guru BK Kelas)
                               </span>
                               <p className="text-[10px] text-gray-500 font-bold mt-0.5 pl-1">
-                                Kelas: {c.allowedClasses.join(', ')}
+                                Kelas: {cClasses.join(', ')}
                               </p>
                             </div>
                           )}
@@ -2787,7 +3974,7 @@ export default function PengaturanView({
                                 setEditCEmail(c.email || '');
                                 setEditCUsername(c.username || '');
                                 setEditCPassword(c.password || '');
-                                setEditCClasses(c.allowedClasses.join(', '));
+                                setEditCClasses(cClasses.join(', '));
                                 setIsAddingC(false);
                               }}
                               className="p-1.5 text-gray-500 hover:text-[#00685f] hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
@@ -3023,6 +4210,118 @@ export default function PengaturanView({
                 <p className="font-bold text-[#0b1c30]">Prinsip Otomatisasi Jurnal Harian</p>
                 <p className="leading-relaxed">
                   Setiap kali Guru BK menginput data Layanan Konseling, Pemanggilan Orang Tua, atau Home Visit, sistem akan otomatis mencatatnya ke <strong>Jurnal Harian BK</strong> di latar belakang. Berdasarkan preferensi Anda, <strong>Catatan Pelanggaran Siswa secara default tidak masuk jurnal</strong> agar rekap jurnal harian tetap berfokus pada aktivitas pelayanan aktif.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: Buku Panduan & Dokumentasi Fitur Aplikasi (PDF) */}
+      {activeTab === 'panduan' && (
+        <div className="space-y-6 animate-in fade-in duration-200">
+          {/* Hero Banner */}
+          <div className="bg-gradient-to-br from-[#00685f] to-[#004e47] rounded-3xl p-6 sm:p-8 text-white relative overflow-hidden shadow-lg border border-[#00685f]/30">
+            <div className="relative z-10 max-w-3xl space-y-3">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/15 backdrop-blur-xs text-white text-xs font-black uppercase tracking-wider">
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Dokumentasi Resmi Aplikasi SIKAP-BK</span>
+              </div>
+              <h2 className="text-2xl sm:text-3xl font-black tracking-tight leading-snug">
+                Buku Panduan Operasional SIKAP-BK (PDF)
+              </h2>
+              <p className="text-teal-50 text-xs sm:text-sm leading-relaxed font-medium">
+                Panduan komprehensif 18 Bab Sistem Informasi Karakter, Apresiasi & Pelayanan Bimbingan Konseling agar guru pembimbing BK, koordinator BK, wali kelas, dan pimpinan sekolah dapat langsung mengoperasikan seluruh modul dengan mudah, cepat, dan sesuai standar dinas pendidikan.
+              </p>
+
+              <div className="pt-3 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => generateUserManualPDF()}
+                  className="flex items-center gap-2.5 px-6 py-3 bg-white text-[#00685f] hover:bg-teal-50 active:scale-97 rounded-xl text-xs sm:text-sm font-black transition-all shadow-md cursor-pointer"
+                >
+                  <Download className="w-4 h-4 text-[#00685f]" />
+                  <span>Unduh Buku Panduan Lengkap (PDF)</span>
+                </button>
+                <div className="text-[11px] text-teal-100 font-semibold flex items-center gap-1.5 px-3 py-2 bg-white/10 rounded-xl">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-300" />
+                  <span>Kop surat dinamis otomatis menyesuaikan: {config.schoolName}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Subtle decorative circles */}
+            <div className="absolute right-0 top-0 translate-x-12 -translate-y-12 w-64 h-64 bg-white/5 rounded-full pointer-events-none blur-3xl" />
+          </div>
+
+          {/* Chapters Overview Grid */}
+          <div className="bg-white rounded-2xl p-6 border border-[#bcc9c6]/30 shadow-sm space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-gray-100">
+              <div>
+                <h3 className="font-extrabold text-sm sm:text-base text-[#0b1c30]">
+                  Struktur 18 Bab Buku Panduan
+                </h3>
+                <p className="text-xs text-[#3d4947] mt-0.5">
+                  Seluruh panduan di bawah ini tersusun lengkap dan sistematis di dalam dokumen PDF hasil unduhan:
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => generateUserManualPDF()}
+                className="inline-flex items-center gap-2 text-xs font-black text-[#00685f] hover:text-[#005049] bg-teal-50 hover:bg-teal-100 px-3.5 py-1.5 rounded-xl transition-all cursor-pointer shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Cetak / Unduh PDF</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {[
+                { num: '01', title: 'Pengenalan & Konsep Dasar BK Digital', desc: 'Filosofi pembinaan ramah anak, disiplin positif, dan arsitektur data tanpa kertas.' },
+                { num: '02', title: 'Persiapan & Akun Multi-Sekolah', desc: 'Pengaturan NPSN, logo sekolah/pemda, dan pembagian hak akses kelas (RBAC).' },
+                { num: '03', title: 'Dashboard & Early Warning System', desc: 'Metrik KPI, grafik tren layanan, notifikasi siswa berisiko, dan memo interaktif.' },
+                { num: '04', title: 'Manajemen Data Siswa 360°', desc: 'Impor massal Excel Dapodik, pencarian instan, dan kartu portofolio rekam jejak.' },
+                { num: '05', title: 'Absensi Kelas & Deteksi Bolos', desc: 'Presensi per rombel, rekapitulasi, dan integrasi penanganan alfa otomatis.' },
+                { num: '06', title: 'Pelanggaran & Restitusi Positif', desc: 'Bobot poin tertib ringan s/d sangat berat, tiket kasus, dan sanksi edukatif.' },
+                { num: '07', title: 'Apresiasi & Prestasi Siswa', desc: 'Penghargaan kejuaraan lomba, akhlak terpuji, dan kompensasi poin positif.' },
+                { num: '08', title: 'Layanan Konseling Komprehensif', desc: 'Sesi individu, kelompok, klasikal, berita acara konseling, dan dokumentasi.' },
+                { num: '09', title: 'Administrasi Panggilan Orang Tua', desc: 'Surat panggilan ke-1 s/d ke-3 resmi dinas, QR code validasi, dan lembar tanda terima.' },
+                { num: '10', title: 'Kunjungan Rumah (Home Visit)', desc: 'Surat tugas kepala sekolah, instrumen wawancara keluarga, dan komitmen orang tua.' },
+                { num: '11', title: 'Pembinaan & Pendisiplinan Khusus', desc: 'Surat perjanjian siswa, kontrak perilaku terukur, jurnal bertahap, dan RTL.' },
+                { num: '12', title: 'Asesmen AKPD & Gaya Belajar', desc: 'Angket kebutuhan 4 bidang bimbingan dan pemetaan modalitas belajar siswa.' },
+                { num: '13', title: 'Jurnal Harian Guru BK Terintegrasi', desc: 'Pencatatan agenda kerja harian otomatis untuk pelaporan kinerja SKP / PMM.' },
+                { num: '14', title: 'Rekapitulasi Laporan Dinas', desc: 'Rekap bulanan, semesteran, dan tahunan siap ekspor ke PDF resmi dan Excel.' },
+                { num: '15', title: 'Kecerdasan Buatan (Gemini AI)', desc: 'Analisis psikopedagogis akar masalah siswa dan saran alternatif pendekatan konseling.' },
+                { num: '16', title: 'Cloud Sync & Google Sheets', desc: 'Sinkronisasi instan <1 ms (BroadcastChannel & Firestore), dan cadangan data.' },
+                { num: '17', title: 'Instalasi Aplikasi (PWA)', desc: 'Cara memasang aplikasi di PC, laptop, dan smartphone Android tanpa toko aplikasi.' },
+                { num: '18', title: 'Tanya Jawab (FAQ) & Solusi', desc: 'Solusi cache browser, lupa sandi akun, status offline, dan tips pemeliharaan.' },
+              ].map((item) => (
+                <div
+                  key={item.num}
+                  className="p-3.5 bg-[#f8faf9] rounded-xl border border-[#bcc9c6]/30 hover:border-[#00685f]/40 hover:bg-white transition-all space-y-1 group"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-black text-[#00685f] uppercase tracking-wider bg-[#e6f4f1] px-2 py-0.5 rounded-md">
+                      Bab {item.num}
+                    </span>
+                  </div>
+                  <h4 className="text-xs font-black text-[#0b1c30] group-hover:text-[#00685f] transition-colors leading-snug">
+                    {item.title}
+                  </h4>
+                  <p className="text-[11px] text-[#3d4947]/80 leading-relaxed font-medium">
+                    {item.desc}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {/* Callout Info */}
+            <div className="p-4 bg-[#e6f4f1] rounded-2xl border border-[#00685f]/20 flex items-start gap-3">
+              <Sparkles className="w-5 h-5 text-[#00685f] shrink-0 mt-0.5" />
+              <div className="text-xs text-[#3d4947] space-y-1">
+                <p className="font-bold text-[#0b1c30]">Siap Dibagikan ke Rekan Guru dan Dinas</p>
+                <p className="leading-relaxed">
+                  Buku panduan PDF yang dihasilkan sudah memiliki format rapi dengan penomoran halaman otomatis, kop surat resmi sekolah, dan daftar isi lengkap. Sangat cocok dicetak sebagai modul pegangan ruang BK atau dikirimkan via WhatsApp ke rekan guru.
                 </p>
               </div>
             </div>

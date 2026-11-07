@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -7,12 +8,34 @@ import { GoogleGenAI, Type } from '@google/genai';
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Health check endpoint for Cloud Run container probes
+app.get('/api/health', (_req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    environment: process.env.NODE_ENV || 'development',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Control plane dev server status endpoint
+app.get(['/__aistudio_internal_control_plane/dev/status', '/__aistudio_internal_control_plane/*'], (_req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    devServer: true,
+    port: PORT,
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Initialize Gemini Client
+const GEMINI_TEXT_MODEL = 'gemini-3.8-flash';
+
 const getGeminiClient = () => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
@@ -203,7 +226,7 @@ Berikan output persis dalam format JSON dengan struktur:
 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+      model: GEMINI_TEXT_MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -413,7 +436,7 @@ Berikan tips diagnosa BK dalam JSON:
 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+      model: GEMINI_TEXT_MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -505,7 +528,7 @@ Buatkan analisis komprehensif konselor BK dalam JSON:
 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+      model: GEMINI_TEXT_MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -592,7 +615,7 @@ Format JSON:
 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+      model: GEMINI_TEXT_MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -680,7 +703,7 @@ Buatkan analisis psikologis perilaku siswa dan draf rekomendasi tindak lanjut BK
 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+      model: GEMINI_TEXT_MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -826,7 +849,7 @@ app.post('/api/gemini/generate-discipline-form-ai', async (req, res) => {
     }
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+      model: GEMINI_TEXT_MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -934,7 +957,7 @@ Output WAJIB berupa JSON:
 }`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
+        model: GEMINI_TEXT_MODEL,
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -1000,7 +1023,7 @@ Output JSON:
 }`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
+        model: GEMINI_TEXT_MODEL,
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -1059,7 +1082,7 @@ Output JSON:
 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+      model: GEMINI_TEXT_MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -1118,6 +1141,144 @@ Output JSON:
   }
 });
 
+// 7b. Endpoint: Rekomendasi Tindak Lanjut Berdasarkan Sesi Konseling Sebelumnya (AI Follow-up Suggester)
+app.post('/api/gemini/suggest-follow-up', async (req, res) => {
+  try {
+    const { studentName, studentClass, previousSession, currentTopic } = req.body;
+    const ai = getGeminiClient();
+
+    const prevDate = previousSession?.date || 'Sebelumnya';
+    const prevType = previousSession?.serviceType || 'Konseling Individual';
+    const prevTopic = previousSession?.problem || previousSession?.topic || 'Bimbingan umum';
+    const prevNotes = previousSession?.description || previousSession?.notes || '-';
+    const prevOutput = previousSession?.output || '-';
+    const curTopic = currentTopic || prevTopic;
+
+    if (!ai) {
+      const cleanPrevTopic = prevTopic.toLowerCase();
+      let technique = 'Solution-Focused Brief Therapy (SFBT)';
+      let actions = [
+        `Evaluasi progres komitmen siswa terkait "${prevTopic}" sejak sesi tanggal ${prevDate}.`,
+        'Lakukan observasi perkembangan perilaku dan motivasi belajar di kelas bersama wali kelas.',
+        'Jadwalkan sesi check-in 10-15 menit minggu depan untuk mengukur kestabilan perubahan positif.'
+      ];
+      if (cleanPrevTopic.includes('bolos') || cleanPrevTopic.includes('absen') || cleanPrevTopic.includes('terlambat')) {
+        technique = 'Behavioral Contract & Glasser Reality Therapy';
+        actions = [
+          'Review kartu komitmen absensi harian yang telah disepakati pada sesi sebelumnya.',
+          'Apresiasi konsistensi kehadiran dan identifikasi kendala pagi hari yang masih dialami.',
+          'Koordinasikan laporan presensi mingguan dengan guru piket dan orang tua.'
+        ];
+      } else if (cleanPrevTopic.includes('emosi') || cleanPrevTopic.includes('marah') || cleanPrevTopic.includes('teman') || cleanPrevTopic.includes('bully')) {
+        technique = 'Restitusi Perilaku & Assertive Training';
+        actions = [
+          'Evaluasi penerapan teknik kontrol emosi (Deep Breathing / Jeda Respon) saat menghadapi pemicu di kelas.',
+          'Periksa apakah ada gesekan interpersonal baru dengan teman sebaya.',
+          'Bimbing siswa merefleksikan suasana pertemanan yang lebih kondusif dan damai.'
+        ];
+      }
+
+      return res.json({
+        success: true,
+        source: 'fallback',
+        data: {
+          summaryContext: `Siswa ${studentName || 'Ananda'} sebelumnya telah menjalani sesi ${prevType} mengenai "${prevTopic}" pada ${prevDate}. Fokus saat ini adalah kesinambungan tindak lanjut dan evaluasi komitmen perbaikan.`,
+          counselingTechnique: technique,
+          recommendedActions: actions,
+          monitoringChecklist: [
+            'Pemantauan konsistensi perilaku harian',
+            'Komunikasi berkala dengan wali kelas',
+            'Kesiapan siswa meminta bantuan jika masalah berulang'
+          ],
+          reviewQuestions: [
+            `"Bagaimana perasaan dan pengalamanmu sejak sesi terakhir kita tanggal ${prevDate}?"`,
+            `"Dari kesepakatan kita mengenai ${prevTopic}, hal apa yang sudah berhasil kamu jalankan dengan baik?"`,
+            '"Apa tantangan terberat yang masih kamu hadapi, dan bagaimana kita menyelesaikannya bersama?"'
+          ],
+          suggestedFollowUpText: `1. Memantau konsistensi perkembangan ${studentName || 'siswa'} pasca-sesi ${prevDate} (${prevTopic}).\n2. Melakukan evaluasi penerapan ${technique} dalam aktivitas belajar dan interaksi kelas.\n3. Berkoordinasi dengan wali kelas ${studentClass || ''} untuk feedback mingguan serta menjadwalkan sesi evaluasi berkala 1-2 minggu mendatang.`
+        }
+      });
+    }
+
+    const prompt = `Anda adalah Konselor Ahli Bimbingan & Konseling Kurikulum Merdeka (Standar BSKAP Kemendikbudristek & Disiplin Positif).
+Tugas Anda: Berikan REKOMENDASI TINDAK LANJUT (FOLLOW-UP ACTIONS) yang tajam, edukatif, dan praktis berdasarkan rekam jejak sesi konseling sebelumnya untuk siswa:
+
+DATA SISWA:
+- Nama Siswa: ${studentName || 'Peserta Didik'}
+- Kelas: ${studentClass || '-'}
+
+DATA SESI SEBELUMNYA:
+- Tanggal Sesi: ${prevDate}
+- Jenis Layanan: ${prevType}
+- Topik / Masalah Sesi Sebelumnya: "${prevTopic}"
+- Deskripsi Proses / Catatan Konselor: "${prevNotes}"
+- Hasil / Capaian Sesi Sebelumnya: "${prevOutput}"
+- Topik / Fokus Sesi Saat Ini: "${curTopic}"
+
+PANDUAN PENYUSUNAN TINDAK LANJUT:
+1. Hubungkan secara logis antara hasil sesi sebelumnya dengan langkah konkrit berikutnya (tidak mengulang dari nol, melainkan follow-up progresif).
+2. Tentukan teknik konseling yang relevan (misal: SFBT, Glasser Reality Therapy, Segitiga Restitusi, Motivational Interviewing, atau Kontrak Perilaku).
+3. Berikan 3-4 langkah aksi tindak lanjut yang spesifik untuk guru BK, wali kelas, atau siswa.
+4. Berikan pertanyaan pembuka sesi (review questions) untuk mengecek komitmen anak.
+5. Sediakan narasi teks siap pakai untuk kolom "Rencana Tindak Lanjut" di buku konseling.
+
+Output WAJIB berupa JSON dengan struktur persis:
+{
+  "summaryContext": string (1-2 kalimat ringkasan kesinambungan kasus),
+  "counselingTechnique": string (nama teknik/pendekatan konseling),
+  "recommendedActions": string[] (3-4 langkah aksi tindak lanjut konkrit),
+  "monitoringChecklist": string[] (2-3 poin cek pemantauan),
+  "reviewQuestions": string[] (2-3 pertanyaan reflektif untuk siswa),
+  "suggestedFollowUpText": string (narasi rencana tindak lanjut siap pakai yang rapi bernomor)
+}`;
+
+    const response = await ai.models.generateContent({
+      model: GEMINI_TEXT_MODEL,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            summaryContext: { type: Type.STRING },
+            counselingTechnique: { type: Type.STRING },
+            recommendedActions: { type: Type.ARRAY, items: { type: Type.STRING } },
+            monitoringChecklist: { type: Type.ARRAY, items: { type: Type.STRING } },
+            reviewQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
+            suggestedFollowUpText: { type: Type.STRING }
+          },
+          required: ['summaryContext', 'counselingTechnique', 'recommendedActions', 'monitoringChecklist', 'reviewQuestions', 'suggestedFollowUpText']
+        }
+      }
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    return res.json({ success: true, source: 'gemini', data: parsed });
+
+  } catch (error: any) {
+    logGeminiQuotaFallback('suggest-follow-up', error);
+    const { studentName, studentClass, previousSession } = req.body || {};
+    const prevDate = previousSession?.date || 'sebelumnya';
+    const prevTopic = previousSession?.problem || previousSession?.topic || 'konseling';
+    return res.json({
+      success: true,
+      source: 'fallback',
+      data: {
+        summaryContext: `Tindak lanjut sesi berkelanjutan untuk ${studentName || 'siswa'} pasca-sesi ${prevDate}.`,
+        counselingTechnique: 'Solution-Focused Brief Therapy & Disiplin Positif',
+        recommendedActions: [
+          `Evaluasi komitmen perbaikan terkait ${prevTopic}.`,
+          'Koordinasi pemantauan harian dengan wali kelas.',
+          'Jadwalkan sesi evaluasi 1 minggu mendatang.'
+        ],
+        monitoringChecklist: ['Kehadiran di kelas', 'Partisipasi belajar'],
+        reviewQuestions: ['"Bagaimana perkembanganmu sejak sesi terakhir?"'],
+        suggestedFollowUpText: `1. Memantau progres ${studentName || 'siswa'} terkait ${prevTopic}.\n2. Kolaborasi dengan wali kelas ${studentClass || ''}.\n3. Evaluasi berkala kemandirian perilaku.`
+      }
+    });
+  }
+});
+
 // 8. Endpoint: Rekan AI BK Daily Assistant & Chat (Personal Companion & Step-by-Step Workflow Guide)
 app.post('/api/gemini/daily-assistant', async (req, res) => {
   try {
@@ -1133,44 +1294,189 @@ app.post('/api/gemini/daily-assistant', async (req, res) => {
       
       const firstName = counselorName ? counselorName.split(' ')[0] : 'Rekan BK';
 
-      // Warm & cheerful personal assistant companion generator
-      const generateCheerUpFallback = () => {
-        const greetings = [
-          `☕ **${timeGreeting}, ${firstName}!**\n"Guru BK itu sabarnya seluas samudra, tapi tetep butuh asupan kopi hangat biar mood tetap 100%!" 😄 Senyum dulu yuk, tarik napas dalam-dalam, dan nikmati hari ini dengan penuh kehangatan! ✨`,
-          `🌟 **Semangat Pagi, ${firstName}!**\n"Di balik siswa yang ceria, ada Guru BK hebat yang selalu setia mendengarkan." Tetap rileks, santai sejenak, dan mari tebarkan energi positif ke seluruh sekolah hari ini! 💖`,
-          `✨ **Halo Sahabat BK, ${firstName}!**\n"Ingat: kita nggak perlu menyelesaikan semua masalah dunia dalam satu jam." Yang penting hati tenang, senyum mengembang, dan selalu ada secangkir teh/kopi di meja! ☕💪`,
-          `🎯 **Selamat Beraktivitas, ${firstName}!**\n"Pahlawan tanpa tanda jasa itu nyata, salah satunya Guru BK yang tahan dengerin 1001 curhatan unik!" Apapun yang terjadi hari ini, hadapi dengan tenang dan senyuman terbaikmu ya! 😊`
+      // Warm, relatable, witty, diverse & authentic companion messages for Indonesian school counselors (TIDAK GARING & VARIATIF)
+      const generateCheerUpFallback = (selectedCategory?: string) => {
+        const pool = [
+          // Tone 1: Santai & Kopi (Relaksasi, Anti-Burnout & Self-Care)
+          {
+            tag: 'Santai & Kopi',
+            text: `☕ **${timeGreeting}, ${firstName}!**\n"Guru BK itu bukan pesulap yang wajib bereskan semua masalah dunia dalam semalam." Tarik napas panjang, seruput kopi hangatmu, dan ingat: kehadiranmu yang tulus sudah jadi anugerah besar bagi sekolah ini! 🌿✨`
+          },
+          {
+            tag: 'Santai & Kopi',
+            text: `☕ **Halo ${firstName}, santai sejenak yuk!**\nDi antara hiruk-pikuk bel sekolah dan catatan layanan menumpuk, jangan lupa jaga energimu sendiri. Ambil jeda 5 menit, nikmati semilir angin pagi, dan hadapi hari dengan senyum rileks. You've got this! ☕🌸`
+          },
+          {
+            tag: 'Santai & Kopi',
+            text: `🌿 **${timeGreeting}, ${firstName}!**\n"Kunci ruang konseling yang nyaman berawal dari hati konselor yang tenang." Lepaskan beban kemarin, fokus pada langkah kecil hari ini. Secangkir teh hangat siap menemanimu! 🍵✨`
+          },
+          {
+            tag: 'Santai & Kopi',
+            text: `🌸 **Kawan BK tersayang, ${firstName}!**\nKamu tidak harus sempurna untuk menjadi tempat bersandar yang baik bagi siswa. Cukup hadir dengan senyuman tulus dan telinga yang mendengarkan tanpa menghakimi. Rileks dan nikmati harimu! ☕💖`
+          },
+          {
+            tag: 'Santai & Kopi',
+            text: `🍃 **Jeda bernapas sejenak, ${firstName}!**\nSebelum bel masuk berbunyi kencang: pejamkan mata sejenak, buang napas perlahan. Ingat, cangkir yang kosong tak bisa menuangkan air—isi hatimu dulu dengan ketenangan sebelum membimbing anak-anak hari ini! 🫖✨`
+          },
+          {
+            tag: 'Santai & Kopi',
+            text: `🍵 **${timeGreeting}, ${firstName}!**\n"Meja kerja boleh penuh berkas RPL, tapi kepala harus tetap adem." Ambil camilan favoritmu, regangkan bahu yang kaku, dan nikmati petualangan hari ini dengan tempo yang santai! 🍩🌿`
+          },
+
+          // Tone 2: Afirmasi Hebat (Empowerment & Kebanggaan Profesi)
+          {
+            tag: 'Afirmasi Hebat',
+            text: `🌟 **Semangat ${timeGreeting}, ${firstName}!**\n"Mungkin siswa tidak selalu hafal setiap butir nasihat kita, tapi mereka takkan pernah lupa rasa hangat saat diterima seutuhnya di ruang BK." Hari ini kamu sedang menumbuhkan pohon harapan baru! 💖🌱`
+          },
+          {
+            tag: 'Afirmasi Hebat',
+            text: `🛡️ **Kawan Hebat BK, ${firstName}!**\nTidak semua pahlawan berpenampilan mencolok; sebagian duduk sabar di kursi konseling dengan hati seluas samudra dan telinga yang mendengarkan. Banggalah pada dedikasimu, kamu sedang menyelamatkan masa depan anak bangsa! 💪✨`
+          },
+          {
+            tag: 'Afirmasi Hebat',
+            text: `✨ **Pagi yang cerah untuk ${firstName}!**\nSatu percakapan penuh empati darimu hari ini bisa jadi titik balik penyelamat seorang anak dari keputusasaan. Teruslah menjadi pelita hangat di sekolah tercinta! 🎯🌟`
+          },
+          {
+            tag: 'Afirmasi Hebat',
+            text: `💎 **Salam hormat untuk ${firstName}!**\nMembimbing jiwa-jiwa muda bukanlah pekerjaan mudah, tapi kamu melakukannya dengan penuh cinta setiap hari. Semesta mencatat setiap kebaikan tulus yang kamu taburkan di sanubari mereka! 🚀💖`
+          },
+          {
+            tag: 'Afirmasi Hebat',
+            text: `🔥 **Luar biasa dedikasimu, ${firstName}!**\nDi saat orang lain hanya melihat nilai angka rapor atau label kenakalan, kamulah yang melihat potensi tersembunyi di balik mata anak-anak itu. Kamu pahlawan tanpa tanda jasa yang sesungguhnya! 🌟🏆`
+          },
+          {
+            tag: 'Afirmasi Hebat',
+            text: `🌱 **Kekuatan hening ${firstName}!**\n"Pohon jati yang kokoh tumbuh dari bibit kecil yang dirawat tekun bertahun-tahun." Setiap kata penyemangat yang kamu bisikkan di ruang konseling akan mekar indah di masa depan mereka! 🌳🤍`
+          },
+
+          // Tone 3: Refleksi Empati & Restitusi (Mindset Positif)
+          {
+            tag: 'Refleksi Empati',
+            text: `🌱 **${timeGreeting}, ${firstName}!**\n"Dalam kacamata restitusi, kekeliruan perilaku siswa bukanlah vonis akhir, melainkan pintu gerbang untuk mengajarkan tanggung jawab moral." Tetap sabar dan percaya pada benih kebaikan mereka! 🧭🤍`
+          },
+          {
+            tag: 'Refleksi Empati',
+            text: `💡 **Semangat membimbing, ${firstName}!**\n"Siswa yang paling butuh penerimaan sering kali menunjukkannya dengan perilaku yang paling membingungkan." Tatap matanya dengan teduh, dan biarkan kehangatanmu meluluhkan pertahanan mereka. 🤝✨`
+          },
+          {
+            tag: 'Refleksi Empati',
+            text: `🌈 **Refleksi berharga untuk ${firstName}!**\nKarakter mulia siswa tidak terbentuk dalam semalam, melainkan dari rajutan konsisten doa, kesabaran, dan teladan yang kamu hadirkan di ruang BK. Teruslah melangkah dengan bangga! 🌟🌱`
+          },
+          {
+            tag: 'Refleksi Empati',
+            text: `🧭 **${timeGreeting}, ${firstName}!**\nSetiap anak berhak mendapatkan kesempatan kedua, ketiga, bahkan kesepuluh untuk berbenah. Ruang BK adalah rumah kedua tempat mereka belajar bangkit dari kesalahan tanpa rasa takut dihakimi! 🏡✨`
+          },
+          {
+            tag: 'Refleksi Empati',
+            text: `🕊️ **Catatan empati ${firstName}:**\n"Saat seorang siswa marah atau membangkang, ingatlah: itu sering kali jeritan tak terucap dari hati yang terluka." Terima emosinya, bimbing perilakunya, dan sayangi prosesnya. Kamu lentera terbaik mereka! 🕯️🤍`
+          },
+          {
+            tag: 'Refleksi Empati',
+            text: `🌿 **Pelukan pemulihan untuk ${firstName}!**\nKetika restitusi berhasil membuat seorang siswa tersenyum lega dan berani memperbaiki kesalahannya sendiri, di situlah mukjizat pendidikan karakter terjadi. Nikmati setiap detik proses indahnya! 🤝🌈`
+          },
+
+          // Tone 4: Humor Ruang BK (Segar, Lucu & Tidak Garing)
+          {
+            tag: 'Humor Ruang BK',
+            text: `😄 **${timeGreeting}, ${firstName}!**\nSiap-siap mendengar 1001 alasan siswa terlambat dari "rantai sepeda lepas di jalan kenangan" sampai "kucing tetangga mogok makan". Pasang senyum andalan Guru BK: "Aku tahu kamu ngeles, tapi aku tetap sayang kok!" 😂☕`
+          },
+          {
+            tag: 'Humor Ruang BK',
+            text: `🍰 **Tips Bugar Guru BK hari ini, ${firstName}:**\n1. Jangan bawa drama ruang konseling sampai ke mimpi tidur.\n2. Banyak minum air putih.\n3. Amankan stok gorengan dan cemilan di laci meja dari serbuan bapak/ibu guru sebelah! 😆 Semangat melayani!`
+          },
+          {
+            tag: 'Humor Ruang BK',
+            text: `☕ **Mood Booster ${timeGreeting}, ${firstName}!**\nMenjadi Guru BK itu paket komplit: kadang jadi detektif kelas, kadang diplomat PBB penengah konflik antar geng, kadang motivator ala TED Talk. Jangan lupa isi baterai energimu dulu dengan sarapan enak ya! 🥐✨`
+          },
+          {
+            tag: 'Humor Ruang BK',
+            text: `🎉 **${timeGreeting}, ${firstName}!**\n"Kalau hari ini dinamika sekolah terasa nano-nano (manis, asam, asin campur aduk), ingat: itu tandanya hidupmu berasa film petualangan seru!" Hadapi dengan tawa renyah dan hati riang gembira ya! 🚀😄`
+          },
+          {
+            tag: 'Humor Ruang BK',
+            text: `🕶️ **Intel Melapor untuk ${firstName}!**\n"Info A1 hari ini: murid yang paling sering bolos ke kantin ternyata cuma kangen gorengan bakwan Bu Siti." Ajak ngobrol santai dulu sambil ngunyah, baru masuk sesi bimbingan dari hati ke hati! 🍟😂`
+          },
+          {
+            tag: 'Humor Ruang BK',
+            text: `📱 **Status WA Guru BK hari ini, ${firstName}:**\n"Menghadapi drama percintaan monyet anak SMP/SMA yang lebih rumit daripada drama Korea." Tarik napas, pasang muka bijak, dan jangan sampai ikut baper ya! 🙈🍿`
+          },
+
+          // Tone 5: Trik Taktis Konselor (Tips Praktis, De-eskalasi & Diplomasi)
+          {
+            tag: 'Trik Taktis',
+            text: `🎯 **Tips Taktis Hari Ini untuk ${firstName}!**\nKalau ada siswa masuk ruang BK dengan wajah cemberut atau defensif: jangan langsung tanya "Kenapa kamu melanggar?". Tawarkan segelas air dingin dulu dan tanyakan: "Sudah sarapan belum tadi pagi?". Kehangatan memecah kebekuan lebih cepat dari aturan tertulis! 💧🤍`
+          },
+          {
+            tag: 'Trik Taktis',
+            text: `🧠 **Micro-Mindfulness Konselor, ${firstName}:**\nSebelum memanggil orang tua siswa yang sedang emosional atau denial: lakukan teknik pernapasan 4-7-8 (tarik 4 detik, tahan 7 detik, hembus 8 detik). Nada suara yang tenang akan otomatis menurunkan tensi lawan bicara! 🧘‍♂️✨`
+          },
+          {
+            tag: 'Trik Taktis',
+            text: `🤝 **Kunci Segitiga Restitusi, ${firstName}:**\nSaat menanyakan keyakinan kelas, gunakan kalimat terbuka: "Menurutmu, apa yang bisa kita perbaiki bersama agar kamu dan teman-teman merasa aman kembali?". Biarkan solusi meluncur dari mulut anak sendiri! 🗝️📘`
+          },
+          {
+            tag: 'Trik Taktis',
+            text: `🛡️ **Diplomasi Ortu Anti-Drama, ${firstName}:**\nSaat konferensi kasus dengan orang tua: selalu buka dengan 2 apresiasi tulus tentang kebaikan sang anak sebelum membahas catatan perilakunya. Orang tua akan merasa didukung, bukan diserang! 🌟👨‍👩‍👧`
+          },
+
+          // Tone 6: Mood Booster Harian (Ceria, Optimis & Berenergi)
+          {
+            tag: 'Mood Booster',
+            text: `☀️ **Selamat menyambut hari yang cerah, ${firstName}!**\nBuka jendela ruang BK lebar-lebar, biarkan sinar mentari menyapa. Hari ini adalah kanvas bersih tempatmu menorehkan jejak kebaikan baru bagi anak-anak bangsa. Semangat membara! 🔥🌸`
+          },
+          {
+            tag: 'Mood Booster',
+            text: `🎈 **Suntikan Semangat untuk ${firstName}!**\nSenyum manismu adalah penenang nomor satu bagi siswa yang sedang cemas di sekolah. Sebarkan aura positifmu hari ini dan lihat bagaimana lingkungan sekitar ikut bersemi! 🌻✨`
+          },
+          {
+            tag: 'Mood Booster',
+            text: `🚀 **Siap meluncur, ${firstName}!**\nTidak ada masalah yang tak bisa diselesaikan selama hati kita lapang dan pikiran kita jernih. Bersiaplah menjadi versi terbaik dirimu hari ini, doa baik menyertaimu selalu! 🌈💖`
+          },
+          {
+            tag: 'Mood Booster',
+            text: `🍀 **Keberuntungan hari ini untuk ${firstName}!**\nSemoga setiap sesi layanan hari ini berjalan lancar, penuh tawa, dan berujung kesepakatan damai yang melegakan. Jadilah lentera yang tak pernah padam! 🌟🌿`
+          }
         ];
-        return greetings[Math.floor(Math.random() * greetings.length)];
+
+        let filtered = pool;
+        if (selectedCategory && selectedCategory !== 'Semua') {
+          filtered = pool.filter(p => p.tag.toLowerCase().includes(selectedCategory.toLowerCase()));
+          if (filtered.length === 0) filtered = pool;
+        }
+
+        const pick = filtered[Math.floor(Math.random() * filtered.length)];
+        return pick.text;
       };
 
       if (!ai) {
         return res.json({
           success: true,
           source: 'fallback',
-          message: generateCheerUpFallback()
+          message: generateCheerUpFallback(payload?.category)
         });
       }
 
-      const prompt = `Anda adalah "Si Becik 🦉", asisten pribadi dan sahabat virtual Guru BK yang hangat, santai, humoris, mencairkan suasana, dan menjadi penyemangat kerja (mood booster).
-Nama Guru BK: ${counselorName} (Panggilan akrab: ${firstName}).
-Waktu: ${timeGreeting} (${todayDayName}).
+      const prompt = `Anda adalah "Si Becik 🦉", asisten cerdas, sahabat karib virtual, dan mood-booster bagi Guru BK: ${counselorName} (panggilan akrab: ${firstName}).
+Waktu saat ini: ${timeGreeting} (${todayDayName}).
+Permintaan kategori/suasana hati: ${payload?.category || 'Semua / Acak segar'}.
 
-PETUNJUK PENTING:
-- JANGAN menuliskan rincian detail agenda harian, daftar tugas, data absensi kelas, atau catatan pelanggaran (karena semua detail teknis sudah ada di kartu dashboard).
-- FOKUS 100% pada peran asisten pribadi yang mencairkan suasana: berikan sapaan akrab, 1 celetukan humor/refleksi santai khas dunia bimbingan konseling/sekolah, dan kata-kata motivasi atau afirmasi positif yang menyegarkan pikiran.
-- Panjang teks: Cukup 2-3 kalimat pendek yang hangat, renyah dibaca, dan bikin tersenyum.
-- Gunakan emoji secukupnya (☕, ✨, 😊, 💖, 💪).`;
+INSTRUKSI KHUSUS "TIDAK GARING & SANGAT VARIATIF":
+1. FOKUS 100% pada peran sahabat karib sejati yang menyemangati hati dan mental Guru BK di sekolah Indonesia.
+2. JANGAN PERNAH membuat teks kaku, klise basi formal (hindari kalimat basi seperti "jangan menyerah Anda pasti bisa!"), atau template motivasi robotik.
+3. Gunakan gaya bahasa Indonesia yang luwes, akrab, renyah dibaca, cerdas, sedikit humor santai khas ruang BK (relatable dengan dinamika murid SMP/SMA, orang tua murid, drama pertemanan, segitiga restitusi, atau ngopi/rehat santai konselor), serta penuh empati mendalam.
+4. Panjang respons: 2 sampai 4 kalimat yang sangat berkesan, segar, dan bikin tersenyum hangat.
+5. Awali dengan sapaan hangat yang pas (${timeGreeting}, ${firstName}!).
+6. Sisipkan emoji yang ekspresif (☕, 🌿, ✨, 💖, 😄, 💡, 🛡️, 🍩).`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
+        model: GEMINI_TEXT_MODEL,
         contents: prompt
       });
 
       return res.json({
         success: true,
         source: 'gemini',
-        message: response.text || generateCheerUpFallback()
+        message: response.text || generateCheerUpFallback(payload?.category)
       });
     }
 
@@ -1251,7 +1557,7 @@ Format output JSON WAJIB:
 }`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
+        model: GEMINI_TEXT_MODEL,
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -1287,35 +1593,176 @@ Format output JSON WAJIB:
     }
 
     if (action === 'chat') {
-      const { userQuery, counselorName } = payload || {};
+      const { userQuery, counselorName, mode, topic, studentClass, duration } = payload || {};
       const firstName = counselorName ? counselorName.split(' ')[0] : 'Kawan BK';
+
+      // Fallback generator adhering strictly to user rules
+      const generateMetaAiFallback = () => {
+        if (mode === 'rapikan-laporan') {
+          return `Berikut draf laporan layanan BK yang telah dirapikan secara formal:
+
+**Pelaksanaan:**
+Layanan konseling dilaksanakan di Ruang Bimbingan dan Konseling bersama konseli (Siswa A). Konselor membangun hubungan baik (*rapport*), mendengarkan secara aktif tanpa menghakimi, serta mengidentifikasi faktor pemicu situasi yang dihadapi siswa dalam suasana yang kondusif dan terjaga kerahasiaannya.
+
+**Hasil:**
+Konseli (Siswa A) menunjukkan keterbukaan dalam menyampaikan kendala yang dialami, menyadari konsekuensi dari perilaku sebelumnya terhadap proses belajarnya, serta menunjukkan motivasi internal untuk melakukan perbaikan diri.
+
+**Kesepakatan & Tindak Lanjut:**
+1. Konseli menyepakati komitmen pengelolaan waktu dan pembiasaan disiplin baru.
+2. Konselor akan memantau kehadiran dan perkembangan perilaku konseli selama 1 (satu) minggu ke depan.
+3. Konseling lanjutan akan dijadwalkan kembali apabila diperlukan evaluasi mendalam.`;
+        }
+
+        if (mode === 'buatkan-rpl') {
+          const rplTopic = topic || userQuery || 'Pencegahan Perundungan & Disiplin Positif';
+          const rplClass = studentClass || 'Kelas 7 / 8 / 9';
+          const rplTime = duration || '1 x 40 Menit';
+
+          return `Berikut Rencana Pelaksanaan Layanan (RPL) Bimbingan Klasikal resmi:
+
+**Topik Layanan:** ${rplTopic}
+**Sasaran Kelas:** ${rplClass}
+**Alokasi Waktu:** ${rplTime}
+
+**Tujuan Layanan:**
+- *Tujuan Umum:* Peserta didik mampu memahami pentingnya ${rplTopic.toLowerCase()} serta membangun relasi sosial yang sehat dan bertanggung jawab di lingkungan sekolah.
+- *Tujuan Khusus:*
+  1. Peserta didik dapat mengidentifikasi bentuk-bentuk perilaku yang mendukung iklim belajar kondusif.
+  2. Peserta didik dapat menganalisis dampak positif dari penerapan nilai-nilai disiplin diri.
+  3. Peserta didik dapat merumuskan komitmen bersama untuk menciptakan lingkungan kelas yang aman dan harmonis.
+
+**Materi Layanan:**
+1. Pengertian dan urgensi ${rplTopic}.
+2. Faktor-faktor pendukung terciptanya kenyamanan belajar dan pertemanan sehat.
+3. Strategi penyelesaian konflik secara asertif dan saling menghargai.
+
+**Metode Layanan:**
+Ceramah interaktif, diskusi kelompok terbimbing (*small group discussion*), dan refleksi diri.
+
+**Media Layanan:**
+Slide presentasi (PPT), video edukasi inspiratif, serta lembar kerja peserta didik (LKPD reflektif).
+
+**Langkah Kegiatan:**
+1. *Pendahuluan (8 Menit):*
+   - Guru BK membuka sesi dengan salam, doa bersama, dan pembinaan suasana hangat (*ice breaking*).
+   - Menyampaikan topik, tujuan layanan, serta kontrak belajar yang disepakati bersama.
+2. *Kegiatan Inti (25 Menit):*
+   - Guru BK menayangkan materi/studi kasus kontekstual seputar ${rplTopic}.
+   - Siswa berdiskusi dalam kelompok kecil untuk merumuskan pandangan dan solusi alternatif.
+   - Perwakilan kelompok mempresentasikan hasil refleksi dan ditanggapi dengan penguatan oleh Guru BK.
+3. *Penutup (7 Menit):*
+   - Guru BK dan peserta didik bersama-sama menyimpulkan inti pembelajaran hari ini.
+   - Guru BK memberikan lembar refleksi singkat serta kata-kata penguatan motivasi.
+
+**Evaluasi Layanan:**
+- *Laiseg (Penilaian Segera):* Mengamati antusiasme, keaktifan berpendapat, dan suasana emosi siswa selama sesi klasikal berlangsung.
+- *Laijapen (Penilaian Jangka Pendek):* Mengamati perubahan sikap siswa dalam 1–2 minggu setelah layanan, terutama interaksi sosial antarteman di kelas.
+- *Laijapang (Penilaian Jangka Panjang):* Mengamati ketahanan komitmen perilaku positif siswa sepanjang semester dan nihilnya laporan insiden sejenis.`;
+        }
+
+        if (mode === 'tanya-teknik') {
+          return `Berikut analisis bimbingan konseling untuk situasi tersebut:
+
+**Penyebab:**
+Perilaku siswa umumnya dipicu oleh kombinasi faktor internal (kesulitan mengelola regulasi emosi, kebutuhan perhatian yang belum terpenuhi, atau kelelahan adaptasi) dan faktor eksternal (tekanan pertemanan sebaya, pola komunikasi di rumah, atau kebiasaan begadang akibat gawai).
+
+**Teknik yang Cocok:**
+Pendekatan *Solution-Focused Brief Counseling* (SFBC) yang dipadukan dengan teknik *Segitiga Restitusi* (Menstabilkan Identitas, Validasi Tindakan yang Salah, dan Menanyakan Keyakinan). Pendekatan ini efektif karena berfokus pada kekuatan siswa dan solusi perbaikan di masa depan, bukan menghukum kesalahan masa lalu.
+
+**Langkah Minggu Ini:**
+1. Lakukan konseling individual singkat (15–20 menit) dalam suasana hangat tanpa menghakimi.
+2. Ajak siswa menyusun kontrak perilaku sederhana (*behavioral contract*) selama 7 hari.
+3. Berkoordinasi dengan wali kelas untuk memantau perubahan afektif siswa di kelas tanpa membuat siswa merasa diawasi secara berlebihan.
+
+**Kapan Home Visit / Rapat Kasus:**
+Lakukan **Kunjungan Rumah (Home Visit)** jika siswa tidak hadir 3 hari berturut-turut tanpa kabar atau orang tua tidak merespons surat panggilan. Lakukan **Rapat Kasus (Konferensi Kasus)** jika persoalan melibatkan pelanggaran berat, perundungan lintas kelas, atau kebuntuan yang memerlukan koordinasi resmi kepala sekolah dan tim PPKSP.
+
+Mau saya buatkan draf laporannya?`;
+        }
+
+        return `Halo ${firstName}! Saya Si Becik, asisten cerdas Guru BK berbasis Meta AI. 
+
+Saya siap membantu menyusun Rencana Pelaksanaan Layanan (RPL), merapikan draf laporan konseling formal, atau mendiskusikan teknik intervensi BK yang tepat bagi siswa Anda. Silakan pilih mode di atas atau ceritakan situasi yang sedang Anda hadapi (gunakan sebutan Siswa A). ✨`;
+      };
 
       if (!ai) {
         return res.json({
           success: true,
-          source: 'fallback',
-          message: `Siap ${firstName}! ☕ Berikut langkah praktis yang bisa kamu lakukan:\n\n1️⃣ **Langkah 1**: Tarik napas sejenak dan dengarkan situasi dengan pikiran tenang tanpa tergesa-gesa.\n2️⃣ **Langkah 2**: Ajak siswa/pihak terkait berdialog santai dalam suasana yang aman dan empatik.\n3️⃣ **Langkah 3**: Rumuskan solusi konkret bersama dan catat komitmen tindak lanjutnya di aplikasi BK.\n\nSemangat terus, kamu pasti bisa menanganinya dengan hebat! ✨`
+          source: 'meta-ai-fallback',
+          message: generateMetaAiFallback()
         });
       }
 
-      const prompt = `Anda adalah "Si Becik 🦉", asisten pribadi cerdas, ramah, dan solutif bagi Guru BK: ${counselorName} (panggilan akrab: ${firstName}).
-Peran Anda:
-1. Membantu Guru BK dengan panduan langkah demi langkah (step-by-step) yang terstruktur dan praktis saat ditanya alur kerja, penanganan kasus siswa, konseling, restitusi, home visit, ataupun administrasi BK.
-2. Tetap ramah, hangat, menyemangati, dan mencairkan suasana.
-3. Berikan jawaban yang terstruktur dengan format poin/penomoran (1️⃣, 2️⃣, 3️⃣) agar Guru BK langsung tahu langkah konkret apa yang harus dilakukan selanjutnya.
+      const metaSystemPrompt = `Anda adalah "Si Becik 🦉", Asisten Cerdas Resmi Guru BK Indonesia yang didukung oleh teknologi Meta AI (Powered by Meta AI).
+Identitas Pengguna: ${counselorName} (Panggilan akrab: ${firstName}).
 
-Pertanyaan / Permintaan Guru BK: "${userQuery}"
-Respon: Berikan panduan yang jelas, to-the-point, sistematis, dan suportif.`;
+=== PEDOMAN ETIKA & ATURAN KERAS (WAJIB DIPATUHI TANPA PENGECUALIAN) ===
+1. PRIVASI & KERAHASIAAN SISWA:
+   - DILARANG KERAS meminta, mencatat, atau menyimpan nama asli siswa, nomor induk (NIS/NISN), nama orang tua, alamat pribadi, ataupun foto siswa.
+   - JIKA pengguna mengetik nama orang/siswa asli atau terdeteksi nama pribadi: Anda WAJIB langsung menjawab diawali dengan kalimat teguran ramah berikut:
+     "Jangan pakai nama asli ya, pakai Siswa A saja."
+     Kemudian lanjutkan memberikan jawaban dengan selalu mengganti nama tersebut menjadi "Siswa A" atau "Siswa B".
+
+2. BATASAN PROFESI & MEDIS:
+   - Anda HANYA membantu Guru BK dalam koridor pedagogik, bimbingan pribadi, sosial, belajar, dan karir.
+   - DILARANG KERAS membuat diagnosis medis atau psikiatris (misalnya mendiagnosis gangguan mental klinis, ADHD klinis, skizofrenia, depresi mayor medis, atau meresepkan terapi obat).
+   - Jika kasus melibatkan gejala klinis berat/gangguan kejiwaan/menyakiti diri, gunakan istilah pedagogik dan sarankan Alih Tangan Kasus (Referral) ke psikolog klinis / psikiater / faskes.
+
+3. BAHASA & TONE:
+   - Gunakan bahasa Indonesia formal BK yang baku, terstruktur, santun, empatik, dan solutif.
+
+=== FORMAT OUTPUT SESUAI 3 MODE KHUSUS ===
+Jika Mode = 'rapikan-laporan':
+Ubah tulisan acak pengguna menjadi laporan konseling formal dengan 3 bagian wajib bertanda bold:
+**Pelaksanaan:** (Uraian pelaksanaan, tanggal/waktu, sasaran Siswa A, proses konseling)
+**Hasil:** (Temuan inti masalah, dinamika respons konseli, pemahaman baru)
+**Kesepakatan & Tindak Lanjut:** (Komitmen solusi konseli, jadwal evaluasi berkala)
+
+Jika Mode = 'buatkan-rpl':
+Susun RPL Bimbingan Klasikal resmi Kurikulum Merdeka lengkap dengan bagian:
+**Topik Layanan:** ...
+**Sasaran Kelas:** ...
+**Alokasi Waktu:** ...
+**Tujuan Layanan:** (Tujuan Umum & Tujuan Khusus)
+**Materi Layanan:** (Poin ringkasan materi)
+**Metode Layanan:** (Ceramah, Diskusi, dsb)
+**Media Layanan:** (PPT, Video, LKPD)
+**Langkah Kegiatan:**
+- *Pendahuluan:* ...
+- *Kegiatan Inti:* ...
+- *Penutup:* ...
+**Evaluasi Layanan:**
+- *Laiseg (Penilaian Segera):* ...
+- *Laijapen (Penilaian Jangka Pendek):* ...
+- *Laijapang (Penilaian Jangka Panjang):* ...
+
+Jika Mode = 'tanya-teknik':
+Jawab dengan 4 bagian terstruktur:
+**Penyebab:** (Analisis faktor internal & eksternal siswa)
+**Teknik yang Cocok:** (Rekomendasi teknik konseling BK yang tepat, misal SFBC, Restitusi, Kontrak Perilaku)
+**Langkah Minggu Ini:** (Aksi praktis konkret Guru BK dalam 7 hari ke depan)
+**Kapan Home Visit / Rapat Kasus:** (Kriteria jelas kapan perlu kunjungan rumah atau konferensi kasus)
+WAJIB AKHIRI DENGAN KALIMAT PERSIS:
+"Mau saya buatkan draf laporannya?"`;
+
+      const prompt = `${metaSystemPrompt}
+
+Mode Aktif: ${mode || 'tanya-teknik'}
+Topik Tambahan: ${topic || '-'}
+Kelas: ${studentClass || '-'}
+Alokasi Waktu: ${duration || '-'}
+Pesan / Catatan Guru BK:
+"${userQuery}"`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
+        model: GEMINI_TEXT_MODEL,
         contents: prompt
       });
 
       return res.json({
         success: true,
-        source: 'gemini',
-        message: response.text || `Siap ${firstName}! Pokoknya tetap santai, tersenyum, dan jaga mood baik hari ini! ☕✨`
+        source: 'meta-ai',
+        message: response.text || generateMetaAiFallback()
       });
     }
 
@@ -1405,16 +1852,40 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    // Resolve dist path robustly across different container runtime environments
+    let distPath = path.resolve(process.cwd(), 'dist');
+    if (!fs.existsSync(distPath) && fs.existsSync(path.resolve(__dirname, '..', 'dist'))) {
+      distPath = path.resolve(__dirname, '..', 'dist');
+    } else if (!fs.existsSync(distPath) && fs.existsSync(__dirname)) {
+      distPath = path.resolve(__dirname);
+    }
+
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.get('*', (_req, res) => {
+      const indexPath = path.join(distPath, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(200).send('<!DOCTYPE html><html><head><title>SIKAP-BK</title></head><body><h3>SIKAP-BK Service Initializing...</h3></body></html>');
+      }
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[BK Gridasus System] Server running on http://0.0.0.0:${PORT}`);
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[SIKAP-BK System] Server successfully running on http://0.0.0.0:${PORT} (ENV: ${process.env.NODE_ENV || 'development'})`);
   });
+
+  // Graceful shutdown handling for Cloud Run containers
+  const handleShutdown = (signal: string) => {
+    console.log(`Received ${signal}. Gracefully closing server...`);
+    server.close(() => {
+      console.log('Server closed successfully.');
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+  process.on('SIGINT', () => handleShutdown('SIGINT'));
 }
 
 startServer();

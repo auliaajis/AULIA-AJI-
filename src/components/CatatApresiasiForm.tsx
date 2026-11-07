@@ -20,6 +20,7 @@ import {
   Users
 } from 'lucide-react';
 import { APPRECIATION_TEMPLATES } from '../data/appreciationTemplates';
+import { getSchoolConfig } from '../utils/schoolConfig';
 
 interface CatatApresiasiFormProps {
   students: Student[];
@@ -226,7 +227,7 @@ export default function CatatApresiasiForm({
               <Award className="w-3.5 h-3.5 text-emerald-600" />
               Modul Apresiasi & Prestasi Siswa
             </span>
-            <span className="text-[10px] text-gray-400 font-semibold">BK SMP N 2 Susukan</span>
+            <span className="text-[10px] text-gray-400 font-semibold">BK {getSchoolConfig().schoolName}</span>
           </div>
           <h2 className="text-xl sm:text-2xl font-black text-[#0b1c30]">
             Input & Log Apresiasi Karakter

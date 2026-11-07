@@ -33,6 +33,33 @@ let isSigningIn = false;
 // Memory cache for access token
 let cachedAccessToken: string | null = typeof window !== 'undefined' ? localStorage.getItem('bk_google_access_token') : null;
 
+/**
+ * Checks whether the stored Google access token has expired (standard Google token lifespan is 3600s / 1hr).
+ * We consider it expired after 55 minutes to prevent edge-case 401s during file uploads.
+ */
+export const isAccessTokenExpired = (): boolean => {
+  if (typeof window === 'undefined') return true;
+  const token = localStorage.getItem('bk_google_access_token');
+  if (!token) return true;
+  const acquired = localStorage.getItem('bk_google_access_token_acquired_at');
+  if (!acquired) return false; // if acquired timestamp is missing, let API request test it
+  const ageMs = Date.now() - parseInt(acquired, 10);
+  return ageMs > 55 * 60 * 1000; // 55 minutes
+};
+
+/**
+ * Cleanly clears expired Google OAuth tokens and dispatches an event for UI components.
+ */
+export const clearExpiredGoogleToken = () => {
+  cachedAccessToken = null;
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('bk_google_access_token');
+    localStorage.removeItem('bk_google_access_token_acquired_at');
+    window.dispatchEvent(new CustomEvent('bk_google_session_expired'));
+    window.dispatchEvent(new Event('storage'));
+  }
+};
+
 // Initialize Auth Listener & Process Redirect Results
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
@@ -46,6 +73,7 @@ export const initAuth = (
         if (credential?.accessToken) {
           cachedAccessToken = credential.accessToken;
           localStorage.setItem('bk_google_access_token', cachedAccessToken);
+          localStorage.setItem('bk_google_access_token_acquired_at', Date.now().toString());
           if (onAuthSuccess) onAuthSuccess(result.user, cachedAccessToken);
         }
       }
@@ -56,19 +84,21 @@ export const initAuth = (
 
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
-      if (!cachedAccessToken) {
+      if (isAccessTokenExpired()) {
+        clearExpiredGoogleToken();
+      } else if (!cachedAccessToken) {
         cachedAccessToken = localStorage.getItem('bk_google_access_token');
       }
+
       if (cachedAccessToken) {
         if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
       } else if (!isSigningIn) {
-        // If we have a user but no cached token, request login again to capture token
+        // If we have a user but no cached token, notify failure to allow clean re-authorization
         cachedAccessToken = null;
         if (onAuthFailure) onAuthFailure();
       }
     } else {
-      cachedAccessToken = null;
-      localStorage.removeItem('bk_google_access_token');
+      clearExpiredGoogleToken();
       if (onAuthFailure) onAuthFailure();
     }
   });
@@ -86,6 +116,9 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
 
     cachedAccessToken = credential.accessToken;
     localStorage.setItem('bk_google_access_token', cachedAccessToken);
+    localStorage.setItem('bk_google_access_token_acquired_at', Date.now().toString());
+    window.dispatchEvent(new CustomEvent('bk_google_session_restored', { detail: { token: cachedAccessToken, user: result.user } }));
+    window.dispatchEvent(new Event('storage'));
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: any) {
     console.error('Firebase Google Sign-In Error:', error);
@@ -109,6 +142,10 @@ export const googleSignInRedirect = async (): Promise<void> => {
 
 export const getAccessToken = async (): Promise<string | null> => {
   if (typeof window !== 'undefined') {
+    if (isAccessTokenExpired()) {
+      clearExpiredGoogleToken();
+      return null;
+    }
     cachedAccessToken = localStorage.getItem('bk_google_access_token');
   }
   return cachedAccessToken;
@@ -116,7 +153,6 @@ export const getAccessToken = async (): Promise<string | null> => {
 
 export const logout = async () => {
   await auth.signOut();
-  cachedAccessToken = null;
-  localStorage.removeItem('bk_google_access_token');
+  clearExpiredGoogleToken();
 };
 

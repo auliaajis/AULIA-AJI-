@@ -29,13 +29,24 @@ import {
   ThumbsUp,
   CheckCircle2,
   Printer,
-  Brain
+  Brain,
+  RotateCcw,
+  UserX,
+  Calendar,
+  Cloud
 } from 'lucide-react';
-import { downloadViolationPDF, downloadServicePDF, downloadStudentRecapPDF, getSchoolConfig } from '../utils/pdfGenerator';
+import { downloadViolationPDF, downloadServicePDF, downloadStudentRecapPDF, getSchoolConfig, finalizeAndSavePdf } from '../utils/pdfGenerator';
 import { APPRECIATION_TEMPLATES, AppreciationCategory, AppreciationOption } from '../data/appreciationTemplates';
 import { getNormalizedClassKey, defaultWaliKelasList } from '../utils/classNormalizer';
 import BehavioralDiagnosisModal from './BehavioralDiagnosisModal';
 import EmailNotificationModal from './EmailNotificationModal';
+import { initialStudents, initialViolations, initialServices, initialLogs } from '../data/mockData';
+import { CANONICAL_AULIA_STUDENTS } from '../data/canonicalStudents';
+import { saveSchoolData, setActiveSchoolId, getActiveSchoolId } from '../utils/schoolConfig';
+import { saveBulkToFirestore, syncPreviewDataToAuliaAccount } from '../utils/firestoreSync';
+import { clearCanonicalDeletedIds } from '../utils/deletionTracker';
+import { purgeDummyStudents, isDummyStudent } from '../utils/purgeDummyData';
+import PageHeaderBanner from './PageHeaderBanner';
 
 interface DataSiswaViewProps {
   students: Student[];
@@ -81,12 +92,35 @@ export default function DataSiswaView({
   setSearchQuery,
 }: DataSiswaViewProps) {
   // Filters & Sorting state
+  const [filterGrade, setFilterGrade] = useState<'all' | '7' | '8' | '9'>('all');
   const [filterClass, setFilterClass] = useState('Semua Kelas');
   const [filterGender, setFilterGender] = useState<'Semua' | 'L' | 'P'>('Semua');
   const [filterDisciplineStatus, setFilterDisciplineStatus] = useState<'semua' | 'prima' | 'pendampingan' | 'kritis' | 'apresiasi'>('semua');
   const [sortBy, setSortBy] = useState<'name-asc' | 'name-desc' | 'points-desc' | 'achievements-desc' | 'services-desc'>('name-asc');
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 8;
+
+  // Assigned classes from activeCounselor profile
+  const assignedClasses = useMemo(() => {
+    if (!activeCounselor || !activeCounselor.allowedClasses) return [];
+    const list = Array.isArray(activeCounselor.allowedClasses) ? activeCounselor.allowedClasses : [];
+    return list.map(c => c.trim().toUpperCase()).filter(c => c && c !== 'ALL' && c !== 'SEMUA');
+  }, [activeCounselor]);
+
+  // Filter scope: 'all' (semua kelas sekolah) vs 'assigned' (hanya kelas binaan saya)
+  const [filterScope, setFilterScope] = useState<'all' | 'assigned'>(() => {
+    const saved = localStorage.getItem('bk_filter_scope_pref');
+    if (saved === 'assigned') return 'assigned';
+    return 'all';
+  });
+
+  const handleToggleScope = (scope: 'all' | 'assigned') => {
+    setFilterScope(scope);
+    localStorage.setItem('bk_filter_scope_pref', scope);
+    setCurrentPage(1);
+  };
+
+  const hasDummyStudents = useMemo(() => students.some(isDummyStudent), [students]);
 
   // Virtual scroll & continuous scroll state (no pagination per request)
   const [isVirtualScroll, setIsVirtualScroll] = useState(true);
@@ -100,8 +134,58 @@ export default function DataSiswaView({
   // Modals state
   const [showAddModal, setShowAddModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [backupScanResults, setBackupScanResults] = useState<{
+    key: string;
+    label: string;
+    count: number;
+    sampleNames: string[];
+    students: Student[];
+  }[]>([]);
   const [importText, setImportText] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+
+  useEffect(() => {
+    if (!showRecoveryModal || typeof localStorage === 'undefined') return;
+    const results: {
+      key: string;
+      label: string;
+      count: number;
+      sampleNames: string[];
+      students: Student[];
+    }[] = [];
+
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        if (key.includes('student') || key.includes('siswa') || key.startsWith('bk_backup_') || key.includes('backup')) {
+          try {
+            const raw = localStorage.getItem(key);
+            if (!raw) continue;
+            let list: any[] = [];
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+              list = parsed;
+            } else if (parsed && Array.isArray(parsed.students)) {
+              list = parsed.students;
+            }
+            if (list.length > 0 && list[0] && (list[0].name || list[0].nis)) {
+              results.push({
+                key,
+                label: key.replace('bk_students_', 'ID Sekolah: ').replace('bk_students', 'Penyimpanan Utama'),
+                count: list.length,
+                sampleNames: list.slice(0, 3).map((s: any) => s.name || s.nis || 'Tanpa Nama'),
+                students: list
+              });
+            }
+          } catch (e) {}
+        }
+      }
+    } catch (err) {}
+
+    setBackupScanResults(results);
+  }, [showRecoveryModal]);
 
   const handleFileChange = (file: File) => {
     if (!file) return;
@@ -389,6 +473,38 @@ export default function DataSiswaView({
   const [editingAchievement, setEditingAchievement] = useState<StudentAchievement | null>(null);
   const [activeDossierTab, setActiveDossierTab] = useState<'riwayat' | 'apresiasi' | 'rekomendasi'>('riwayat');
 
+  // Date range filter states for student dossier modal
+  const [dossierStartDate, setDossierStartDate] = useState('');
+  const [dossierEndDate, setDossierEndDate] = useState('');
+
+  // Sync to Aulia Account state & handler
+  const [isSyncingAulia, setIsSyncingAulia] = useState(false);
+  const handleSyncToAulia = async () => {
+    setIsSyncingAulia(true);
+    try {
+      const res = await syncPreviewDataToAuliaAccount();
+      if (res.success) {
+        alert(
+          `🎉 SUKSES SINKRONISASI KE AKUN CLOUD AULIA AJI SASONGKO!\n\n` +
+          `• Siswa: ${res.counts.students} siswa (SMP N 2 Susukan)\n` +
+          `• Catatan Pelanggaran: ${res.counts.violations} data\n` +
+          `• Sesi Konseling BK: ${res.counts.services} data\n` +
+          `• Kunjungan Rumah: ${res.counts.homeVisits} data\n` +
+          `• Presensi/Absensi: ${res.counts.attendance} data\n` +
+          `• Akun Guru BK: ${res.counts.counselors} akun\n\n` +
+          `ID Sekolah: sch_20320123\nAkun Guru: auliasasongko12@guru.smp.belajar.id\n\n` +
+          `Kini saat Anda login dari peramban atau perangkat manapun via web, seluruh data preview ini akan selalu tampil utuh dan tersimpan di database Cloud.`
+        );
+      } else {
+        alert(`Sinkronisasi: ${res.error || 'Gagal sinkronisasi data'}`);
+      }
+    } catch (err: any) {
+      alert(`Gagal sinkronisasi data: ${err?.message || err}`);
+    } finally {
+      setIsSyncingAulia(false);
+    }
+  };
+
   // AI Gemini Behavioral Diagnosis & Email Notification Modals
   const [diagnosisStudent, setDiagnosisStudent] = useState<Student | null>(null);
   const [emailDraftData, setEmailDraftData] = useState<any | null>(null);
@@ -438,6 +554,8 @@ export default function DataSiswaView({
   useEffect(() => {
     if (showDossierModal) {
       setActiveDossierTab('riwayat');
+      setDossierStartDate('');
+      setDossierEndDate('');
       // Reset form too
       setAchName('');
       setAchPoints(10);
@@ -596,10 +714,31 @@ export default function DataSiswaView({
     return students.find((s) => s.id === showDossierModal.id) || showDossierModal;
   }, [students, showDossierModal]);
 
-  const studentViolations = useMemo(() => {
+  const allStudentViolations = useMemo(() => {
     if (!currentStudent) return [];
     return violations.filter((v) => v.studentId === currentStudent.id);
   }, [currentStudent, violations]);
+
+  const studentViolations = useMemo(() => {
+    if (!currentStudent) return [];
+    return allStudentViolations.filter((v) => {
+      if (!v) return false;
+      const rawDate = String(v.date || '').trim();
+      let isoDate = '';
+      if (/^\d{4}-\d{2}-\d{2}/.test(rawDate)) {
+        isoDate = rawDate.slice(0, 10);
+      } else {
+        const parsed = Date.parse(rawDate);
+        if (!isNaN(parsed)) {
+          isoDate = new Date(parsed).toISOString().slice(0, 10);
+        }
+      }
+
+      if (dossierStartDate && isoDate && isoDate < dossierStartDate) return false;
+      if (dossierEndDate && isoDate && isoDate > dossierEndDate) return false;
+      return true;
+    });
+  }, [currentStudent, allStudentViolations, dossierStartDate, dossierEndDate]);
 
   const studentServices = useMemo(() => {
     if (!currentStudent) return [];
@@ -662,7 +801,14 @@ export default function DataSiswaView({
   // Dynamic lists of unique classes represented in current student database
   const classesList = useMemo(() => {
     const set = new Set(students.map((s) => s.class));
-    return ['Semua Kelas', ...Array.from(set)].sort();
+    const sortedRombels = Array.from(set).filter(Boolean).sort();
+    return [
+      'Semua Kelas',
+      'Semua Kelas 8 (8A - 8G)',
+      'Semua Kelas 7 (7A - 7F)',
+      'Semua Kelas 9 (9A - 9G)',
+      ...sortedRombels
+    ];
   }, [students]);
 
   // Top Summary Statistics
@@ -673,10 +819,18 @@ export default function DataSiswaView({
     let pendampinganCount = 0;
     let kritisCount = 0;
     let berprestasiCount = 0;
+    let kelas7Count = 0;
+    let kelas8Count = 0;
+    let kelas9Count = 0;
 
     students.forEach((s) => {
       if (s.gender === 'L') totalL++;
       if (s.gender === 'P') totalP++;
+
+      const cls = String(s.class || '').toLowerCase();
+      if (cls.includes('7')) kelas7Count++;
+      else if (cls.includes('8')) kelas8Count++;
+      else if (cls.includes('9')) kelas9Count++;
 
       const rewardPoints = s.achievementPoints || 0;
       const netPoints = Math.max(0, s.violationPoints - rewardPoints);
@@ -700,6 +854,9 @@ export default function DataSiswaView({
       pendampinganCount,
       kritisCount,
       berprestasiCount,
+      kelas7Count,
+      kelas8Count,
+      kelas9Count,
     };
   }, [students]);
 
@@ -715,9 +872,40 @@ export default function DataSiswaView({
         const sName = String(student.name || '').toLowerCase();
         const sNis = String(student.nis || '').toLowerCase();
         const sClass = String(student.class || '').toLowerCase();
+        const sClassClean = String(student.class || '').replace(/kelas\s*/i, '').trim().toUpperCase();
+
+        // Filter Scope Check: Filter only assigned classes if active and configured
+        if (filterScope === 'assigned' && assignedClasses.length > 0) {
+          const isAssigned = assignedClasses.some(ac => {
+            const cleanAc = ac.replace(/kelas\s*/i, '').trim().toUpperCase();
+            return sClassClean === cleanAc || (cleanAc.length === 1 && sClassClean.startsWith(cleanAc));
+          });
+          if (!isAssigned) return false;
+        }
+
+        // Grade Tab Filter Check ('all' | '7' | '8' | '9')
+        if (filterGrade !== 'all') {
+          if (!sClassClean.startsWith(filterGrade)) {
+            return false;
+          }
+        }
 
         const matchSearch = !q || sName.includes(q) || sNis.includes(q) || sClass.includes(q);
-        const matchClass = filterClass === 'Semua Kelas' || student.class === filterClass;
+
+        // Class Selection Filter Check
+        let matchClass = true;
+        if (filterClass !== 'Semua Kelas') {
+          if (filterClass === 'Semua Kelas 8 (8A - 8G)' || filterClass === 'Kelas 8') {
+            matchClass = sClassClean.startsWith('8');
+          } else if (filterClass === 'Semua Kelas 7 (7A - 7F)' || filterClass === 'Kelas 7') {
+            matchClass = sClassClean.startsWith('7');
+          } else if (filterClass === 'Semua Kelas 9 (9A - 9G)' || filterClass === 'Kelas 9') {
+            matchClass = sClassClean.startsWith('9');
+          } else {
+            matchClass = student.class === filterClass;
+          }
+        }
+
         const matchGender = filterGender === 'Semua' || student.gender === filterGender;
 
         const rewardPoints = student.achievementPoints || 0;
@@ -747,7 +935,7 @@ export default function DataSiswaView({
         if (sortBy === 'services-desc') return b.bkServicesCount - a.bkServicesCount;
         return 0;
       });
-  }, [students, searchQuery, filterClass, filterGender, filterDisciplineStatus, sortBy]);
+  }, [students, searchQuery, filterGrade, filterClass, filterGender, filterDisciplineStatus, sortBy, filterScope, assignedClasses]);
 
   // Handle printing class recap PDF
   const handlePrintClassRecap = () => {
@@ -852,7 +1040,11 @@ export default function DataSiswaView({
     doc.setFont('Helvetica', 'normal');
     doc.text(`NIP. ${activeCounselor.nip || '-'}`, 220, currentY + 26);
 
-    doc.save(`Rekapitulasi_BK_${filterClass.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`);
+    const pdfFilename = `Rekapitulasi_BK_${filterClass.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`;
+    finalizeAndSavePdf(doc, pdfFilename, {
+      category: 'rekap',
+      successToastMessage: 'Rekapitulasi BK berhasil diunduh & tersimpan otomatis di Google Drive!',
+    });
   };
 
   // Pagination bounds
@@ -910,8 +1102,96 @@ export default function DataSiswaView({
     alert('Siswa berhasil ditambahkan ke database!');
   };
 
+  const handleRestoreCanonicalStudents = () => {
+    clearCanonicalDeletedIds();
+    setActiveSchoolId('sch_20320123');
+    saveSchoolData('bk_students', CANONICAL_AULIA_STUDENTS, 'sch_20320123');
+    saveSchoolData('bk_violations', initialViolations, 'sch_20320123');
+    saveSchoolData('bk_services', initialServices, 'sch_20320123');
+    saveSchoolData('bk_logs', initialLogs, 'sch_20320123');
+    saveBulkToFirestore('bk_students', CANONICAL_AULIA_STUDENTS, 'sch_20320123').catch(() => {});
+    
+    // Broadcast to App state
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_students', data: CANONICAL_AULIA_STUDENTS, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_violations', data: initialViolations, schoolId: 'sch_20320123' }
+    }));
+    window.dispatchEvent(new Event('storage'));
+    
+    setFilterGrade('all');
+    setFilterClass('Semua Kelas');
+    setCurrentPage(1);
+
+    alert('🎉 Contoh data 194 siswa Kelas 8 berhasil dimuat.');
+  };
+
+  const [isPurgingDummy, setIsPurgingDummy] = useState(false);
+
+  const handlePurgeDummyStudents = async () => {
+    if (
+      !confirm(
+        'Apakah Anda yakin ingin MENGHAPUS SEMUA DATA SISWA DUMMY?\n\nSeluruh data siswa contoh/dummy bawaan akan dibersihkan secara permanen dari browser dan Cloud Database. Data siswa asli yang Anda input/impor akan tetap dipertahankan.'
+      )
+    ) {
+      return;
+    }
+    setIsPurgingDummy(true);
+    try {
+      const res = await purgeDummyStudents();
+      if (res.totalPurged > 0) {
+        alert(`SUKSES! Berhasil menghapus ${res.totalPurged} data siswa dummy.\nSisa siswa di database: ${res.remainingCount} siswa.`);
+      } else {
+        alert('Database siswa sudah bersih. Tidak ada data siswa dummy yang ditemukan.');
+      }
+    } catch (e) {
+      alert('Gagal membersihkan data siswa dummy: ' + e);
+    } finally {
+      setIsPurgingDummy(false);
+    }
+  };
+
+  const handleApplyRecoveredStudents = (recoveredList: Student[], sourceName: string) => {
+    const sId = getActiveSchoolId();
+    localStorage.removeItem(`bk_cleared_${sId}`);
+    clearCanonicalDeletedIds();
+
+    saveSchoolData('bk_students', recoveredList, sId);
+    saveBulkToFirestore('bk_students', recoveredList, sId).catch(() => {});
+
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+      detail: { key: 'bk_students', data: recoveredList, schoolId: sId }
+    }));
+    window.dispatchEvent(new Event('storage'));
+
+    setShowRecoveryModal(false);
+    alert(`🎉 Berhasil memulihkan ${recoveredList.length} data siswa dari "${sourceName}" ke database Anda!`);
+  };
+
+  const handleJSONBackupUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const content = event.target?.result as string;
+        const parsed = JSON.parse(content);
+        const stList: Student[] = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.students) ? parsed.students : []);
+        if (stList.length === 0) {
+          alert('Format berkas cadangan tidak sesuai atau tidak berisi data siswa.');
+          return;
+        }
+        handleApplyRecoveredStudents(stList, file.name);
+      } catch (err) {
+        alert('Gagal membaca berkas cadangan: ' + (err as Error).message);
+      }
+    };
+    reader.readAsText(file);
+  };
+
   return (
-    <div className="space-y-8 animate-in fade-in duration-300">
+    <div className="space-y-8 animate-in fade-in duration-300 pb-[100px]">
       {/* Dossier Student detail view modal overlay */}
       {showDossierModal && currentStudent && (
         <div className="fixed inset-0 bg-[#0b1c30]/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -1222,12 +1502,117 @@ export default function DataSiswaView({
             {/* Riwayat Pelanggaran & Layanan List */}
             <div className="mb-6 pt-4 border-t border-[#bcc9c6]/20 space-y-4">
               <div>
-                <h4 className="text-xs font-bold text-[#0b1c30] uppercase tracking-wider mb-2 flex items-center gap-1.5">
-                  <AlertTriangle className="w-4 h-4 text-[#ba1a1a]" />
-                  Riwayat Pembinaan Perilaku ({studentViolations.length})
-                </h4>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2.5">
+                  <h4 className="text-xs font-bold text-[#0b1c30] uppercase tracking-wider flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-[#ba1a1a]" />
+                    <span>
+                      Riwayat Pembinaan Perilaku ({studentViolations.length}
+                      {allStudentViolations.length !== studentViolations.length ? ` dari ${allStudentViolations.length}` : ''})
+                    </span>
+                  </h4>
+                  {(dossierStartDate || dossierEndDate) && (
+                    <span className="text-[10px] font-bold text-[#00685f] bg-[#00685f]/10 px-2 py-0.5 rounded-full self-start">
+                      Filter Periode Aktif
+                    </span>
+                  )}
+                </div>
+
+                {/* Date-Range Filter Controls */}
+                <div className="mb-3 p-2.5 bg-[#f8faf9] rounded-xl border border-[#bcc9c6]/30 space-y-2 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-extrabold text-[#00685f] text-[10px] uppercase flex items-center gap-1">
+                        <Calendar className="w-3.5 h-3.5" />
+                        <span>Filter Tanggal:</span>
+                      </span>
+                      <div className="flex items-center gap-1 bg-white border border-[#bcc9c6]/50 rounded-lg px-2 py-0.5 shadow-2xs">
+                        <span className="text-[9px] font-bold text-gray-400 uppercase">Dari:</span>
+                        <input
+                          type="date"
+                          value={dossierStartDate}
+                          onChange={(e) => setDossierStartDate(e.target.value)}
+                          className="bg-transparent text-[11px] font-bold text-[#0b1c30] focus:outline-none cursor-pointer"
+                        />
+                      </div>
+                      <span className="text-gray-400 text-[10px] font-bold">-</span>
+                      <div className="flex items-center gap-1 bg-white border border-[#bcc9c6]/50 rounded-lg px-2 py-0.5 shadow-2xs">
+                        <span className="text-[9px] font-bold text-gray-400 uppercase">s/d:</span>
+                        <input
+                          type="date"
+                          value={dossierEndDate}
+                          onChange={(e) => setDossierEndDate(e.target.value)}
+                          className="bg-transparent text-[11px] font-bold text-[#0b1c30] focus:outline-none cursor-pointer"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Quick Presets */}
+                    <div className="flex flex-wrap items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const today = new Date().toISOString().slice(0, 10);
+                          setDossierStartDate(today);
+                          setDossierEndDate(today);
+                        }}
+                        className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
+                      >
+                        Hari Ini
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const d = new Date();
+                          d.setDate(d.getDate() - 7);
+                          setDossierStartDate(d.toISOString().slice(0, 10));
+                          setDossierEndDate(new Date().toISOString().slice(0, 10));
+                        }}
+                        className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
+                      >
+                        7 Hari
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const d = new Date();
+                          d.setDate(d.getDate() - 30);
+                          setDossierStartDate(d.toISOString().slice(0, 10));
+                          setDossierEndDate(new Date().toISOString().slice(0, 10));
+                        }}
+                        className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
+                      >
+                        30 Hari
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const now = new Date();
+                          const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+                          setDossierStartDate(firstDay);
+                          setDossierEndDate(new Date().toISOString().slice(0, 10));
+                        }}
+                        className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
+                      >
+                        Bulan Ini
+                      </button>
+                      {(dossierStartDate || dossierEndDate) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDossierStartDate('');
+                            setDossierEndDate('');
+                          }}
+                          className="px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 transition-all cursor-pointer shadow-2xs"
+                        >
+                          Reset Tanggal ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
                 {studentViolations.length > 0 ? (
-                  <div className="space-y-2 max-h-32 overflow-y-auto pr-1">
+                  <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
                     {studentViolations.map((v) => (
                       <div key={v.id} className="bg-red-50/50 border border-[#ba1a1a]/15 rounded-xl p-2.5 flex items-center justify-between gap-3 text-xs">
                         <div className="flex-1 min-w-0">
@@ -1264,7 +1649,11 @@ export default function DataSiswaView({
                     ))}
                   </div>
                 ) : (
-                  <p className="text-[10px] text-gray-400 font-medium italic bg-gray-50 p-2.5 rounded-xl text-center">Siswa ini tidak memiliki catatan pembinaan perilaku khusus.</p>
+                  <p className="text-[10px] text-gray-400 font-medium italic bg-gray-50 p-2.5 rounded-xl text-center">
+                    {allStudentViolations.length > 0 && (dossierStartDate || dossierEndDate)
+                      ? 'Tidak ada catatan pelanggaran pada rentang tanggal yang dipilih.'
+                      : 'Siswa ini tidak memiliki catatan pembinaan perilaku khusus.'}
+                  </p>
                 )}
               </div>
 
@@ -1950,71 +2339,282 @@ export default function DataSiswaView({
         </div>
       )}
 
-      {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h2 className="text-2xl font-extrabold text-[#0b1c30] tracking-tight flex items-center gap-2">
-            <span>Data Siswa</span>
-            <span className="text-xs bg-[#00685f]/10 text-[#00685f] px-2.5 py-1 rounded-full font-bold">
-              {students.length} Terdata
-            </span>
-          </h2>
-          <p className="text-sm text-[#3d4947]/70 font-semibold mt-0.5">
-            Manajemen data profil, pelaporan insiden, dan rekam jejak bimbingan siswa.
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2 self-start">
-          {onClearAllStudents && students.length > 0 && (
+      {/* Page Header Banner */}
+      <PageHeaderBanner
+        category="Siswa & Presensi"
+        title="Manajemen Data & Dossier Siswa"
+        description="Basis data induk siswa, pantauan poin disiplin, rekam apresiasi karakter, serta akses cepat dossier dan cetak profil."
+        icon={<UserCheck className="w-5 h-5" />}
+        badge={`${students.length} Siswa Terdata`}
+        workflowHint="1. Filter Kelas / Cari Siswa › 2. Klik Nama Siswa untuk Dossier & Tindakan › 3. Beri Apresiasi / Layanan BK / Cetak Profil"
+        stats={[
+          { label: 'Total Siswa', value: students.length },
+          { label: 'L / P', value: `${studentStats.totalL} / ${studentStats.totalP}` },
+          { label: 'Status Kritis', value: studentStats.kritisCount, color: studentStats.kritisCount > 0 ? 'text-rose-600' : 'text-emerald-700' },
+          { label: 'Kondisi Prima', value: studentStats.primaCount, color: 'text-[#00685f]' }
+        ]}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            {hasDummyStudents && (
+              <button
+                type="button"
+                disabled={isPurgingDummy}
+                onClick={handlePurgeDummyStudents}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 border border-amber-300 hover:bg-amber-50 text-amber-800 bg-amber-50/60 rounded-xl text-xs font-bold transition-all active:scale-97 cursor-pointer shadow-2xs"
+                title="Hapus seluruh data siswa dummy/contoh bawaan dari sistem"
+              >
+                <UserX className="w-4 h-4 text-amber-600" />
+                <span>{isPurgingDummy ? 'Menghapus...' : 'Hapus Siswa Dummy'}</span>
+              </button>
+            )}
+
+            {onClearAllStudents && students.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (
+                    confirm(
+                      'PENTING: Apakah Anda yakin ingin MENGOSONGKAN SELURUH data siswa?\n\nSemua data siswa (dan catatan terkait) akan dibersihkan dari sistem. Tindakan ini akan mengosongkan database menjadi 0 siswa sehingga Anda dapat menginput data siswa yang sebenarnya.'
+                    )
+                  ) {
+                    onClearAllStudents();
+                    alert('Database siswa berhasil dikosongkan (0 siswa). Sistem sekarang bersih dan siap diisi.');
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 border border-red-200 hover:bg-red-50 text-red-600 rounded-xl text-xs font-bold transition-all active:scale-97 cursor-pointer"
+                title="Kosongkan seluruh data siswa untuk mulai dari nol"
+              >
+                <Trash2 className="w-4 h-4 text-red-500" />
+                <span>Kosongkan Siswa</span>
+              </button>
+            )}
+
             <button
-              onClick={() => {
-                if (
-                  confirm(
-                    'PENTING: Apakah Anda yakin ingin menghapus SELURUH data siswa (termasuk semua data sampel, riwayat pelanggaran, dan konseling) untuk memulai database baru yang kosong?\n\nTindakan ini tidak dapat dibatalkan.'
-                  )
-                ) {
-                  onClearAllStudents();
-                  alert('Seluruh data berhasil dibersihkan! Database sekarang kosong dan siap diisi data siswa asli.');
-                }
-              }}
-              className="flex items-center gap-2 px-4 py-2.5 border border-red-200 hover:bg-red-50 text-red-600 rounded-xl text-xs font-bold transition-all active:scale-97 cursor-pointer"
-              title="Kosongkan Database Siswa"
+              type="button"
+              disabled={isSyncingAulia}
+              onClick={handleSyncToAulia}
+              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-gradient-to-r from-teal-700 to-[#00685f] hover:from-teal-800 hover:to-[#005049] text-white rounded-xl text-xs font-extrabold shadow-sm hover:shadow transition-all active:scale-97 cursor-pointer disabled:opacity-50"
+              title="Kirim dan sinkronkan seluruh data siswa & riwayat ke Akun Cloud Firestore Aulia Aji Sasongko (SMP N 2 Susukan)"
             >
-              <Trash2 className="w-4 h-4 text-red-500" />
-              <span>Kosongkan Database</span>
+              <Cloud className="w-4 h-4 text-teal-200" />
+              <span>{isSyncingAulia ? 'Menyinkronkan...' : 'Kirim ke Akun Aulia (Cloud)'}</span>
             </button>
-          )}
-          <button
-            onClick={() => setShowImportModal(true)}
-            className="flex items-center gap-2 px-4 py-2.5 border border-[#00685f]/30 hover:bg-[#00685f]/5 text-[#00685f] rounded-xl text-xs font-bold transition-all active:scale-97 cursor-pointer"
-          >
-            <FileSpreadsheet className="w-4 h-4" />
-            <span>Impor Excel/CSV</span>
-          </button>
-          <button
-            onClick={handlePrintClassRecap}
-            className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
-            title="Cetak rekapitulasi data disiplin seluruh siswa kelas terfilter ke dokumen PDF"
-          >
-            <Printer className="w-4 h-4" />
-            <span>Cetak Rekap Kelas (PDF)</span>
-          </button>
-          <button
-            onClick={handleDownloadCSV}
-            className="flex items-center gap-2 px-4 py-2.5 border border-indigo-200 hover:bg-indigo-50/60 text-indigo-600 rounded-xl text-xs font-bold transition-all active:scale-97 cursor-pointer"
-            title="Unduh data siswa terfilter beserta catatan pelanggarannya ke file CSV"
-          >
-            <Download className="w-4 h-4" />
-            <span>Unduh CSV</span>
-          </button>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="flex items-center gap-2 px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-bold transition-all shadow-md hover:shadow-lg active:scale-97 cursor-pointer"
-          >
-            <UserPlus className="w-4 h-4" />
-            <span>Tambah Siswa</span>
-          </button>
+
+            <button
+              type="button"
+              onClick={() => setShowRecoveryModal(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2.5 border border-[#00685f]/30 hover:bg-[#00685f]/5 text-[#00685f] rounded-xl text-xs font-bold transition-all active:scale-97 cursor-pointer"
+              title="Cari data siswa tersimpan di browser atau pulihkan dari file cadangan JSON"
+            >
+              <RotateCcw className="w-4 h-4 text-[#00685f]" />
+              <span>Cek Cadangan</span>
+            </button>
+
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="flex items-center gap-2 px-3.5 py-2.5 border border-[#00685f]/30 hover:bg-[#00685f]/5 text-[#00685f] rounded-xl text-xs font-bold transition-all active:scale-97 cursor-pointer"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Impor Excel/CSV</span>
+            </button>
+            <button
+              onClick={handlePrintClassRecap}
+              className="flex items-center gap-2 px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
+              title="Cetak rekapitulasi data disiplin seluruh siswa kelas terfilter ke dokumen PDF"
+            >
+              <Printer className="w-4 h-4" />
+              <span>Cetak Rekap (PDF)</span>
+            </button>
+            <button
+              onClick={handleDownloadCSV}
+              className="flex items-center gap-2 px-3.5 py-2.5 border border-indigo-200 hover:bg-indigo-50/60 text-indigo-600 rounded-xl text-xs font-bold transition-all active:scale-97 cursor-pointer"
+              title="Unduh data siswa terfilter beserta catatan pelanggarannya ke file CSV"
+            >
+              <Download className="w-4 h-4" />
+              <span>Unduh CSV</span>
+            </button>
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="flex items-center gap-2 px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-md hover:shadow-lg active:scale-97 cursor-pointer"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>Tambah Siswa</span>
+            </button>
+          </div>
+        }
+      />
+
+      {/* Clean Empty State Banner if 0 students */}
+      {students.length === 0 && (
+        <div className="p-5 bg-teal-50/70 border border-teal-200 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-2xs animate-in fade-in duration-200">
+          <div className="flex items-center gap-3.5">
+            <div className="w-11 h-11 rounded-xl bg-[#00685f] text-white flex items-center justify-center font-black text-sm shrink-0 shadow-xs">
+              0
+            </div>
+            <div>
+              <h4 className="text-sm font-extrabold text-[#0b1c30]">
+                Database Siswa Bersih (0 Siswa Terdata)
+              </h4>
+              <p className="text-xs text-gray-600 font-medium mt-0.5 leading-relaxed">
+                Database siswa saat ini bersih/kosong dan siap diisi. Silakan tambahkan siswa baru satu per satu, impor data Excel/CSV, atau gunakan tombol Cek Cadangan jika data lama Anda tersimpan di berkas cadangan.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowAddModal(true)}
+              className="px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-bold rounded-xl transition-all shadow-md active:scale-97 cursor-pointer flex items-center gap-2"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>Tambah Siswa Baru</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowImportModal(true)}
+              className="px-4 py-2.5 border border-[#00685f]/30 hover:bg-[#00685f]/5 text-[#00685f] text-xs font-bold rounded-xl transition-all active:scale-97 cursor-pointer flex items-center gap-2"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Impor Excel / CSV</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowRecoveryModal(true)}
+              className="px-4 py-2.5 border border-teal-300 hover:bg-teal-100/50 text-[#00685f] text-xs font-bold rounded-xl transition-all active:scale-97 cursor-pointer flex items-center gap-2"
+            >
+              <RotateCcw className="w-4 h-4" />
+              <span>Cek Cadangan</span>
+            </button>
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* Recovery & Backup Inspection Modal */}
+      {showRecoveryModal && (
+        <div className="fixed inset-0 bg-[#0b1c30]/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto p-6 shadow-2xl relative border border-[#bcc9c6]/40 animate-in zoom-in-95 duration-200 space-y-5">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-teal-50 text-[#00685f] rounded-xl">
+                  <RotateCcw className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-[#0b1c30]">
+                    Pemeriksa & Pemulihan Data Siswa
+                  </h3>
+                  <p className="text-xs text-gray-500 font-medium">
+                    Cari arsip data yang tersimpan di browser ini atau pulihkan dari file cadangan.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRecoveryModal(false)}
+                className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Bagian 1: Data Ditemukan di Penyimpanan Browser */}
+            <div className="space-y-3">
+              <h4 className="text-xs font-extrabold uppercase tracking-wider text-gray-500">
+                1. Data Siswa Tersimpan di Penyimpanan Browser Ini
+              </h4>
+
+              {backupScanResults.length > 0 ? (
+                <div className="space-y-2.5 max-h-48 overflow-y-auto pr-1">
+                  {backupScanResults.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="p-3 bg-gray-50 hover:bg-teal-50/40 rounded-xl border border-gray-200 hover:border-teal-300 transition-all flex items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-xs text-[#0b1c30] truncate">{item.label}</span>
+                          <span className="text-[10px] bg-teal-100 text-teal-800 px-2 py-0.5 rounded-full font-bold shrink-0">
+                            {item.count} Siswa
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-gray-500 truncate mt-0.5">
+                          Contoh: {item.sampleNames.join(', ')}...
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleApplyRecoveredStudents(item.students, item.label)}
+                        className="px-3 py-1.5 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-bold rounded-lg shrink-0 transition-all cursor-pointer shadow-2xs active:scale-97"
+                      >
+                        Pulihkan Data Ini
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-3.5 bg-gray-50 rounded-xl border border-dashed border-gray-300 text-center space-y-1">
+                  <p className="text-xs font-semibold text-gray-600">
+                    Tidak ditemukan cadangan siswa lain di cache peramban ini.
+                  </p>
+                  <p className="text-[11px] text-gray-400">
+                    Jika data sebelumnya dimasukkan di browser/perangkat lain, silakan gunakan fitur unggah file cadangan di bawah.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Bagian 2: Unggah File Cadangan */}
+            <div className="space-y-3 pt-3 border-t border-gray-100">
+              <h4 className="text-xs font-extrabold uppercase tracking-wider text-gray-500">
+                2. Unggah File Cadangan (.JSON atau .CSV)
+              </h4>
+              <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-teal-300 hover:border-[#00685f] bg-teal-50/30 hover:bg-teal-50/60 rounded-xl cursor-pointer transition-all">
+                <Upload className="w-6 h-6 text-[#00685f] mb-1.5" />
+                <span className="text-xs font-bold text-[#0b1c30]">Pilih File Cadangan dari Komputer / HP</span>
+                <span className="text-[10px] text-gray-500 mt-0.5">Mendukung file cadangan SIKAP-BK (.json) atau spreadsheet (.csv)</span>
+                <input
+                  type="file"
+                  accept=".json,.csv"
+                  onChange={handleJSONBackupUpload}
+                  className="hidden"
+                />
+              </label>
+            </div>
+
+            {/* Bagian 3: Contoh Data Dummy */}
+            <div className="space-y-2 pt-3 border-t border-gray-100">
+              <h4 className="text-xs font-extrabold uppercase tracking-wider text-gray-500">
+                3. Muat Data Contoh / Demo (Opsional)
+              </h4>
+              <div className="p-3 bg-amber-50/50 rounded-xl border border-amber-200 flex items-center justify-between gap-3">
+                <div className="text-xs text-amber-900">
+                  <p className="font-bold">Contoh 194 Siswa SMP N 2 Susukan</p>
+                  <p className="text-[11px] text-amber-700">Gunakan hanya untuk kebutuhan simulasi atau pelatihan fitur.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleRestoreCanonicalStudents();
+                    setShowRecoveryModal(false);
+                  }}
+                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg shrink-0 transition-all cursor-pointer shadow-2xs active:scale-97"
+                >
+                  Muat Contoh
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowRecoveryModal(false)}
+                className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* KPI Stats Cards Summary Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
@@ -2092,6 +2692,130 @@ export default function DataSiswaView({
 
       {/* Filters & Control Panel */}
       <div className="bg-white p-4 rounded-2xl shadow-sm border border-[#bcc9c6]/30 space-y-3">
+        {/* Class Scope Selector & Notification Banner */}
+        {assignedClasses.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 bg-gradient-to-r from-teal-50 to-emerald-50 border border-teal-200/80 rounded-2xl">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-extrabold text-[#00685f] flex items-center gap-1.5">
+                <Filter className="w-3.5 h-3.5" />
+                <span>Filter Tampilan Kelas:</span>
+              </span>
+              <div className="flex bg-white rounded-xl p-0.5 border border-teal-200 shadow-2xs">
+                <button
+                  type="button"
+                  onClick={() => handleToggleScope('assigned')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    filterScope === 'assigned'
+                      ? 'bg-[#00685f] text-white shadow-xs'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  🎯 Kelas Binaan Saya ({assignedClasses.join(', ')})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleToggleScope('all')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    filterScope === 'all'
+                      ? 'bg-[#00685f] text-white shadow-xs'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  🌐 Semua Kelas Sekolah ({students.length} Siswa)
+                </button>
+              </div>
+            </div>
+
+            {filterScope === 'assigned' ? (
+              <span className="text-[11px] text-teal-800 font-semibold">
+                Menampilkan <strong>{filteredStudents.length}</strong> siswa dari kelas binaan Anda.
+              </span>
+            ) : (
+              <span className="text-[11px] text-gray-500 font-medium">
+                Menampilkan seluruh kelas di sekolah.
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Tingkat Kelas (Grade Level) Filter Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-[#f8f9ff] border border-[#bcc9c6]/30 rounded-2xl">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-black uppercase text-[#3d4947] tracking-wider px-2 flex items-center gap-1">
+              <BookOpen className="w-3.5 h-3.5 text-[#00685f]" />
+              <span>Tingkat:</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setFilterGrade('all');
+                setCurrentPage(1);
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                filterGrade === 'all'
+                  ? 'bg-[#00685f] text-white shadow-xs'
+                  : 'bg-white text-gray-700 hover:text-[#00685f] border border-gray-200'
+              }`}
+            >
+              Semua Tingkat ({studentStats.total})
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFilterGrade('7');
+                setCurrentPage(1);
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                filterGrade === '7'
+                  ? 'bg-[#00685f] text-white shadow-xs'
+                  : 'bg-white text-gray-700 hover:text-[#00685f] border border-gray-200'
+              }`}
+            >
+              Kelas 7 ({studentStats.kelas7Count} Siswa)
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFilterGrade('8');
+                setCurrentPage(1);
+              }}
+              className={`px-3.5 py-1.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
+                filterGrade === '8'
+                  ? 'bg-[#00685f] text-white shadow-xs ring-2 ring-[#00685f]/30'
+                  : 'bg-white text-teal-800 hover:text-[#00685f] border border-teal-300'
+              }`}
+            >
+              <span>⭐ Kelas 8 ({studentStats.kelas8Count}/194 Siswa)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFilterGrade('9');
+                setCurrentPage(1);
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                filterGrade === '9'
+                  ? 'bg-[#00685f] text-white shadow-xs'
+                  : 'bg-white text-gray-700 hover:text-[#00685f] border border-gray-200'
+              }`}
+            >
+              Kelas 9 ({studentStats.kelas9Count} Siswa)
+            </button>
+          </div>
+          {filterGrade !== 'all' && (
+            <button
+              type="button"
+              onClick={() => {
+                setFilterGrade('all');
+                setCurrentPage(1);
+              }}
+              className="text-xs font-bold text-[#ba1a1a] hover:underline px-2 cursor-pointer"
+            >
+              Tampilkan Semua Tingkat ✕
+            </button>
+          )}
+        </div>
+
         {/* Top Control Bar */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           {/* Search Box */}
@@ -2231,9 +2955,10 @@ export default function DataSiswaView({
               {filteredStudents.length} Siswa Ditemukan
             </motion.span>
 
-            {(filterClass !== 'Semua Kelas' || filterGender !== 'Semua' || filterDisciplineStatus !== 'semua' || searchQuery) && (
+            {(filterGrade !== 'all' || filterClass !== 'Semua Kelas' || filterGender !== 'Semua' || filterDisciplineStatus !== 'semua' || searchQuery) && (
               <button
                 onClick={() => {
+                  setFilterGrade('all');
                   setFilterClass('Semua Kelas');
                   setFilterGender('Semua');
                   setFilterDisciplineStatus('semua');
@@ -2360,7 +3085,7 @@ export default function DataSiswaView({
                             downloadStudentRecapPDF(student, sViolations, sServices);
                           }}
                           className="p-2 text-emerald-600 hover:bg-emerald-50 rounded-lg min-h-[44px] min-w-[44px] flex items-center justify-center"
-                          title="Rapor BK PDF"
+                          title="Unduh Rekap Perkembangan Siswa (PDF)"
                         >
                           <Download className="w-4 h-4" />
                         </button>
@@ -2597,7 +3322,7 @@ export default function DataSiswaView({
                                 downloadStudentRecapPDF(student, sViolations, sServices);
                               }}
                               className="p-1 text-emerald-600 hover:bg-emerald-50 rounded-md transition-colors cursor-pointer"
-                              title="Unduh Rekap Rapor BK PDF"
+                              title="Unduh Rekap Perkembangan Siswa (PDF)"
                             >
                               <Download className="w-3.5 h-3.5" />
                             </button>
@@ -3330,9 +4055,15 @@ export default function DataSiswaView({
                 {/* Print Stylesheet Injector */}
                 <style dangerouslySetInnerHTML={{ __html: `
                   @media print {
+                    @page {
+                      size: A4 portrait;
+                      margin: 12mm 12mm 12mm 12mm;
+                    }
                     body {
-                      background: white !important;
-                      color: black !important;
+                      background: #ffffff !important;
+                      color: #000000 !important;
+                      -webkit-print-color-adjust: exact !important;
+                      print-color-adjust: exact !important;
                     }
                     /* Hide everything except root wrapper */
                     body > *:not(#root) {
@@ -3360,8 +4091,9 @@ export default function DataSiswaView({
                     #print-profile-area {
                       display: block !important;
                       width: 100% !important;
+                      max-width: 100% !important;
                       padding: 0px !important;
-                      margin: 0px !important;
+                      margin: 0px auto !important;
                       border: none !important;
                       box-shadow: none !important;
                       position: static !important;
@@ -3370,15 +4102,23 @@ export default function DataSiswaView({
                     table {
                       border-collapse: collapse !important;
                       width: 100% !important;
+                      page-break-inside: auto !important;
+                      break-inside: auto !important;
+                    }
+                    tr {
+                      page-break-inside: avoid !important;
+                      break-inside: avoid !important;
                     }
                     th, td {
                       border: 1px solid #000000 !important;
-                      padding: 6px 8px !important;
+                      padding: 5px 7px !important;
                       text-align: left !important;
                       color: #000000 !important;
+                      font-size: 8.5pt !important;
+                      word-break: break-word !important;
                     }
                     th {
-                      background-color: #f0f0f0 !important;
+                      background-color: #f1f5f9 !important;
                       font-weight: bold !important;
                     }
                     /* Standard print utilities */
@@ -3386,7 +4126,7 @@ export default function DataSiswaView({
                     .grid { display: grid !important; }
                     .justify-between { justify-content: space-between !important; }
                     .items-center { align-items: center !important; }
-                    .gap-4 { gap: 1rem !important; }
+                    .gap-4 { gap: 0.75rem !important; }
                     .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
                   }
                 `}} />

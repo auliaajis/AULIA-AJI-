@@ -37,7 +37,9 @@ import {
   Briefcase,
   Phone,
   UserCheck,
-  ChevronDown
+  ChevronDown,
+  ChevronUp,
+  Settings
 } from 'lucide-react';
 import {
   downloadAgreementPDF,
@@ -49,7 +51,11 @@ import {
 import { fetchDisciplineFormAi, DisciplineFormType } from '../utils/geminiDisciplineAi';
 import { autoPushToJournal } from '../utils/journalAutoLink';
 import { registerDeletedId } from '../utils/deletionTracker';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore } from '../utils/firestoreSync';
+import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { DisciplineConfigModal } from './DisciplineConfigModal';
+import { getDisciplineConfig, DisciplineConfig } from '../utils/disciplineConfig';
+import { showToast } from '../utils/toast';
+import PageHeaderBanner from './PageHeaderBanner';
 
 interface PembinaanPendisiplinanViewProps {
   students: Student[];
@@ -66,6 +72,11 @@ export default function PembinaanPendisiplinanView({
 }: PembinaanPendisiplinanViewProps) {
   // 4 Core Tabs (Pemanggilan Ortu removed as it is already present in Layanan BK)
   const [activeTab, setActiveTab] = useState<'perjanjian' | 'kontrak' | 'jurnal-pembinaan' | 'komitmen-rtl'>('perjanjian');
+
+  // Discipline Configuration & UI State
+  const [disciplineConfig, setDisciplineConfig] = useState<DisciplineConfig>(() => getDisciplineConfig());
+  const [showConfigModal, setShowConfigModal] = useState<boolean>(false);
+  const [isRecommendationsExpanded, setIsRecommendationsExpanded] = useState<boolean>(false);
 
   // AI Generation State
   const [isAiGenerating, setIsAiGenerating] = useState<boolean>(false);
@@ -91,25 +102,21 @@ export default function PembinaanPendisiplinanView({
     return loadSchoolData('bk_komitmen_rtl_list', []);
   });
 
-  // LocalStorage & Firestore Realtime Persist
+  // LocalStorage Realtime Persist
   useEffect(() => {
     saveSchoolData('bk_surat_perjanjian_list', perjanjianList);
-    saveBulkToFirestore('bk_surat_perjanjian_list', perjanjianList);
   }, [perjanjianList]);
 
   useEffect(() => {
     saveSchoolData('bk_kontrak_perilaku_list', kontrakList);
-    saveBulkToFirestore('bk_kontrak_perilaku_list', kontrakList);
   }, [kontrakList]);
 
   useEffect(() => {
     saveSchoolData('bk_jurnal_pembinaan_disiplin_list', jurnalList);
-    saveBulkToFirestore('bk_jurnal_pembinaan_disiplin_list', jurnalList);
   }, [jurnalList]);
 
   useEffect(() => {
     saveSchoolData('bk_komitmen_rtl_list', komitmenList);
-    saveBulkToFirestore('bk_komitmen_rtl_list', komitmenList);
   }, [komitmenList]);
 
   // Realtime subscriber for remote changes
@@ -205,8 +212,8 @@ export default function PembinaanPendisiplinanView({
       const points = st.violationPoints || stViolations.reduce((acc, v) => acc + (v.pointsAdded || 0), 0);
       const knownParentName = parentNamesMap[st.id] || '';
 
-      const isAlpaEligible = alpaCount >= 1;
-      const isViolationEligible = violationCount > 0 || points > 0;
+      const isAlpaEligible = alpaCount >= (disciplineConfig.minAlpaCount || 1);
+      const isViolationEligible = violationCount > 0 || points >= (disciplineConfig.minViolationPoints || 1);
       const isRecommendedForPembinaan = isAlpaEligible || isViolationEligible;
 
       return {
@@ -222,7 +229,7 @@ export default function PembinaanPendisiplinanView({
         isRecommendedForPembinaan
       };
     });
-  }, [students, violations]);
+  }, [students, violations, disciplineConfig]);
 
   // Recommended students list
   const recommendedStudentsList = useMemo(() => {
@@ -261,9 +268,10 @@ export default function PembinaanPendisiplinanView({
       if (!studentSearchQuery.trim()) return true;
       const q = studentSearchQuery.toLowerCase().trim();
       return (
-        item.student.name.toLowerCase().includes(q) ||
-        item.student.class.toLowerCase().includes(q) ||
-        (item.student.nis && item.student.nis.toLowerCase().includes(q))
+        String(item.student?.name || '').toLowerCase().includes(q) ||
+        String(item.student?.class || '').toLowerCase().includes(q) ||
+        String(item.student?.nis ?? '').toLowerCase().includes(q) ||
+        String(item.student?.nisn ?? '').toLowerCase().includes(q)
       );
     });
   }, [studentDisciplineAnalytics, studentCategoryFilter, selectedClassFilter, studentSearchQuery]);
@@ -460,7 +468,7 @@ export default function PembinaanPendisiplinanView({
       });
 
       if (res.success && res.data) {
-        setAiActiveSource(res.source === 'gemini' ? 'Gemini 3.6 Flash AI Engine' : 'Sistem Cerdas Konseling BK');
+        setAiActiveSource(res.source === 'gemini' ? 'Gemini 3.8 Flash AI Engine' : 'Sistem Cerdas Konseling BK');
 
         if (targetFormType === 'perjanjian') {
           if (res.data.violationSummary) setViolationSummary(res.data.violationSummary);
@@ -494,7 +502,47 @@ export default function PembinaanPendisiplinanView({
     autoSyncDisciplineData(item, activeTab);
     setIsDropdownOpen(false);
     setStudentSearchQuery('');
+    showToast(`Data ${item.student.name} disinkronkan ke formulir!`, 'success');
+    if (disciplineConfig.autoScrollOnSelect) {
+      setTimeout(() => {
+        const el = document.getElementById('discipline-form-section');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
+    }
   };
+
+  const handleSwitchTab = (tab: typeof activeTab) => {
+    setActiveTab(tab);
+    const tabTitles: Record<string, string> = {
+      'perjanjian': 'Surat Perjanjian Siswa',
+      'kontrak': 'Kontrak Perilaku Siswa',
+      'jurnal-pembinaan': 'Jurnal Pembinaan BK',
+      'komitmen-rtl': 'Komitmen & RTL Siswa'
+    };
+    showToast(`Beralih ke: ${tabTitles[tab] || tab}`, 'info');
+    if (disciplineConfig.autoScrollOnSelect) {
+      setTimeout(() => {
+        const el = document.getElementById('discipline-form-section');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 120);
+    }
+  };
+
+  const currentActiveStudent = useMemo(() => {
+    if (activeTab === 'perjanjian') return currentSpAnalytics?.student;
+    if (activeTab === 'kontrak') return currentKpAnalytics?.student;
+    if (activeTab === 'jurnal-pembinaan') return currentJrnAnalytics?.student;
+    if (activeTab === 'komitmen-rtl') return currentRtlAnalytics?.student;
+    return null;
+  }, [activeTab, currentSpAnalytics, currentKpAnalytics, currentJrnAnalytics, currentRtlAnalytics]);
+
+  const currentActiveCount = useMemo(() => {
+    if (activeTab === 'perjanjian') return perjanjianList.length;
+    if (activeTab === 'kontrak') return kontrakList.length;
+    if (activeTab === 'jurnal-pembinaan') return jurnalList.length;
+    if (activeTab === 'komitmen-rtl') return komitmenList.length;
+    return 0;
+  }, [activeTab, perjanjianList.length, kontrakList.length, jurnalList.length, komitmenList.length]);
 
   // Submissions
   const handleSubmitPerjanjian = (e: React.FormEvent) => {
@@ -524,6 +572,7 @@ export default function PembinaanPendisiplinanView({
       createdAt: new Date().toISOString()
     };
     setPerjanjianList([newRecord, ...perjanjianList]);
+    saveToFirestore('bk_surat_perjanjian_list', newRecord);
     
     // Auto push to Jurnal Harian
     autoPushToJournal({
@@ -571,6 +620,7 @@ export default function PembinaanPendisiplinanView({
       createdAt: new Date().toISOString()
     };
     setKontrakList([newRecord, ...kontrakList]);
+    saveToFirestore('bk_kontrak_perilaku_list', newRecord);
 
     // Auto push to Jurnal Harian
     autoPushToJournal({
@@ -615,6 +665,7 @@ export default function PembinaanPendisiplinanView({
       createdAt: new Date().toISOString()
     };
     setJurnalList([newRecord, ...jurnalList]);
+    saveToFirestore('bk_jurnal_pembinaan_disiplin_list', newRecord);
 
     // Auto push to Jurnal Harian
     autoPushToJournal({
@@ -657,6 +708,7 @@ export default function PembinaanPendisiplinanView({
       createdAt: new Date().toISOString()
     };
     setKomitmenList([newRecord, ...komitmenList]);
+    saveToFirestore('bk_komitmen_rtl_list', newRecord);
 
     // Auto push to Jurnal Harian
     autoPushToJournal({
@@ -986,213 +1038,365 @@ export default function PembinaanPendisiplinanView({
 
   return (
     <div className="space-y-6">
-      {/* Top Banner Header */}
-      <div className="bg-[#0b1c30] text-white p-6 sm:p-8 rounded-2xl shadow-lg relative overflow-hidden border border-[#00685f]/30">
-        <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-5">
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <span className="bg-[#00685f] text-teal-100 text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider">
-                Instrumen Kedisiplinan BK Standards
-              </span>
-              <span className="text-xs text-teal-300 font-semibold">• Generasi AI Bantuan Otomatis</span>
+      {/* 1. Page Purpose & Workflow Header Banner */}
+      <PageHeaderBanner
+        category="Layanan & Bimbingan"
+        title="Pusat Instrumen Pembinaan Disiplin & Restitusi"
+        description="Penerbitan surat resmi pembinaan (Surat Perjanjian Siswa, Kontrak Perilaku, Jurnal Pembinaan BK, & Lembar Komitmen RTL) otomatis terhubung ke rekap absensi dan AI."
+        icon={<Gavel className="w-5 h-5" />}
+        badge="SMP Negeri 2 Susukan"
+        workflowHint="1. Pilih Tab Format Surat › 2. Pilih Siswa Siaga / Cari Nama Siswa › 3. Review Formulir / Bantuan AI › 4. Simpan & Unduh Dokumen PDF"
+        stats={[
+          { label: 'Siswa Siaga Pembinaan', value: `${recommendedStudentsList.length} Siswa`, color: recommendedStudentsList.length > 0 ? 'text-amber-700' : 'text-[#00685f]' },
+          { label: 'Total Arsip Surat', value: perjanjianList.length + kontrakList.length + jurnalList.length + komitmenList.length },
+          { label: 'Siswa Aktif di Form', value: currentActiveStudent ? currentActiveStudent.name.split(' ').slice(0, 2).join(' ') : 'Belum Dipilih', color: currentActiveStudent ? 'text-[#00685f]' : 'text-gray-400' }
+        ]}
+        actions={
+          <button
+            type="button"
+            onClick={() => setShowConfigModal(true)}
+            className="px-4 py-2.5 bg-gray-100 hover:bg-gray-200 text-[#0b1c30] rounded-xl text-xs font-bold transition-all flex items-center gap-2 border border-gray-300/80 cursor-pointer active:scale-97 shadow-2xs"
+            title="Atur ambang batas alpa, format nomor surat, dan template"
+          >
+            <Settings className="w-4 h-4 text-[#00685f]" />
+            <span>Konfigurasi Disiplin</span>
+          </button>
+        }
+      />
+
+      {/* 2. Primary Tab Switcher (Segmented pill container following user rules) */}
+      <div className="bg-gray-100 p-1.5 rounded-2xl border border-gray-200/80 shadow-2xs">
+        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+          <button
+            type="button"
+            onClick={() => handleSwitchTab('perjanjian')}
+            className={`flex-1 min-w-[150px] px-3.5 py-2.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center justify-center gap-2 ${
+              activeTab === 'perjanjian'
+                ? 'bg-[#00685f] text-white shadow-sm ring-1 ring-[#00685f]/30'
+                : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-white/60'
+            }`}
+          >
+            <FileText className="w-4 h-4 shrink-0" />
+            <span className="whitespace-nowrap">Surat Perjanjian</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+              activeTab === 'perjanjian' ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-700'
+            }`}>
+              {perjanjianList.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleSwitchTab('kontrak')}
+            className={`flex-1 min-w-[150px] px-3.5 py-2.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center justify-center gap-2 ${
+              activeTab === 'kontrak'
+                ? 'bg-[#00685f] text-white shadow-sm ring-1 ring-[#00685f]/30'
+                : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-white/60'
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4 shrink-0" />
+            <span className="whitespace-nowrap">Kontrak Perilaku</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+              activeTab === 'kontrak' ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-700'
+            }`}>
+              {kontrakList.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleSwitchTab('jurnal-pembinaan')}
+            className={`flex-1 min-w-[160px] px-3.5 py-2.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center justify-center gap-2 ${
+              activeTab === 'jurnal-pembinaan'
+                ? 'bg-[#00685f] text-white shadow-sm ring-1 ring-[#00685f]/30'
+                : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-white/60'
+            }`}
+          >
+            <BookOpen className="w-4 h-4 shrink-0" />
+            <span className="whitespace-nowrap">Jurnal Pembinaan BK</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+              activeTab === 'jurnal-pembinaan' ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-700'
+            }`}>
+              {jurnalList.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleSwitchTab('komitmen-rtl')}
+            className={`flex-1 min-w-[150px] px-3.5 py-2.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center justify-center gap-2 ${
+              activeTab === 'komitmen-rtl'
+                ? 'bg-[#00685f] text-white shadow-sm ring-1 ring-[#00685f]/30'
+                : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-white/60'
+            }`}
+          >
+            <Target className="w-4 h-4 shrink-0" />
+            <span className="whitespace-nowrap">Komitmen & RTL</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+              activeTab === 'komitmen-rtl' ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-700'
+            }`}>
+              {komitmenList.length}
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* 3. Real-Time Active Status Banner: Immediately visible confirmation */}
+      <div className="bg-[#e6f4f1] border border-[#00685f]/30 rounded-2xl p-4 sm:p-5 shadow-2xs">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-xl bg-[#00685f] text-white flex items-center justify-center font-black shadow-sm shrink-0">
+              {activeTab === 'perjanjian' && <FileText className="w-5 h-5" />}
+              {activeTab === 'kontrak' && <ShieldCheck className="w-5 h-5" />}
+              {activeTab === 'jurnal-pembinaan' && <BookOpen className="w-5 h-5" />}
+              {activeTab === 'komitmen-rtl' && <Target className="w-5 h-5" />}
             </div>
-            <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight flex items-center gap-2.5">
-              <Gavel className="w-6 h-6 text-[#00685f] shrink-0" />
-              <span>Pusat Form & Instrumen Pembinaan Disiplin Siswa BK</span>
-            </h1>
-            <p className="text-xs text-gray-300 font-medium mt-1 max-w-2xl leading-relaxed">
-              Formulir lengkap dan mendalam sesuai standar operasional Bimbingan & Konseling (Surat Perjanjian Siswa, Kontrak Perilaku, Jurnal Pembinaan BK, & Lembar Komitmen RTL) terintegrasi otomatis dengan AI.
-            </p>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-[#00685f] text-white">
+                  Fitur Aktif
+                </span>
+                <h2 className="text-sm sm:text-base font-extrabold text-[#0b1c30]">
+                  {activeTab === 'perjanjian' && 'Form Surat Perjanjian Pembinaan Siswa'}
+                  {activeTab === 'kontrak' && 'Form Kontrak Perilaku & Restitusi Siswa'}
+                  {activeTab === 'jurnal-pembinaan' && 'Jurnal Catatan Pembinaan Harian BK'}
+                  {activeTab === 'komitmen-rtl' && 'Lembar Komitmen & Rencana Tindak Lanjut'}
+                </h2>
+              </div>
+              <p className="text-xs text-[#3d4947] mt-1 font-semibold flex items-center gap-2 flex-wrap">
+                <span>Siswa Aktif:</span>
+                {currentActiveStudent ? (
+                  <span className="bg-white px-2.5 py-0.5 rounded-lg border border-[#00685f]/30 text-[#00685f] font-black inline-flex items-center gap-1.5 shadow-2xs">
+                    <UserCheck className="w-3.5 h-3.5" />
+                    <span>{currentActiveStudent.name} (Kelas {currentActiveStudent.class})</span>
+                  </span>
+                ) : (
+                  <span className="text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-lg border border-amber-200 font-bold">
+                    Belum ada siswa dipilih
+                  </span>
+                )}
+              </p>
+            </div>
           </div>
 
-          {/* Navigation Tab Switcher */}
-          <div className="flex flex-wrap bg-white/10 p-1.5 rounded-2xl border border-white/10 shrink-0 gap-1">
+          <div className="flex items-center gap-2 w-full sm:w-auto shrink-0 justify-end">
             <button
-              onClick={() => setActiveTab('perjanjian')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeTab === 'perjanjian'
-                  ? 'bg-[#00685f] text-white shadow-md'
-                  : 'text-gray-300 hover:text-white'
-              }`}
+              type="button"
+              onClick={() => {
+                document.getElementById('discipline-form-section')?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="flex-1 sm:flex-initial px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-extrabold rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-97"
             >
               <FileText className="w-3.5 h-3.5" />
-              <span>Surat Perjanjian ({perjanjianList.length})</span>
+              <span>Isi Form Ini ↓</span>
             </button>
-
             <button
-              onClick={() => setActiveTab('kontrak')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeTab === 'kontrak'
-                  ? 'bg-[#00685f] text-white shadow-md'
-                  : 'text-gray-300 hover:text-white'
-              }`}
+              type="button"
+              onClick={() => {
+                document.getElementById('discipline-history-section')?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="px-3.5 py-2 bg-white hover:bg-gray-50 text-[#0b1c30] text-xs font-bold rounded-xl border border-gray-300 shadow-2xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <ShieldCheck className="w-3.5 h-3.5" />
-              <span>Kontrak Perilaku ({kontrakList.length})</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('jurnal-pembinaan')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeTab === 'jurnal-pembinaan'
-                  ? 'bg-[#00685f] text-white shadow-md'
-                  : 'text-gray-300 hover:text-white'
-              }`}
-            >
-              <BookOpen className="w-3.5 h-3.5" />
-              <span>Jurnal Pembinaan BK ({jurnalList.length})</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('komitmen-rtl')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeTab === 'komitmen-rtl'
-                  ? 'bg-[#00685f] text-white shadow-md'
-                  : 'text-gray-300 hover:text-white'
-              }`}
-            >
-              <Target className="w-3.5 h-3.5" />
-              <span>Komitmen & RTL ({komitmenList.length})</span>
+              <span>Arsip ({currentActiveCount})</span>
             </button>
           </div>
         </div>
       </div>
 
-      {/* RECOMMENDED STUDENTS QUICK SYNC CARDS */}
-      <div className="bg-white p-5 sm:p-6 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-gray-100">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center font-black shrink-0">
-              <Sparkles className="w-5 h-5 text-amber-600 animate-pulse" />
+      {/* 4. Streamlined Rekomendasi Siswa: Collapsible & Quick 1-Tap Chips */}
+      <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center font-black shrink-0">
+              <Sparkles className="w-4 h-4 text-amber-600 animate-pulse" />
             </div>
             <div>
-              <h2 className="text-sm font-extrabold text-[#0b1c30] flex items-center gap-2">
-                <span>Rekomendasi Siswa Perlu Pembinaan Disiplin BK</span>
+              <h3 className="text-xs sm:text-sm font-extrabold text-[#0b1c30] flex items-center gap-2">
+                <span>Rekomendasi Siswa Perlu Pembinaan</span>
                 <span className="bg-amber-100 text-amber-800 text-[10px] font-black px-2 py-0.5 rounded-full">
                   {recommendedStudentsList.length} Siswa Terdeteksi
                 </span>
-              </h2>
+              </h3>
               <p className="text-[11px] text-gray-500 font-medium">
-                Sistem otomatis menyaring siswa yang memiliki catatan Alpa atau Poin Pelanggaran Restitusi
+                Siswa dengan Alpa ≥{disciplineConfig.minAlpaCount || 1}x atau Pelanggaran ≥{disciplineConfig.minViolationPoints || 1} poin
               </p>
             </div>
           </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsRecommendationsExpanded(!isRecommendationsExpanded)}
+              className="inline-flex items-center gap-1 text-xs font-bold text-[#00685f] hover:bg-[#e6f4f1] px-3 py-1.5 rounded-lg border border-[#00685f]/20 transition-all cursor-pointer"
+            >
+              <span>{isRecommendationsExpanded ? 'Tampilan Ringkas' : 'Lihat Semua Kartu'}</span>
+              {isRecommendationsExpanded ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+          </div>
         </div>
 
+        {/* Quick Horizontal Student Chips (Always visible, clean, doesn't push form down) */}
         {recommendedStudentsList.length === 0 ? (
-          <div className="p-4 bg-emerald-50/50 rounded-xl border border-emerald-200/60 text-xs text-emerald-800 font-bold flex items-center gap-2">
+          <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 text-xs text-emerald-800 font-bold flex items-center gap-2">
             <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>Seluruh siswa saat ini dalam kondisi kedisiplinan baik (bebas Alpa & catatan pelanggaran).</span>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {recommendedStudentsList.slice(0, 6).map((item) => {
-              let isCurrentSelected = false;
-              if (activeTab === 'perjanjian') isCurrentSelected = selectedStudentId === item.student.id;
-              else if (activeTab === 'kontrak') isCurrentSelected = kpStudentId === item.student.id;
-              else if (activeTab === 'jurnal-pembinaan') isCurrentSelected = jrnStudentId === item.student.id;
-              else if (activeTab === 'komitmen-rtl') isCurrentSelected = rtlStudentId === item.student.id;
-
-              return (
-                <div
-                  key={item.student.id}
-                  className={`p-3.5 rounded-xl border transition-all flex flex-col justify-between gap-2.5 ${
-                    isCurrentSelected
-                      ? 'bg-[#e6f4f1] border-[#00685f] shadow-2xs'
-                      : 'bg-[#f8faf9] border-[#bcc9c6]/30 hover:border-[#00685f]/50'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <h4 className="text-xs font-black text-[#0b1c30]">{item.student.name}</h4>
-                      <p className="text-[10px] text-gray-500 font-bold">
-                        Kelas {item.student.class} | NISN: {item.student.nis}
-                      </p>
-                    </div>
-                    {isCurrentSelected && (
-                      <span className="text-[9px] bg-[#00685f] text-white font-extrabold px-1.5 py-0.5 rounded">
-                        Terpilih
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {item.alpaCount > 0 && (
-                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 flex items-center gap-1">
-                        <AlertCircle className="w-3 h-3" />
-                        <span>Alpa: {item.alpaCount}x</span>
-                      </span>
-                    )}
-                    {item.points > 0 && (
-                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 flex items-center gap-1">
-                        <Gavel className="w-3 h-3" />
-                        <span>{item.points} Bobot Pelanggaran</span>
-                      </span>
-                    )}
-                  </div>
-
+          <div className="space-y-3">
+            {/* Quick 1-tap horizontal pills */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 pt-0.5 no-scrollbar">
+              <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider shrink-0 flex items-center gap-1">
+                Pilih Cepat:
+              </span>
+              {recommendedStudentsList.slice(0, 10).map((item) => {
+                const isSelected = currentActiveStudent?.id === item.student.id;
+                return (
                   <button
+                    key={item.student.id}
                     type="button"
                     onClick={() => handleSelectStudentOption(item)}
-                    className="w-full py-1.5 px-3 bg-[#00685f] hover:bg-[#005049] text-white text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-98 mt-1"
+                    className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer border ${
+                      isSelected
+                        ? 'bg-[#00685f] text-white border-[#00685f] shadow-xs'
+                        : 'bg-[#f8faf9] text-[#0b1c30] border-gray-200 hover:border-[#00685f]/50 hover:bg-[#e6f4f1]/50'
+                    }`}
                   >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Sinkronkan ke Form Aktif</span>
+                    <span>{item.student.name}</span>
+                    <span className={`text-[10px] font-extrabold px-1.5 py-0.2 rounded ${
+                      isSelected ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-600'
+                    }`}>
+                      {item.student.class}
+                    </span>
+                    {item.alpaCount > 0 && (
+                      <span className={`text-[9px] font-black px-1.5 py-0.2 rounded ${
+                        isSelected ? 'bg-rose-500 text-white' : 'bg-rose-100 text-rose-800'
+                      }`}>
+                        {item.alpaCount}x Alpa
+                      </span>
+                    )}
+                    {isSelected && <Check className="w-3 h-3 text-white" />}
                   </button>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
+
+            {/* Expanded Detailed Grid Cards (Shown when expanded) */}
+            {isRecommendationsExpanded && (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pt-2 border-t border-gray-100 animate-in fade-in duration-200">
+                {recommendedStudentsList.map((item) => {
+                  const isSelected = currentActiveStudent?.id === item.student.id;
+                  return (
+                    <div
+                      key={item.student.id}
+                      className={`p-3.5 rounded-xl border transition-all flex flex-col justify-between gap-2.5 ${
+                        isSelected
+                          ? 'bg-[#e6f4f1] border-[#00685f] shadow-2xs'
+                          : 'bg-[#f8faf9] border-[#bcc9c6]/30 hover:border-[#00685f]/50'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <h4 className="text-xs font-black text-[#0b1c30]">{item.student.name}</h4>
+                          <p className="text-[10px] text-gray-500 font-bold">
+                            Kelas {item.student.class} | NISN: {item.student.nis || '-'}
+                          </p>
+                        </div>
+                        {isSelected && (
+                          <span className="text-[9px] bg-[#00685f] text-white font-extrabold px-1.5 py-0.5 rounded">
+                            Terpilih
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {item.alpaCount > 0 && (
+                          <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3" />
+                            <span>Alpa: {item.alpaCount}x</span>
+                          </span>
+                        )}
+                        {item.points > 0 && (
+                          <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 flex items-center gap-1">
+                            <Gavel className="w-3 h-3" />
+                            <span>{item.points} Poin Pelanggaran</span>
+                          </span>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleSelectStudentOption(item)}
+                        className={`w-full py-1.5 px-3 text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-98 mt-1 ${
+                          isSelected
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-[#00685f] hover:bg-[#005049] text-white'
+                        }`}
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        <span>{isSelected ? '✓ Sedang Aktif di Form' : 'Pilih & Sinkronkan'}</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {/* BANNER BANTUAN AI GLOBAL PER FORM */}
-      <div className="bg-gradient-to-r from-teal-900 via-[#0b1c30] to-slate-900 text-white p-4 sm:p-5 rounded-2xl shadow-sm border border-teal-500/30 flex flex-col sm:flex-row items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-teal-500/20 text-teal-300 flex items-center justify-center font-black shrink-0 border border-teal-400/30">
-            <Sparkles className="w-5 h-5 text-amber-300 animate-spin" style={{ animationDuration: '4s' }} />
+      {/* 5. AI Assistant Banner (Controlled by Config) */}
+      {disciplineConfig.showAiBanner && (
+        <div className="bg-gradient-to-r from-teal-900 via-[#0b1c30] to-slate-900 text-white p-4 sm:p-5 rounded-2xl shadow-sm border border-teal-500/30 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-teal-500/20 text-teal-300 flex items-center justify-center font-black shrink-0 border border-teal-400/30">
+              <Sparkles className="w-5 h-5 text-amber-300 animate-spin" style={{ animationDuration: '4s' }} />
+            </div>
+            <div>
+              <h3 className="text-xs font-black text-white flex items-center gap-2">
+                <span>Asisten AI Khusus Bimbingan & Konseling</span>
+                {aiActiveSource && (
+                  <span className="text-[9px] bg-teal-500/30 text-teal-200 border border-teal-400/30 px-2 py-0.5 rounded-full">
+                    {aiActiveSource}
+                  </span>
+                )}
+              </h3>
+              <p className="text-[11px] text-gray-300 font-medium">
+                Analisis otomatis rekam medis karakter ({activeTab.toUpperCase()}) & hasilkan draf instrumen konseling BK standar.
+              </p>
+            </div>
           </div>
-          <div>
-            <h3 className="text-xs font-black text-white flex items-center gap-2">
-              <span>Asisten AI Khusus Bimbingan & Konseling</span>
-              {aiActiveSource && (
-                <span className="text-[9px] bg-teal-500/30 text-teal-200 border border-teal-400/30 px-2 py-0.5 rounded-full">
-                  {aiActiveSource}
-                </span>
-              )}
-            </h3>
-            <p className="text-[11px] text-gray-300 font-medium">
-              Analisis otomatis rekam medis karakter ({activeTab.toUpperCase()}) & hasilkan draf instrumen konseling BK standar.
-            </p>
-          </div>
-        </div>
 
-        <button
-          type="button"
-          onClick={() => handleTriggerFormAi(activeTab)}
-          disabled={isAiGenerating}
-          className="w-full sm:w-auto px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-slate-950 font-black text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-98 disabled:opacity-50 shrink-0"
-        >
-          {isAiGenerating ? (
-            <>
-              <RefreshCw className="w-4 h-4 animate-spin" />
-              <span>Memproses Rekomendasi AI BK...</span>
-            </>
-          ) : (
-            <>
-              <Bot className="w-4 h-4 text-slate-950" />
-              <span>✨ Generasi Draf AI BK untuk Form Ini</span>
-            </>
-          )}
-        </button>
-      </div>
+          <button
+            type="button"
+            onClick={() => handleTriggerFormAi(activeTab)}
+            disabled={isAiGenerating}
+            className="w-full sm:w-auto px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-slate-950 font-black text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-98 disabled:opacity-50 shrink-0"
+          >
+            {isAiGenerating ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                <span>Memproses Rekomendasi AI BK...</span>
+              </>
+            ) : (
+              <>
+                <Bot className="w-4 h-4 text-slate-950" />
+                <span>✨ Generasi Draf AI BK ({activeTab.toUpperCase()})</span>
+              </>
+            )}
+          </button>
+        </div>
+      )}
 
       {/* ============================================================ */}
       {/* TAB 1: FORM SURAT PERJANJIAN SISWA */}
       {/* ============================================================ */}
       {activeTab === 'perjanjian' && (
         <div className="space-y-6">
-          <form onSubmit={handleSubmitPerjanjian} className="bg-white p-6 sm:p-8 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-6">
+          <form id="discipline-form-section" onSubmit={handleSubmitPerjanjian} className="bg-white p-6 sm:p-8 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-6 scroll-mt-6">
             <div className="flex items-center justify-between pb-4 border-b border-[#bcc9c6]/20">
               <div className="flex items-center gap-2.5">
                 <div className="w-10 h-10 rounded-xl bg-teal-50 text-[#00685f] flex items-center justify-center font-bold">
@@ -1389,7 +1593,7 @@ export default function PembinaanPendisiplinanView({
           </form>
 
           {/* LIST SAVED SURAT PERJANJIAN */}
-          <div className="bg-white p-6 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-4">
+          <div id="discipline-history-section" className="bg-white p-6 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-4 scroll-mt-6">
             <h3 className="text-sm font-extrabold text-[#0b1c30] flex items-center gap-2">
               <FileText className="w-4 h-4 text-[#00685f]" />
               <span>Arsip Surat Perjanjian Terbit ({perjanjianList.length})</span>
@@ -1451,7 +1655,7 @@ export default function PembinaanPendisiplinanView({
       {/* ============================================================ */}
       {activeTab === 'kontrak' && (
         <div className="space-y-6">
-          <form onSubmit={handleSubmitKontrak} className="bg-white p-6 sm:p-8 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-6">
+          <form id="discipline-form-section" onSubmit={handleSubmitKontrak} className="bg-white p-6 sm:p-8 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-6 scroll-mt-6">
             <div className="flex items-center justify-between pb-4 border-b border-[#bcc9c6]/20">
               <div className="flex items-center gap-2.5">
                 <div className="w-10 h-10 rounded-xl bg-teal-50 text-[#00685f] flex items-center justify-center font-bold">
@@ -1651,7 +1855,7 @@ export default function PembinaanPendisiplinanView({
           </form>
 
           {/* LIST SAVED KONTRAK PERILAKU */}
-          <div className="bg-white p-6 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-4">
+          <div id="discipline-history-section" className="bg-white p-6 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-4 scroll-mt-6">
             <h3 className="text-sm font-extrabold text-[#0b1c30] flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-[#00685f]" />
               <span>Arsip Kontrak Perilaku Terbit ({kontrakList.length})</span>
@@ -1713,7 +1917,7 @@ export default function PembinaanPendisiplinanView({
       {/* ============================================================ */}
       {activeTab === 'jurnal-pembinaan' && (
         <div className="space-y-6">
-          <form onSubmit={handleSubmitJurnal} className="bg-white p-6 sm:p-8 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-6">
+          <form id="discipline-form-section" onSubmit={handleSubmitJurnal} className="bg-white p-6 sm:p-8 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-6 scroll-mt-6">
             <div className="flex items-center justify-between pb-4 border-b border-[#bcc9c6]/20">
               <div className="flex items-center gap-2.5">
                 <div className="w-10 h-10 rounded-xl bg-teal-50 text-[#00685f] flex items-center justify-center font-bold">
@@ -1871,7 +2075,7 @@ export default function PembinaanPendisiplinanView({
           </form>
 
           {/* LIST SAVED JURNAL PEMBINAAN */}
-          <div className="bg-white p-6 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-4">
+          <div id="discipline-history-section" className="bg-white p-6 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-4 scroll-mt-6">
             <h3 className="text-sm font-extrabold text-[#0b1c30] flex items-center gap-2">
               <BookOpen className="w-4 h-4 text-[#00685f]" />
               <span>Arsip Jurnal Pembinaan BK Terbit ({jurnalList.length})</span>
@@ -1933,7 +2137,7 @@ export default function PembinaanPendisiplinanView({
       {/* ============================================================ */}
       {activeTab === 'komitmen-rtl' && (
         <div className="space-y-6">
-          <form onSubmit={handleSubmitRtl} className="bg-white p-6 sm:p-8 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-6">
+          <form id="discipline-form-section" onSubmit={handleSubmitRtl} className="bg-white p-6 sm:p-8 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-6 scroll-mt-6">
             <div className="flex items-center justify-between pb-4 border-b border-[#bcc9c6]/20">
               <div className="flex items-center gap-2.5">
                 <div className="w-10 h-10 rounded-xl bg-teal-50 text-[#00685f] flex items-center justify-center font-bold">
@@ -2103,7 +2307,7 @@ export default function PembinaanPendisiplinanView({
           </form>
 
           {/* LIST SAVED LEMBAR KOMITMEN & RTL */}
-          <div className="bg-white p-6 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-4">
+          <div id="discipline-history-section" className="bg-white p-6 rounded-2xl shadow-xs border border-[#bcc9c6]/30 space-y-4 scroll-mt-6">
             <h3 className="text-sm font-extrabold text-[#0b1c30] flex items-center gap-2">
               <Target className="w-4 h-4 text-[#00685f]" />
               <span>Arsip Lembar Komitmen & RTL Terbit ({komitmenList.length})</span>
@@ -2156,6 +2360,15 @@ export default function PembinaanPendisiplinanView({
           </div>
         </div>
       )}
+
+      {/* Modal Konfigurasi Fitur Pendisiplinan */}
+      <DisciplineConfigModal
+        isOpen={showConfigModal}
+        onClose={() => setShowConfigModal(false)}
+        onConfigSaved={(updatedCfg) => {
+          setDisciplineConfig(updatedCfg);
+        }}
+      />
     </div>
   );
 }

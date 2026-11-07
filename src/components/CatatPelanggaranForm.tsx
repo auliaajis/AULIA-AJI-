@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Student, ViolationRecord, Counselor, BKServiceType } from '../types';
+import { Student, ViolationRecord, Counselor, BKServiceType, BKComponentType } from '../types';
 import {
   ChevronRight,
   Gavel,
@@ -35,133 +35,11 @@ import { sendAutomatedEmail, createGmailDraft, triggerBackgroundAutoSync } from 
 import { getNormalizedClassKey, defaultWaliKelasList } from '../utils/classNormalizer';
 import StudentCombobox from './StudentCombobox';
 import { showToast } from '../utils/toast';
-
-interface ViolationOption {
-  id: string;
-  label: string;
-  points: number;
-}
-
-interface ViolationCategory {
-  id: string;
-  name: string;
-  options: ViolationOption[];
-}
-
-const VIOLATION_CATEGORIES: ViolationCategory[] = [
-  {
-    id: 'kedisiplinan',
-    name: 'Kedisiplinan & Ketertiban',
-    options: [
-      { id: 'k1', label: 'Terlambat masuk sekolah', points: 5 },
-      { id: 'k2', label: 'Membolos pelajaran / meninggalkan kelas tanpa izin', points: 15 },
-      { id: 'k3', label: 'Membolos sekolah / tidak masuk tanpa keterangan (alpa)', points: 20 },
-      { id: 'k4', label: 'Keluar lingkungan sekolah saat jam istirahat / pelajaran tanpa izin', points: 10 },
-      { id: 'k5', label: 'Membawa gawai / smartphone non-edukasi tanpa izin guru', points: 15 },
-      { id: 'k6', label: 'Tidak mengikuti upacara bendera hari Senin / kegiatan wajib', points: 10 },
-      { id: 'k7', label: 'Membawa barang yang mengganggu ketertiban (mainan, kartu, dll)', points: 10 },
-      { id: 'k8', label: 'Tidak mengikuti kegiatan ibadah wajib di sekolah (sholat berjamaah, dll.)', points: 10 },
-      { id: 'k9', label: 'Membawa kendaraan bermotor ke sekolah tanpa SIM / helm / kelengkapan standar', points: 15 },
-      { id: 'k10', label: 'Memarkir kendaraan di luar area yang ditentukan sekolah', points: 5 },
-      { id: 'k11', label: 'Tidak melaksanakan piket kebersihan kelas sesuai jadwal', points: 5 },
-      { id: 'k12', label: 'Makan atau minum di dalam kelas saat Kegiatan Belajar Mengajar (KBM) berlangsung', points: 5 },
-      { id: 'k13', label: 'Tidak membawa buku pelajaran sesuai jadwal pelajaran', points: 5 },
-      { id: 'k14', label: 'Mengulur-ngulur waktu kembali ke kelas setelah jam istirahat selesai', points: 5 },
-      { id: 'k15', label: 'Sengaja tidur di kelas saat jam pelajaran berlangsung', points: 5 },
-      { id: 'k16', label: 'Membawa / menghidupkan speaker bluetooth atau headset saat KBM tanpa izin', points: 10 },
-      { id: 'k17', label: 'Tidak memakai atribut upacara lengkap (topi, dasi, ikat pinggang)', points: 5 },
-      { id: 'k18', label: 'Tidak mengenakan kartu siswa / nametag di lingkungan sekolah', points: 5 }
-    ]
-  },
-  {
-    id: 'kerapian',
-    name: 'Kerapian & Atribut Seragam',
-    options: [
-      { id: 'a1', label: 'Seragam tidak lengkap / tidak sesuai hari / atribut tidak ada', points: 5 },
-      { id: 'a2', label: 'Pakaian dikeluarkan / tidak rapi / tidak memakai ikat pinggang hitam', points: 5 },
-      { id: 'a3', label: 'Rambut gondrong / dicat warna / potongan tidak rapi (siswa putra)', points: 10 },
-      { id: 'a4', label: 'Memakai perhiasan berlebihan / aksesoris tidak pantas ke sekolah', points: 5 },
-      { id: 'a5', label: 'Kuku panjang / dicat warna-warni', points: 5 },
-      { id: 'a6', label: 'Menggunakan sepatu atau kaos kaki tidak sesuai ketentuan sekolah', points: 5 },
-      { id: 'a7', label: 'Menggunakan make-up / kosmetik berlebihan', points: 5 },
-      { id: 'a8', label: 'Memakai kaos dalam (singlet) berwarna mencolok atau bermotif tembus pandang', points: 5 },
-      { id: 'a9', label: 'Memiliki / menggunakan tato (temporer maupun permanen)', points: 25 },
-      { id: 'a10', label: 'Bertindik bagi siswa putra, atau menggunakan tindik berlebihan bagi siswa putri', points: 15 },
-      { id: 'a11', label: 'Membawa atau menggunakan tas sekolah yang tidak pantas (misal tas plastik/kresek)', points: 5 },
-      { id: 'a12', label: 'Model rambut dicukur garis (skin rambut) / berpola tidak wajar', points: 10 },
-      { id: 'a13', label: 'Memakai jaket, sweater, atau rompi non-sekolah tanpa izin tertulis guru', points: 5 },
-      { id: 'a14', label: 'Ujung celana terlalu ketat / model pensil (tidak standar kesiswaan)', points: 10 },
-      { id: 'a15', label: 'Model rok siswi di atas lutut / diperpendek sengaja di luar ketentuan', points: 10 },
-      { id: 'a16', label: 'Memakai ikat pinggang bermotif mencolok atau berkepala terlalu besar', points: 5 },
-      { id: 'a17', label: 'Memakai softlens berwarna mencolok / hiasan bulu mata berlebihan', points: 5 }
-    ]
-  },
-  {
-    id: 'perilaku',
-    name: 'Perilaku & Etika / Karakter',
-    options: [
-      { id: 'p1', label: 'Tidak sopan / menentang / berkata kasar kepada Guru atau Staf sekolah', points: 25 },
-      { id: 'p2', label: 'Membuat kegaduhan / mengganggu jalannya proses pembelajaran', points: 10 },
-      { id: 'p3', label: 'Merusak fasilitas / sarana prasarana sekolah secara sengaja', points: 30 },
-      { id: 'p4', label: 'Melakukan perundungan verbal (bullying), ejekan SARA, atau intimidasi', points: 25 },
-      { id: 'p5', label: 'Berpacaran berlebihan atau berdua-duaan di tempat sepi lingkungan sekolah', points: 20 },
-      { id: 'p6', label: 'Mencoret-coret meja, dinding, kursi, atau buku perpustakaan (vandalism)', points: 10 },
-      { id: 'p7', label: 'Membawa / mengonsumsi rokok elektrik (vape) / rokok biasa di luar sekolah memakai seragam', points: 30 },
-      { id: 'p8', label: 'Membuang sampah sembarangan atau mengotori lingkungan sekolah secara sengaja', points: 5 },
-      { id: 'p9', label: 'Meludah sembarangan di koridor, ruang kelas, tempat ibadah, atau lapangan', points: 5 },
-      { id: 'p10', label: 'Menyebarkan berita bohong (hoaks) atau fitnah tentang teman/guru/staf', points: 25 },
-      { id: 'p11', label: 'Mengambil foto atau video guru/staf secara diam-diam untuk bahan ejekan di media sosial', points: 35 },
-      { id: 'p12', label: 'Melakukan provokasi perkelahian atau adu domba antar teman', points: 30 },
-      { id: 'p13', label: 'Menggunakan nama panggilan orang tua teman untuk bahan olok-olokan (ejekan)', points: 10 },
-      { id: 'p14', label: 'Membuat coretan/tulisan kotor atau tidak senonoh pada buku siswa lain', points: 15 },
-      { id: 'p15', label: 'Berkomunikasi di media sosial menggunakan nama sekolah disertai konten tidak sopan', points: 25 },
-      { id: 'p16', label: 'Sengaja merusak karya kerajinan / karya seni milik teman lain', points: 15 },
-      { id: 'p17', label: 'Tidak mengindahkan teguran guru / staf saat diingatkan berulang kali', points: 20 },
-      { id: 'p18', label: 'Mengeluarkan kata-kata kotor atau mengumpat di lingkungan sekolah', points: 15 }
-    ]
-  },
-  {
-    id: 'akademik',
-    name: 'Akademik & Integritas',
-    options: [
-      { id: 'ak1', label: 'Menyontek saat ujian harian, tengah semester, atau akhir semester', points: 25 },
-      { id: 'ak2', label: 'Melakukan plagiasi / menyalin tugas atau PR teman', points: 10 },
-      { id: 'ak3', label: 'Tidak mengerjakan tugas / pekerjaan rumah (PR) berulang kali', points: 10 },
-      { id: 'ak4', label: 'Memalsukan tanda tangan orang tua, wali kelas, atau guru mata pelajaran', points: 30 },
-      { id: 'ak5', label: 'Mengubah nilai rapor / lembar jawaban secara ilegal', points: 50 },
-      { id: 'ak6', label: 'Membawa atau menyebarkan kunci jawaban ujian secara tidak sah', points: 50 },
-      { id: 'ak7', label: 'Membolos saat kegiatan penilaian harian atau ujian susulan tanpa alasan sah', points: 20 },
-      { id: 'ak8', label: 'Menggunakan AI / joki tugas secara curang untuk menyalin karya ilmiah utuh tanpa sitasi', points: 15 },
-      { id: 'ak9', label: 'Bekerja sama / bertukar lembar jawaban saat ulangan berlangsung', points: 25 },
-      { id: 'ak10', label: 'Mengumpulkan tugas hasil jiplakan murni (copy-paste) dari internet tanpa modifikasi', points: 10 },
-      { id: 'ak11', label: 'Membawa catatan ringkasan (contekan) saat ujian di laci, saku, atau gawai', points: 25 },
-      { id: 'ak12', label: 'Sengaja tidak mengikuti remedial ujian yang telah dijadwalkan secara berkala', points: 10 }
-    ]
-  },
-  {
-    id: 'berat',
-    name: 'Pelanggaran Berat & Hukum',
-    options: [
-      { id: 'b1', label: 'Melakukan perundungan fisik (physical bullying) atau kekerasan', points: 50 },
-      { id: 'b2', label: 'Melakukan pemalakan / pemerasan uang atau barang kepada teman', points: 40 },
-      { id: 'b3', label: 'Membawa, menyimpan, atau menghisap rokok di lingkungan sekolah', points: 50 },
-      { id: 'b4', label: 'Membawa, menyimpan, atau menyebarkan konten pornografi', points: 75 },
-      { id: 'b5', label: 'Membawa senjata tajam, senjata api, atau barang berbahaya lainnya', points: 100 },
-      { id: 'b6', label: 'Terlibat pencurian barang milik sekolah, guru, karyawan, atau sesama siswa', points: 75 },
-      { id: 'b7', label: 'Membawa, mengonsumsi, atau mengedarkan narkoba, miras, atau obat terlarang', points: 100 },
-      { id: 'b8', label: 'Terlibat perkelahian massal (tawuran) antar kelas atau antar sekolah', points: 100 },
-      { id: 'b9', label: 'Melakukan tindakan asusila atau pelecehan seksual di lingkungan sekolah', points: 100 },
-      { id: 'b10', label: 'Terlibat dalam aktivitas perjudian (online maupun konvensional) di lingkungan sekolah', points: 75 },
-      { id: 'b11', label: 'Melakukan penipuan keuangan atau penggalangan dana ilegal mengatasnamakan sekolah', points: 50 },
-      { id: 'b12', label: 'Terlibat dalam geng motor liar atau organisasi terlarang/radikal', points: 100 },
-      { id: 'b13', label: 'Membawa, menyimpan, atau mengonsumsi minuman keras (miras) atau alkohol', points: 100 },
-      { id: 'b14', label: 'Melakukan tindakan intimidasi / premanisme / pengompasan berkelompok', points: 75 },
-      { id: 'b15', label: 'Terlibat dalam pornografi aksi langsung atau pengiriman media asusila', points: 100 },
-      { id: 'b16', label: 'Melakukan perusakan berat gerbang, ruang komputer, atau laboratorium sekolah', points: 75 },
-      { id: 'b17', label: 'Mengancam fisik atau melakukan penganiayaan ringan/berat terhadap guru/staf', points: 100 }
-    ]
-  }
-];
+import {
+  ViolationCategory,
+  ViolationOption,
+  getSchoolViolationCategories
+} from '../utils/violationRulesConfig';
 
 interface CatatPelanggaranFormProps {
   students: Student[];
@@ -177,6 +55,7 @@ interface CatatPelanggaranFormProps {
     students: Student[];
     problem: string;
     description: string;
+    bkComponent?: BKComponentType;
     serviceType?: BKServiceType;
     targetType?: 'Individu' | 'Kelompok' | 'Klasikal';
     status?: 'Terjadwal' | 'Selesai' | 'Dibatalkan';
@@ -186,6 +65,7 @@ interface CatatPelanggaranFormProps {
       date: string;
       notes?: string;
       ticketId?: string;
+      violationId?: string;
     };
   }) => void;
   onCancel: () => void;
@@ -235,21 +115,36 @@ export default function CatatPelanggaranForm({
   const [editStudentClass, setEditStudentClass] = useState('');
   const [editStudentNis, setEditStudentNis] = useState('');
 
+  // Date range filter states for archive list
+  const [archiveStartDate, setArchiveStartDate] = useState('');
+  const [archiveEndDate, setArchiveEndDate] = useState('');
+
   // Filtered violation records for archive list
   const filteredViolations = useMemo(() => {
     if (!Array.isArray(violations)) return [];
     const q = archiveSearch.toLowerCase().trim();
-    if (!q) return violations;
     return violations.filter(v => {
       if (!v) return false;
-      return (
+      const matchesQuery = !q || (
         String(v.studentName || '').toLowerCase().includes(q) ||
         String(v.studentClass || '').toLowerCase().includes(q) ||
         String(v.category || '').toLowerCase().includes(q) ||
         String(v.ticketId || '').toLowerCase().includes(q)
       );
+      if (!matchesQuery) return false;
+
+      if (archiveStartDate) {
+        const vDate = String(v.date || '').slice(0, 10);
+        if (vDate && vDate < archiveStartDate) return false;
+      }
+      if (archiveEndDate) {
+        const vDate = String(v.date || '').slice(0, 10);
+        if (vDate && vDate > archiveEndDate) return false;
+      }
+
+      return true;
     });
-  }, [violations, archiveSearch]);
+  }, [violations, archiveSearch, archiveStartDate, archiveEndDate]);
 
   // Autocomplete student query & class filter state
   const [studentQuery, setStudentQuery] = useState('');
@@ -266,7 +161,23 @@ export default function CatatPelanggaranForm({
     );
   }, [students]);
 
-  const currentCategories = VIOLATION_CATEGORIES;
+  const [currentCategories, setCurrentCategories] = useState<ViolationCategory[]>(() => {
+    return getSchoolViolationCategories();
+  });
+
+  useEffect(() => {
+    const handleRulesChanged = () => {
+      setCurrentCategories(getSchoolViolationCategories());
+    };
+    window.addEventListener('bk_violation_rules_changed', handleRulesChanged);
+    window.addEventListener('bk_school_changed', handleRulesChanged);
+    window.addEventListener('storage', handleRulesChanged);
+    return () => {
+      window.removeEventListener('bk_violation_rules_changed', handleRulesChanged);
+      window.removeEventListener('bk_school_changed', handleRulesChanged);
+      window.removeEventListener('storage', handleRulesChanged);
+    };
+  }, []);
 
   // Bulk student selector state
   const [showBulkModal, setShowBulkModal] = useState(false);
@@ -420,7 +331,7 @@ export default function CatatPelanggaranForm({
 
   // Derived violation category string matching existing fields
   const violationCategory = useMemo(() => {
-    const categoryObj = VIOLATION_CATEGORIES.find(c => c.id === selectedCategory);
+    const categoryObj = currentCategories.find(c => c.id === selectedCategory);
     const optionObj = categoryObj?.options.find(o => o.id === selectedOptionId);
     
     if (categoryObj) {
@@ -433,7 +344,7 @@ export default function CatatPelanggaranForm({
       }
     }
     return '';
-  }, [selectedCategory, selectedOptionId, customViolationLabel]);
+  }, [selectedCategory, selectedOptionId, customViolationLabel, currentCategories]);
 
   // Auto Ticket ID generation
   const ticketId = useMemo(() => {
@@ -600,9 +511,10 @@ export default function CatatPelanggaranForm({
         students: data.students,
         problem: `Tindak Lanjut Pembinaan Disiplin: ${data.category}`,
         description: `Sesi tindak lanjut layanan konseling dan restitusi disiplin positif atas pelanggaran "${data.category}" (${data.date}). Catatan kejadian: ${data.notes || '-'}`,
+        bkComponent: 'Layanan Responsif',
         serviceType:
           data.students.length > 1
-            ? 'Layanan Bimbingan Kelompok'
+            ? 'Layanan Konseling Kelompok'
             : 'Layanan Konseling Perorangan (Individual)',
         targetType: data.students.length > 1 ? 'Kelompok' : 'Individu',
         status: 'Terjadwal',
@@ -615,10 +527,11 @@ export default function CatatPelanggaranForm({
       });
     } else {
       // Open interactive Follow-Up Counseling Offer Modal
+      showToast('✅ Catatan pelanggaran siswa berhasil disimpan ke database!', 'success');
       setFollowUpPromptData(data);
       setSelectedFollowUpServiceType(
         data.students.length > 1
-          ? 'Layanan Bimbingan Kelompok'
+          ? 'Layanan Konseling Kelompok'
           : 'Layanan Konseling Perorangan (Individual)'
       );
       setSelectedFollowUpStatus('Terjadwal');
@@ -629,6 +542,7 @@ export default function CatatPelanggaranForm({
   const handleSaveWithoutSending = () => {
     if (selectedStudents.length === 0) return;
     const student = selectedStudents[0];
+    showToast(`✅ Catatan pelanggaran ${student.name} berhasil disimpan!`, 'success');
     onSaveViolation({
       studentId: student.id,
       studentName: student.name,
@@ -967,6 +881,107 @@ SMP Negeri 2 Susukan`,
             </div>
           </div>
 
+          {/* Date-Range Picker & Quick Filter Bar */}
+          <div className="p-3.5 sm:px-6 bg-[#f8faf9] border-b border-[#bcc9c6]/30 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-extrabold text-[#00685f] flex items-center gap-1.5 text-xs">
+                <Calendar className="w-4 h-4" />
+                <span>Filter Periode Tanggal:</span>
+              </span>
+
+              {/* Start Date */}
+              <div className="flex items-center gap-1.5 bg-white border border-[#bcc9c6]/50 rounded-xl px-2.5 py-1 shadow-2xs">
+                <span className="text-[10px] font-bold text-gray-500 uppercase">Dari:</span>
+                <input
+                  type="date"
+                  value={archiveStartDate}
+                  onChange={(e) => setArchiveStartDate(e.target.value)}
+                  className="bg-transparent text-xs font-bold text-[#0b1c30] focus:outline-none cursor-pointer"
+                />
+              </div>
+
+              <span className="text-gray-400 font-bold text-xs">s/d</span>
+
+              {/* End Date */}
+              <div className="flex items-center gap-1.5 bg-white border border-[#bcc9c6]/50 rounded-xl px-2.5 py-1 shadow-2xs">
+                <span className="text-[10px] font-bold text-gray-500 uppercase">Sampai:</span>
+                <input
+                  type="date"
+                  value={archiveEndDate}
+                  onChange={(e) => setArchiveEndDate(e.target.value)}
+                  className="bg-transparent text-xs font-bold text-[#0b1c30] focus:outline-none cursor-pointer"
+                />
+              </div>
+
+              {/* Quick Presets */}
+              <div className="flex flex-wrap items-center gap-1 ml-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const today = new Date().toISOString().slice(0, 10);
+                    setArchiveStartDate(today);
+                    setArchiveEndDate(today);
+                  }}
+                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
+                >
+                  Hari Ini
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const d = new Date();
+                    d.setDate(d.getDate() - 7);
+                    setArchiveStartDate(d.toISOString().slice(0, 10));
+                    setArchiveEndDate(new Date().toISOString().slice(0, 10));
+                  }}
+                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
+                >
+                  7 Hari
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const d = new Date();
+                    d.setDate(d.getDate() - 30);
+                    setArchiveStartDate(d.toISOString().slice(0, 10));
+                    setArchiveEndDate(new Date().toISOString().slice(0, 10));
+                  }}
+                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
+                >
+                  30 Hari
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const now = new Date();
+                    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+                    setArchiveStartDate(firstDay);
+                    setArchiveEndDate(new Date().toISOString().slice(0, 10));
+                  }}
+                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
+                >
+                  Bulan Ini
+                </button>
+                {(archiveStartDate || archiveEndDate) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setArchiveStartDate('');
+                      setArchiveEndDate('');
+                    }}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-extrabold bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 transition-all cursor-pointer shadow-2xs"
+                  >
+                    Reset Tanggal ✕
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="text-[11px] text-gray-600 font-semibold">
+              Menampilkan <strong className="text-[#00685f]">{filteredViolations.length}</strong> dari {violations?.length || 0} catatan
+            </div>
+          </div>
+
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-left text-xs">
               <thead className="bg-[#f8f9ff] border-b border-[#bcc9c6]/30">
@@ -1062,12 +1077,12 @@ SMP Negeri 2 Susukan`,
                                   gender: 'L',
                                   violationPoints: v.pointsAdded,
                                   bkServicesCount: 0,
-                                  initials: v.studentName.slice(0, 2).toUpperCase(),
+                                  initials: (v.studentName || 'S').slice(0, 2).toUpperCase(),
                                 };
                                 onCreateFollowUpCounseling({
                                   students: [studentObj],
                                   problem: `Tindak Lanjut Pembinaan Disiplin: ${v.category}`,
-                                  description: `Sesi tindak lanjut layanan konseling dan restitusi disiplin positif atas pelanggaran "${v.category}" (${v.date}). Tiket: ${v.ticketId}. Catatan kejadian: ${v.notes || '-'}`,
+                                  description: `Sesi tindak lanjut layanan konseling dan restitusi disiplin positif atas pelanggaran "${v.category}" (${v.date}). Tiket: #${v.ticketId || v.id}. Catatan kejadian: ${v.notes || '-'}`,
                                   serviceType: 'Layanan Konseling Perorangan (Individual)',
                                   targetType: 'Individu',
                                   status: 'Terjadwal',
@@ -1077,13 +1092,15 @@ SMP Negeri 2 Susukan`,
                                     date: v.date,
                                     notes: v.notes,
                                     ticketId: v.ticketId,
+                                    violationId: v.id,
                                   },
                                 });
                               }}
-                              className="p-1.5 bg-emerald-50 text-[#00685f] hover:bg-[#00685f] hover:text-white rounded-lg font-bold transition-all cursor-pointer shadow-xs border border-emerald-200"
-                              title="Jadwalkan Layanan Konseling Tindak Lanjut"
+                              className="px-2.5 py-1.5 bg-emerald-50 text-[#00685f] hover:bg-[#00685f] hover:text-white rounded-lg font-bold text-[11px] transition-all cursor-pointer shadow-2xs border border-emerald-300 flex items-center gap-1 active:scale-97"
+                              title="Tindak lanjuti pelanggaran ini melalui Sesi Layanan Konseling BK"
                             >
                               <HeartHandshake className="w-3.5 h-3.5" />
+                              <span className="hidden xl:inline">Tindak Lanjut</span>
                             </button>
                           )}
 
@@ -1420,6 +1437,97 @@ SMP Negeri 2 Susukan`,
                     className="w-full bg-[#f8f9ff] border border-[#bcc9c6]/40 rounded-xl px-4 py-3 text-sm text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 shadow-sm"
                   />
                 </div>
+              </div>
+
+              {/* PPKSP Permendikbudristek 46/2023 Advisory Notice */}
+              {selectedCategory && (selectedCategory.includes('ppksp') || selectedCategory.includes('berat') || selectedCategory.includes('kriminal')) && (
+                <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl flex items-start gap-3 animate-in fade-in duration-200">
+                  <ShieldAlert className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <h5 className="text-xs font-black text-rose-950">
+                      Isu Perlindungan Anak & Ranah TPPK (Permendikbudristek No. 46/2023)
+                    </h5>
+                    <p className="text-[11px] text-rose-800 leading-relaxed font-medium">
+                      Kasus ini tergolong ke dalam indikasi tindak kekerasan satuan pendidikan. Utamakan pemulihan fisik & psikis korban, jaga kerahasiaan identitas, libatkan Tim TPPK sekolah, dan berlakukan sanksi edukatif-rehabilitatif bagi pelaku anak sesuai Sistem Peradilan Pidana Anak (SPPA).
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Catatan Kejadian & Bantuan Segitiga Restitusi (Kurikulum Merdeka) */}
+              <div className="space-y-2.5 p-4.5 bg-[#f8faf9] rounded-2xl border border-[#bcc9c6]/40">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <label className="text-xs font-extrabold text-[#0b1c30] flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-[#00685f]" />
+                    <span>Catatan Kronologi & Pendekatan Segitiga Restitusi</span>
+                  </label>
+                  <span className="text-[10px] text-gray-500 font-bold bg-white px-2 py-0.5 rounded-full border border-gray-200">
+                    Format Panduan BK Kurikulum Merdeka
+                  </span>
+                </div>
+
+                {/* Quick-fill Restitusi buttons */}
+                <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                  <span className="font-bold text-gray-400 uppercase">Bantuan Tuturan Restitusi:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const snippet = 'Siswa diajak berdialog tenang untuk menstabilkan identitas: menyadari setiap manusia pernah khilaf dan fokus pada perbaikan diri.';
+                      setNotes(prev => prev ? `${prev}\n- ${snippet}` : `- ${snippet}`);
+                    }}
+                    className="px-2.5 py-1 bg-white hover:bg-teal-50 text-[#00685f] border border-teal-200 rounded-lg font-bold transition-all cursor-pointer"
+                  >
+                    1. Stabilkan Identitas
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const snippet = 'Validasi tindakan: menelusuri alasan di balik perilaku siswa guna memahami kebutuhan dasar (kasih sayang/kebebasan/pengakuan) yang ingin ia penuhi.';
+                      setNotes(prev => prev ? `${prev}\n- ${snippet}` : `- ${snippet}`);
+                    }}
+                    className="px-2.5 py-1 bg-white hover:bg-teal-50 text-[#00685f] border border-teal-200 rounded-lg font-bold transition-all cursor-pointer"
+                  >
+                    2. Validasi Kebutuhan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const snippet = 'Menanyakan keyakinan: siswa menghubungkan tindakannya dengan keyakinan kelas yang disepakati dan menyusun komitmen restitusi mandiri.';
+                      setNotes(prev => prev ? `${prev}\n- ${snippet}` : `- ${snippet}`);
+                    }}
+                    className="px-2.5 py-1 bg-white hover:bg-teal-50 text-[#00685f] border border-teal-200 rounded-lg font-bold transition-all cursor-pointer"
+                  >
+                    3. Keyakinan & Solusi Restitusi
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const snippet = 'Pemetaan Sebab-Akibat (Lampiran 1 BSKAP): Peristiwa diidentifikasi secara objektif, siswa memetakan dampak terhadap diri & lingkungan, serta menyepakati perjanjian solusi konsekuensi.';
+                      setNotes(prev => prev ? `${prev}\n- ${snippet}` : `- ${snippet}`);
+                    }}
+                    className="px-2.5 py-1 bg-white hover:bg-amber-50 text-amber-900 border border-amber-200 rounded-lg font-bold transition-all cursor-pointer"
+                  >
+                    4. Sebab-Akibat (Lamp 1)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const snippet = 'Refleksi Glasser 1965 (Lampiran 3 BSKAP): Konselor membantu siswa mengevaluasi diri ("Apakah perilaku ini membantumu?"), merumuskan strategi konkrit, dan menyepakati komitmen tindak lanjut.';
+                      setNotes(prev => prev ? `${prev}\n- ${snippet}` : `- ${snippet}`);
+                    }}
+                    className="px-2.5 py-1 bg-white hover:bg-purple-50 text-purple-900 border border-purple-200 rounded-lg font-bold transition-all cursor-pointer"
+                  >
+                    5. Refleksi Glasser (Lamp 3)
+                  </button>
+                </div>
+
+                <textarea
+                  rows={3}
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Tuliskan catatan kejadian kronologis, respon siswa, dan komitmen restitusi perbaikan perilaku..."
+                  className="w-full bg-white border border-[#bcc9c6]/40 rounded-xl px-4 py-3 text-xs text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 shadow-2xs font-medium"
+                />
               </div>
 
               {/* Progressive Disclosure: Collapsible Section for Optional Monitoring & Photo Evidence */}
@@ -2412,6 +2520,7 @@ SMP Negeri 2 Susukan`,
               <button
                 type="button"
                 onClick={() => {
+                  showToast('✅ Catatan pelanggaran tersimpan rapi di dashboard.', 'info');
                   setShowFollowUpPromptModal(false);
                   setFollowUpPromptData(null);
                   onCancel();

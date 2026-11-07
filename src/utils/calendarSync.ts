@@ -135,3 +135,150 @@ async function syncServiceToGasCalendar(service: CounselingService, scriptUrl: s
     console.warn('Background GAS calendar sync:', err);
   }
 }
+
+/**
+ * Escapes special characters for RFC 5545 iCalendar values
+ */
+export function escapeIcsText(str: string): string {
+  if (!str) return '';
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,')
+    .replace(/\r?\n/g, '\\n');
+}
+
+/**
+ * Computes an effective end time for a counseling session (defaults to 45 mins after start)
+ */
+export function getServiceEndTime(service: CounselingService): string {
+  if (service.endTime && service.endTime.trim()) {
+    return service.endTime.trim();
+  }
+  const start = service.startTime || '08:00';
+  const clean = start.replace('.', ':').trim();
+  const [h, m] = clean.split(':').map((num) => parseInt(num, 10));
+  const totalMinutes = (h || 8) * 60 + (m || 0) + 45;
+  const endH = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
+  const endM = String(totalMinutes % 60).padStart(2, '0');
+  return `${endH}:${endM}`;
+}
+
+/**
+ * Builds RFC 5545 .ics string for one or multiple counseling services
+ */
+export function generateIcsFileContent(
+  services: CounselingService[],
+  calendarTitle: string = 'Jadwal Layanan BK - SIKAP BK'
+): string {
+  const nowStamp = formatToGCalDateTime(
+    new Date().toISOString().slice(0, 10),
+    `${String(new Date().getHours()).padStart(2, '0')}:${String(new Date().getMinutes()).padStart(2, '0')}`
+  );
+
+  const lines: string[] = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//SIKAP-BK SMP Negeri 2 Susukan//Layanan BK//ID',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    `X-WR-CALNAME:${escapeIcsText(calendarTitle)}`,
+    'X-WR-TIMEZONE:Asia/Jakarta',
+  ];
+
+  services.forEach((srv) => {
+    const sDate = srv.date || new Date().toISOString().slice(0, 10);
+    const sStart = srv.startTime || '08:00';
+    const sEnd = getServiceEndTime(srv);
+
+    const dtStart = formatToGCalDateTime(sDate, sStart);
+    const dtEnd = formatToGCalDateTime(sDate, sEnd);
+
+    const studentNamesStr = srv.students && srv.students.length > 0
+      ? srv.students.map((st) => `${st.name} (${st.class})`).join(', ')
+      : 'Siswa BK';
+
+    const title = `📅 [Layanan BK] ${srv.serviceType} - ${studentNamesStr}`;
+
+    const descriptionParts = [
+      `💬 Topik / Permasalahan: ${srv.problem}`,
+      `👥 Peserta Siswa: ${studentNamesStr}`,
+      `📌 Jenis Layanan: ${srv.serviceType} (${srv.targetType || 'Individu'})`,
+      `📅 Status Layanan: ${srv.status || 'Terjadwal'}`,
+      srv.bkComponent ? `🏛 Pilar BK: ${srv.bkComponent}` : '',
+      srv.bidangBimbingan ? `🎯 Bidang Bimbingan: ${srv.bidangBimbingan}` : '',
+      srv.description ? `📝 Keterangan / Uraian Sesi: ${srv.description}` : '',
+      srv.followUp ? `➡️ Rencana Tindak Lanjut: ${srv.followUp}` : '',
+      '--------------------------------------------------',
+      'Aplikasi SIKAP-BK SMP Negeri 2 Susukan'
+    ].filter(Boolean);
+
+    const description = descriptionParts.join('\n\n');
+    const location = 'Ruang Bimbingan Konseling (BK)';
+    const status = srv.status === 'Dibatalkan' ? 'CANCELLED' : srv.status === 'Selesai' ? 'CONFIRMED' : 'TENTATIVE';
+    const cleanUid = `bk-${srv.id.replace(/[^a-zA-Z0-9-]/g, '')}-${sDate}@sikap-bk.smpn2susukan.sch.id`;
+
+    lines.push('BEGIN:VEVENT');
+    lines.push(`UID:${cleanUid}`);
+    lines.push(`DTSTAMP:${nowStamp}`);
+    lines.push(`DTSTART:${dtStart}`);
+    lines.push(`DTEND:${dtEnd}`);
+    lines.push(`SUMMARY:${escapeIcsText(title)}`);
+    lines.push(`DESCRIPTION:${escapeIcsText(description)}`);
+    lines.push(`LOCATION:${escapeIcsText(location)}`);
+    lines.push(`STATUS:${status}`);
+    lines.push(`CATEGORIES:${escapeIcsText(`Bimbingan Konseling,${srv.serviceType}`)}`);
+    lines.push('END:VEVENT');
+  });
+
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
+
+/**
+ * Triggers instant browser file download of .ics content
+ */
+export function downloadIcsFile(filename: string, icsContent: string): void {
+  const cleanFilename = filename.endsWith('.ics') ? filename : `${filename}.ics`;
+  const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', cleanFilename);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Export single counseling session to .ics file
+ */
+export function exportSingleServiceToIcs(service: CounselingService): void {
+  const primaryName = service.students?.[0]?.name ? service.students[0].name.replace(/[^a-zA-Z0-9]/g, '_') : 'Siswa';
+  const sDate = service.date ? service.date.replace(/[^0-9-]/g, '') : 'jadwal';
+  const filename = `Jadwal-BK-${primaryName}-${sDate}.ics`;
+
+  const icsContent = generateIcsFileContent([service], `Layanan BK: ${service.serviceType} - ${service.students?.map(s => s.name).join(', ') || 'Siswa'}`);
+  downloadIcsFile(filename, icsContent);
+  showToast(`File kalender "${filename}" berhasil diunduh! Klik file untuk menambahkan ke Google Calendar / Kalender HP.`, 'success');
+}
+
+/**
+ * Export a collection of counseling services to a combined .ics file
+ */
+export function exportServicesToIcs(
+  services: CounselingService[],
+  customFilename?: string,
+  calendarTitle?: string
+): void {
+  if (!services || services.length === 0) {
+    showToast('Tidak ada jadwal layanan BK untuk diekspor.', 'warning');
+    return;
+  }
+
+  const filename = customFilename || `Jadwal-Layanan-BK-${new Date().toISOString().slice(0, 10)}.ics`;
+  const icsContent = generateIcsFileContent(services, calendarTitle || 'Semua Jadwal Layanan BK - SIKAP BK');
+  downloadIcsFile(filename, icsContent);
+  showToast(`Berhasil mengekspor ${services.length} sesi layanan BK ke "${filename}"! File siap diimpor ke Google Calendar.`, 'success');
+}

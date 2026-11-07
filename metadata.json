@@ -1,6 +1,6 @@
 {
-  "name": "Sistem Informasi BK Gridasus",
-  "description": "Sistem bimbingan konseling dan pencatatan pelanggaran siswa BK Gridasus.",
+  "name": "SIKAP-BK - Sistem Karakter, Apresiasi & Pelayanan BK",
+  "description": "Sistem Informasi Karakter, Apresiasi, dan Pelayanan Bimbingan Konseling (SIKAP-BK) berbasis Cloud dan Disiplin Positif.",
   "requestFramePermissions": ["camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

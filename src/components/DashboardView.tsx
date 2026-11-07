@@ -1,15 +1,21 @@
 import { useState, useMemo, useEffect } from 'react';
 import { Student, ViolationRecord, CounselingService, ActivityLog, StudentAchievement, ClassAttendanceRecord, Counselor } from '../types';
 import { loadSchoolData } from '../utils/firestoreSync';
+import { getSchoolConfig } from '../utils/schoolConfig';
+import { getAllowedClassesList, filterAttendanceHistory } from '../utils/accessControl';
 import { motion, AnimatePresence } from 'motion/react';
 import StickyNotesWidget from './StickyNotesWidget';
 import JadwalMengajarWidget from './JadwalMengajarWidget';
 import AiAssistantWidget from './AiAssistantWidget';
 import DashboardStatsView from './DashboardStatsView';
+import GrafikLayananBulananCard from './GrafikLayananBulananCard';
+import PengingatTindakLanjutWidget from './PengingatTindakLanjutWidget';
 import {
   AlertCircle,
   BookOpen,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Eye,
   EyeOff,
   AlertTriangle,
@@ -23,7 +29,10 @@ import {
   CheckCircle2,
   SlidersHorizontal,
   Home,
-  CheckCircle
+  CheckCircle,
+  Gavel,
+  ExternalLink,
+  Sparkles
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -71,21 +80,34 @@ export default function DashboardView({
     });
   };
 
-  // Helper to mask student names when Privacy Mode is ON
-  const maskStudentName = (name: string, isPrivate: boolean) => {
-    if (!isPrivate || !name) return name;
-    const trimmed = name.trim();
-    if (!trimmed) return name;
-    const parts = trimmed.split(/\s+/);
-    if (parts.length === 1) {
-      return `${parts[0].charAt(0)}*** 🔒`;
-    }
-    return `${parts[0]} ${parts[1].charAt(0)}. *** 🔒`;
+  // Helper to mask student names on Beranda preview cards (strictly avoid Melia A. ***)
+  const maskStudentName = (name: string, isPrivate: boolean, aliasLabel: string = 'Siswa') => {
+    if (!name) return aliasLabel;
+    return aliasLabel;
   };
 
   // Filter state for timeline logs
   const [aktivitasFilter, setAktivitasFilter] = useState<'all' | 'violation' | 'counseling' | 'other'>('all');
   const [showAllLogs, setShowAllLogs] = useState(false);
+
+  // Collapsible state for pending cases section (default FALSE to keep dashboard clean & uncluttered)
+  const [isCasesSectionOpen, setIsCasesSectionOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('bk_dashboard_cases_expanded') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleCasesSection = () => {
+    setIsCasesSectionOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('bk_dashboard_cases_expanded', String(next));
+      } catch {}
+      return next;
+    });
+  };
 
   // Filter & Handling state for pending cases (Restitusi & Layanan Terjadwal)
   const [unresolvedTab, setUnresolvedTab] = useState<'violation' | 'service'>('violation');
@@ -113,7 +135,9 @@ export default function DashboardView({
 
   useEffect(() => {
     const handleAttendanceUpdate = (e?: any) => {
-      if (e?.detail?.key === 'bk_attendance_history' && Array.isArray(e.detail.data)) {
+      if (Array.isArray(e?.detail)) {
+        setAttendanceHistory(e.detail);
+      } else if (e?.detail?.key === 'bk_attendance_history' && Array.isArray(e.detail.data)) {
         setAttendanceHistory(e.detail.data);
       } else {
         setAttendanceHistory(loadSchoolData('bk_attendance_history', []));
@@ -143,9 +167,10 @@ export default function DashboardView({
     const normalizeCls = (c: string) => String(c || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const normalizeDt = (d: string) => String(d || '').trim().slice(0, 10);
 
+    const relevantAttendance = activeCounselor ? filterAttendanceHistory(attendanceHistory || [], activeCounselor) : (attendanceHistory || []);
     const recordedClassesSet = new Set<string>();
 
-    (attendanceHistory || []).forEach((r: any) => {
+    relevantAttendance.forEach((r: any) => {
       if (!r) return;
       const rDate = normalizeDt(r.date);
       const isToday = rDate === todayLocal || rDate === todayUtc;
@@ -159,8 +184,11 @@ export default function DashboardView({
     });
 
     const availableClasses = Array.from(new Set(students.map((s) => s.class))).filter(Boolean).sort();
+    const allowedFromCounselor = getAllowedClassesList(activeCounselor);
     const allClasses = availableClasses.length > 0
       ? availableClasses
+      : allowedFromCounselor.length > 0
+      ? allowedFromCounselor
       : ['7A', '7B', '7C', '7D', '8A', '8B', '8C', '8D', '9A', '9B', '9C', '9D'];
 
     const unrecorded = allClasses.filter((c) => !recordedClassesSet.has(normalizeCls(c)));
@@ -171,205 +199,186 @@ export default function DashboardView({
       recordedCount,
       unrecorded,
     };
-  }, [students, attendanceHistory]);
+  }, [students, attendanceHistory, activeCounselor]);
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-300 pb-8">
-      {/* 🤖 REKAN AI BK - DAILY ASSISTANT & STEP-BY-STEP WORKFLOW WIDGET */}
-      <AiAssistantWidget
-        counselor={activeCounselor || { id: 'c1', name: 'Guru BK', nip: '-', role: 'Bimbingan Konseling', avatar: '', allowedClasses: [] }}
-        students={students}
+    <div className="space-y-6 animate-in fade-in duration-300 pb-[100px]">
+      {/* 🔔 PENGINGAT TINDAK LANJUT (PALING ATAS BERANDA) */}
+      <PengingatTindakLanjutWidget
         services={services}
-        violations={violations}
+        students={students}
+        activeCounselor={activeCounselor}
+        isPrivacyMode={isPrivacyMode}
         onNavigateToTab={onNavigateToTab}
-        onNavigateToForm={onNavigateToForm}
       />
 
-      {/* 🚀 QUICK ACTION BAR (AKSI CEPAT HARIAN) */}
+      {/* 🚀 3 TOMBOL BESAR UTAMA GURU BK DI ATAS BERANDA */}
       <div className="space-y-3">
-        <div className="bg-white p-5 rounded-2xl border border-[#bcc9c6]/30 shadow-2xs">
-          <div className="flex items-center justify-between gap-2 mb-4 px-1">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#00685f]"></span>
-              <h3 className="text-sm font-extrabold text-[#0b1c30]">
-                Aksi Cepat Harian
-              </h3>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-[#3d4947]/70 font-semibold hidden sm:inline">
-                Pintasan alur kerja harian Guru BK
-              </span>
-              <button
-                type="button"
-                onClick={togglePrivacyMode}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all border cursor-pointer active:scale-97 ${
-                  isPrivacyMode
-                    ? 'bg-amber-500 hover:bg-amber-600 text-slate-950 border-amber-400 shadow-2xs'
-                    : 'bg-[#e6f4f1] hover:bg-[#d8ece7] text-[#00685f] border-[#00685f]/30'
-                }`}
-                title={isPrivacyMode ? 'Tampilkan Nama Lengkap Siswa' : 'Sembunyikan Nama Siswa (Privacy)'}
-              >
-                {isPrivacyMode ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                <span>{isPrivacyMode ? 'Mode Privasi (Aktif)' : 'Mode Privasi'}</span>
-              </button>
-            </div>
+        <div className="flex items-center justify-between gap-2 px-1">
+          <div>
+            <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#00685f] bg-[#00685f]/10 px-2.5 py-0.5 rounded-md border border-[#00685f]/15">
+              Aksi Cepat Beranda
+            </span>
+            <h2 className="text-xl sm:text-2xl font-black text-[#0b1c30] mt-1 tracking-tight">
+              Pintasan Utama Guru BK
+            </h2>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            <button
-              type="button"
-              onClick={() => onNavigateToTab('jurnal-harian')}
-              className="flex items-center gap-3 p-3.5 bg-[#f8faf9] hover:bg-[#e6f4f1] border border-[#bcc9c6]/30 hover:border-[#00685f]/40 rounded-xl text-left transition-all cursor-pointer group active:scale-98 shadow-2xs"
-            >
-              <div className="w-9 h-9 rounded-xl bg-[#00685f]/10 text-[#00685f] flex items-center justify-center shrink-0 group-hover:bg-[#00685f] group-hover:text-white transition-colors">
-                <BookOpen className="w-4.5 h-4.5" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-extrabold text-[#0b1c30] group-hover:text-[#00685f] truncate">Jurnal Harian</p>
-                <p className="text-[11px] text-[#3d4947]/70 truncate">Agenda harian</p>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onNavigateToTab('absensi')}
-              className="flex items-center gap-3 p-3.5 bg-[#f8faf9] hover:bg-[#e6f4f1] border border-[#bcc9c6]/30 hover:border-[#00685f]/40 rounded-xl text-left transition-all cursor-pointer group active:scale-98 shadow-2xs"
-            >
-              <div className="w-9 h-9 rounded-xl bg-teal-50 text-teal-700 border border-teal-100 flex items-center justify-center shrink-0 group-hover:bg-[#00685f] group-hover:text-white transition-colors">
-                <CheckCircle2 className="w-4.5 h-4.5" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-extrabold text-[#0b1c30] group-hover:text-[#00685f] truncate">Absensi Kelas</p>
-                <p className="text-[11px] text-[#3d4947]/70 truncate">Presensi harian</p>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onNavigateToForm('tambah-layanan')}
-              className="flex items-center gap-3 p-3.5 bg-[#f8faf9] hover:bg-[#e6f4f1] border border-[#bcc9c6]/30 hover:border-[#00685f]/40 rounded-xl text-left transition-all cursor-pointer group active:scale-98 shadow-2xs"
-            >
-              <div className="w-9 h-9 rounded-xl bg-cyan-50 text-cyan-700 border border-cyan-100 flex items-center justify-center shrink-0 group-hover:bg-[#00685f] group-hover:text-white transition-colors">
-                <HeartHandshake className="w-4.5 h-4.5" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-extrabold text-[#0b1c30] group-hover:text-[#00685f] truncate">Layanan BK</p>
-                <p className="text-[11px] text-[#3d4947]/70 truncate">Konseling siswa</p>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onNavigateToForm('pelanggaran')}
-              className="flex items-center gap-3 p-3.5 bg-[#f8faf9] hover:bg-amber-50/70 border border-[#bcc9c6]/30 hover:border-amber-400/50 rounded-xl text-left transition-all cursor-pointer group active:scale-98 shadow-2xs"
-            >
-              <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-700 border border-amber-100 flex items-center justify-center shrink-0 group-hover:bg-amber-600 group-hover:text-white transition-colors">
-                <AlertTriangle className="w-4.5 h-4.5" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-extrabold text-[#0b1c30] group-hover:text-amber-800 truncate">Pembinaan</p>
-                <p className="text-[11px] text-[#3d4947]/70 truncate">Restitusi perilaku</p>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onNavigateToTab('home-visit')}
-              className="flex items-center gap-3 p-3.5 bg-[#f8faf9] hover:bg-indigo-50/70 border border-[#bcc9c6]/30 hover:border-indigo-400/50 rounded-xl text-left transition-all cursor-pointer group active:scale-98 shadow-2xs"
-            >
-              <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-100 flex items-center justify-center shrink-0 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
-                <Home className="w-4.5 h-4.5" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-extrabold text-[#0b1c30] group-hover:text-indigo-800 truncate">Home Visit</p>
-                <p className="text-[11px] text-[#3d4947]/70 truncate">Kunjungan rumah</p>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onNavigateToForm('apresiasi')}
-              className="flex items-center gap-3 p-3.5 bg-[#f8faf9] hover:bg-emerald-50/70 border border-[#bcc9c6]/30 hover:border-emerald-400/50 rounded-xl text-left transition-all cursor-pointer group active:scale-98 shadow-2xs"
-            >
-              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-100 flex items-center justify-center shrink-0 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
-                <Award className="w-4.5 h-4.5" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-extrabold text-[#0b1c30] group-hover:text-emerald-800 truncate">Apresiasi</p>
-                <p className="text-[11px] text-[#3d4947]/70 truncate">Prestasi siswa</p>
-              </div>
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={togglePrivacyMode}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all border cursor-pointer active:scale-97 ${
+              isPrivacyMode
+                ? 'bg-amber-500 hover:bg-amber-600 text-slate-950 border-amber-400 shadow-2xs'
+                : 'bg-white hover:bg-gray-100 text-[#00685f] border-[#bcc9c6]/50 shadow-2xs'
+            }`}
+            title={isPrivacyMode ? 'Tampilkan Nama Lengkap Siswa' : 'Sembunyikan Nama Siswa (Privacy)'}
+          >
+            {isPrivacyMode ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">{isPrivacyMode ? 'Mode Privasi (Aktif)' : 'Mode Privasi'}</span>
+          </button>
         </div>
 
-        {/* Pengingat Presensi Harian Per Kelas */}
+        {/* 3 Tombol Besar: [Absen Hari Ini] [Catat Kasus Baru] [Chat Si Becik] */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+          {/* 1. Absen Hari Ini */}
+          <button
+            type="button"
+            onClick={() => onNavigateToTab('absensi')}
+            className="flex items-center gap-4 p-4 sm:p-5 bg-gradient-to-br from-teal-600 to-[#00685f] hover:from-teal-700 hover:to-[#005049] text-white rounded-2xl shadow-md hover:shadow-lg transition-all cursor-pointer text-left active:scale-98 group"
+          >
+            <div className="w-13 h-13 rounded-2xl bg-white/15 flex items-center justify-center shrink-0 border border-white/20 group-hover:scale-105 transition-transform shadow-inner">
+              <CheckCircle2 className="w-7 h-7 text-white stroke-[2.5]" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <span className="text-[10px] font-black tracking-wider uppercase text-teal-200">Presensi Harian</span>
+              <p className="text-base sm:text-lg font-black tracking-tight leading-tight">Absen Hari Ini</p>
+              <p className="text-xs text-teal-100 font-medium mt-0.5 opacity-90 truncate">Cek & input kehadiran kelas</p>
+            </div>
+            <ChevronRight className="w-5 h-5 text-teal-200 group-hover:translate-x-1 transition-transform shrink-0" />
+          </button>
+
+          {/* 2. Catat Kasus Baru */}
+          <button
+            type="button"
+            onClick={() => onNavigateToForm('pelanggaran')}
+            className="flex items-center gap-4 p-4 sm:p-5 bg-gradient-to-br from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white rounded-2xl shadow-md hover:shadow-lg transition-all cursor-pointer text-left active:scale-98 group"
+          >
+            <div className="w-13 h-13 rounded-2xl bg-white/15 flex items-center justify-center shrink-0 border border-white/20 group-hover:scale-105 transition-transform shadow-inner">
+              <AlertTriangle className="w-7 h-7 text-white stroke-[2.5]" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <span className="text-[10px] font-black tracking-wider uppercase text-blue-200">Disiplin & Kasus</span>
+              <p className="text-base sm:text-lg font-black tracking-tight leading-tight">Catat Kasus Baru</p>
+              <p className="text-xs text-blue-100 font-medium mt-0.5 opacity-90 truncate">Input masalah siswa & bobot poin</p>
+            </div>
+            <ChevronRight className="w-5 h-5 text-blue-200 group-hover:translate-x-1 transition-transform shrink-0" />
+          </button>
+
+          {/* 3. Chat Si Becik */}
+          <button
+            type="button"
+            onClick={() => {
+              const el = document.getElementById('chat-si-becik-section');
+              if (el) {
+                el.scrollIntoView({ behavior: 'smooth' });
+              }
+            }}
+            className="flex items-center gap-4 p-4 sm:p-5 bg-gradient-to-br from-purple-600 to-violet-700 hover:from-purple-700 hover:to-violet-800 text-white rounded-2xl shadow-md hover:shadow-lg transition-all cursor-pointer text-left active:scale-98 group"
+          >
+            <div className="w-13 h-13 rounded-2xl bg-white/15 flex items-center justify-center shrink-0 border border-white/20 group-hover:scale-105 transition-transform shadow-inner">
+              <Sparkles className="w-7 h-7 text-white stroke-[2.5]" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <span className="text-[10px] font-black tracking-wider uppercase text-purple-200">Kecerdasan Buatan</span>
+              <p className="text-base sm:text-lg font-black tracking-tight leading-tight">Chat Si Becik</p>
+              <p className="text-xs text-purple-100 font-medium mt-0.5 opacity-90 truncate">Konsultasi solusi bimbingan BK</p>
+            </div>
+            <ChevronRight className="w-5 h-5 text-purple-200 group-hover:translate-x-1 transition-transform shrink-0" />
+          </button>
+        </div>
+
+        {/* 📋 KELAS BELUM DIABSEN (TAMPIL TEPAT DI BAWAH 3 TOMBOL BESAR) */}
         {attendanceReminderData.unrecorded.length > 0 ? (
           <motion.div
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-amber-50/80 border border-amber-300/70 rounded-xl px-4 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs"
+            className="bg-amber-50/90 border border-amber-300 rounded-2xl p-4 sm:p-5 shadow-xs"
           >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-6 h-6 rounded-lg bg-amber-500/20 text-amber-800 border border-amber-400/40 flex items-center justify-center shrink-0">
-                <Clock className="w-3.5 h-3.5 text-amber-700 animate-pulse" />
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-800 border border-amber-400/40 flex items-center justify-center shrink-0">
+                  <Clock className="w-4 h-4 text-amber-700 animate-pulse" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-black text-[#0b1c30]">
+                    Kelas Belum Diabsen ({attendanceReminderData.unrecorded.length} Kelas)
+                  </h4>
+                  <p className="text-xs text-[#3d4947]">
+                    {attendanceReminderData.recordedCount} dari {attendanceReminderData.totalClasses} kelas telah lengkap diabsen hari ini
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-2 flex-wrap min-w-0">
-                <span className="text-xs font-extrabold text-[#0b1c30]">Pengingat Absensi:</span>
-                <span className="text-[11px] font-extrabold px-2 py-0.5 bg-amber-200/80 text-amber-950 rounded-md border border-amber-300/70 shrink-0">
-                  {attendanceReminderData.unrecorded.length} Kelas Belum Diabsen
-                </span>
-                <span className="text-[11px] text-[#3d4947]/70 hidden md:inline font-semibold">
-                  ({attendanceReminderData.recordedCount}/{attendanceReminderData.totalClasses} kelas selesai hari ini)
-                </span>
-              </div>
+
+              <button
+                type="button"
+                onClick={() => onNavigateToTab('absensi')}
+                className="text-xs font-black text-amber-900 hover:text-amber-950 underline self-start sm:self-auto cursor-pointer"
+              >
+                Buka Modul Absensi Lengkap →
+              </button>
             </div>
 
-            <div className="flex items-center gap-1.5 flex-wrap shrink-0 self-stretch sm:self-auto justify-start sm:justify-end">
-              {attendanceReminderData.unrecorded.slice(0, 4).map((cls) => (
+            {/* Quick buttons per unrecorded class */}
+            <div className="flex items-center gap-2 flex-wrap pt-1">
+              {attendanceReminderData.unrecorded.map((cls) => (
                 <button
                   key={cls}
                   type="button"
                   onClick={() => onNavigateToTab('absensi', cls)}
-                  className="px-2 py-1 text-[11px] font-extrabold bg-white hover:bg-[#e6f4f1] text-[#00685f] hover:text-[#005049] border border-amber-300/80 hover:border-[#00685f]/50 rounded-lg transition-all cursor-pointer shadow-2xs active:scale-95 flex items-center gap-1"
+                  className="px-3 py-1.5 bg-white hover:bg-amber-100/70 text-amber-950 border border-amber-300 rounded-xl text-xs font-extrabold shadow-2xs transition-all cursor-pointer active:scale-95 flex items-center gap-1.5"
                 >
-                  <span className="text-[#00685f]">+</span> {cls}
+                  <span className="text-[#00685f] font-black">+</span> Absen Kelas {cls}
                 </button>
               ))}
-              {attendanceReminderData.unrecorded.length > 4 && (
-                <button
-                  type="button"
-                  onClick={() => onNavigateToTab('absensi')}
-                  className="px-2 py-1 text-[11px] font-bold bg-amber-700 hover:bg-amber-800 text-white rounded-lg transition-all cursor-pointer shadow-2xs active:scale-95"
-                >
-                  +{attendanceReminderData.unrecorded.length - 4} Lainnya
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => onNavigateToTab('absensi')}
-                className="text-[11px] font-bold text-[#00685f] hover:text-[#005049] hover:underline px-1.5 py-1 cursor-pointer ml-1"
-              >
-                Modul Absensi →
-              </button>
             </div>
           </motion.div>
         ) : (
-          <div className="bg-emerald-50/60 border border-emerald-200/60 rounded-xl px-4 py-2.5 flex items-center justify-between gap-3 shadow-2xs">
-            <div className="flex items-center gap-2 min-w-0">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-              <p className="text-xs font-bold text-emerald-900 truncate">
-                Presensi Lengkap: Seluruh {attendanceReminderData.totalClasses} kelas telah diabsen hari ini.
-              </p>
+          <div className="bg-emerald-50/70 border border-emerald-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-emerald-500 text-white flex items-center justify-center font-black text-sm shrink-0">
+                ✓
+              </div>
+              <div>
+                <p className="text-xs sm:text-sm font-black text-emerald-950">
+                  Kelas Belum Diabsen: Nihil (Semua Kelas Sudah Diabsen Hari Ini!)
+                </p>
+                <p className="text-[11px] text-emerald-800">
+                  Presensi {attendanceReminderData.totalClasses} kelas telah lengkap tercatat dalam sistem.
+                </p>
+              </div>
             </div>
             <button
               type="button"
               onClick={() => onNavigateToTab('absensi')}
-              className="text-[11px] font-extrabold text-[#00685f] hover:text-[#005049] hover:underline cursor-pointer shrink-0"
+              className="text-xs font-extrabold text-[#00685f] hover:underline self-start sm:self-auto cursor-pointer"
             >
-              Rekap Presensi →
+              Lihat Rekap Absensi →
             </button>
           </div>
         )}
+      </div>
+
+      {/* 🤖 REKAN AI BK - CHAT SI BECIK (TARGET SCROLL DARI TOMBOL ATAS) */}
+      <div id="chat-si-becik-section">
+        <AiAssistantWidget
+          counselor={activeCounselor || { id: 'c1', name: 'Guru BK', nip: '-', role: 'Bimbingan Konseling', avatar: '', allowedClasses: [] }}
+          students={students}
+          services={services}
+          violations={violations}
+          onNavigateToTab={onNavigateToTab}
+          onNavigateToForm={onNavigateToForm}
+        />
       </div>
 
       {/* 📊 SEKSI 1: IKHTISAR & ANALITIK LAYANAN BK */}
@@ -378,367 +387,455 @@ export default function DashboardView({
           services={services}
           violations={violations}
           achievements={achievements}
+          students={students}
+          attendanceHistory={activeCounselor ? filterAttendanceHistory(attendanceHistory || [], activeCounselor) : attendanceHistory}
           onNavigateToTab={onNavigateToTab}
         />
       </div>
 
-      {/* 🔄 SEKSI 2: KASUS & RESTITUSI PERILAKU DALAM PROSES */}
-      <div className="bg-white p-6 sm:p-8 rounded-2xl shadow-2xs border border-[#bcc9c6]/30 space-y-6">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-[#bcc9c6]/20">
-          <div>
-            <h3 className="text-base font-extrabold text-[#0b1c30] flex items-center gap-2">
-              <Inbox className="w-5 h-5 text-[#00685f] shrink-0" />
-              <span>Kasus & Rekonstruksi Perilaku Dalam Proses</span>
-            </h3>
-            <p className="text-xs text-[#3d4947]/70 font-semibold mt-0.5">
-              Daftar bimbingan perilaku yang dalam proses restitusi atau layanan konseling terjadwal yang memerlukan pendampingan.
-            </p>
+      {/* 📊 SEKSI 1B: GRAFIK BATANG BULANAN JENIS LAYANAN BK (RECHARTS VISUALIZER) */}
+      <div>
+        <GrafikLayananBulananCard
+          services={services}
+          onNavigateToForm={onNavigateToForm}
+          onNavigateToTab={onNavigateToTab}
+        />
+      </div>
+
+      {/* 🔄 SEKSI 2: MONITORING KASUS & RESTITUSI (FLEKSIBEL / COLLAPSIBLE) */}
+      <div className="bg-white rounded-2xl shadow-2xs border border-[#bcc9c6]/30 overflow-hidden transition-all duration-200">
+        {/* Compact Summary Header (Always visible, clean, non-intrusive) */}
+        <div className="p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-center gap-3.5 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-700 border border-amber-200/60 flex items-center justify-center shrink-0">
+              <Gavel className="w-5 h-5 text-amber-600" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-extrabold text-[#0b1c30]">
+                  Bimbingan Kasus & Restitusi Perilaku
+                </h3>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {unresolvedViolations.length > 0 ? (
+                    <span className="text-[10px] bg-rose-50 text-rose-700 border border-rose-200 font-extrabold px-2 py-0.5 rounded-md">
+                      {unresolvedViolations.length} Restitusi Pending
+                    </span>
+                  ) : (
+                    <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 font-extrabold px-2 py-0.5 rounded-md">
+                      ✓ Restitusi Nihil
+                    </span>
+                  )}
+                  {unresolvedServices.length > 0 && (
+                    <span className="text-[10px] bg-teal-50 text-[#00685f] border border-teal-200 font-extrabold px-2 py-0.5 rounded-md">
+                      {unresolvedServices.length} Konseling Terjadwal
+                    </span>
+                  )}
+                </div>
+              </div>
+              <p className="text-xs text-[#3d4947]/70 font-semibold mt-0.5">
+                {unresolvedViolations.length > 0
+                  ? `${unresolvedViolations.length} pembinaan perilaku siswa memerlukan pendampingan restoratif`
+                  : 'Seluruh rekam bimbingan perilaku siswa telah selesai ditindaklanjuti.'}
+              </p>
+            </div>
           </div>
 
-          {/* Tab Toggles with Counts */}
-          <div className="flex bg-[#f4f7f6] p-1.5 rounded-xl border border-[#bcc9c6]/30 self-start md:self-center">
+          {/* Action & Toggle Controls */}
+          <div className="flex items-center gap-2 shrink-0 self-start md:self-center flex-wrap">
             <button
               type="button"
-              onClick={() => {
-                setUnresolvedTab('violation');
-                setHandlingViolationId(null);
-                setHandlingServiceId(null);
-              }}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
-                unresolvedTab === 'violation'
-                  ? 'bg-white text-rose-700 shadow-2xs font-extrabold'
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
+              onClick={() => onNavigateToTab('pembinaan-pendisiplinan')}
+              className="px-3.5 py-2 bg-[#f8faf9] hover:bg-[#e6f4f1] text-[#00685f] hover:text-[#005049] border border-[#bcc9c6]/40 hover:border-[#00685f]/40 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-2xs active:scale-97 flex items-center gap-1.5"
+              title="Buka Buku Kasus & Pembinaan Lengkap"
             >
-              <span>Restitusi Perilaku</span>
-              <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-black ${
-                unresolvedTab === 'violation' ? 'bg-rose-100 text-rose-700' : 'bg-gray-200 text-gray-600'
-              }`}>
-                {unresolvedViolations.length}
-              </span>
+              <span>Buka Buku Kasus</span>
+              <ExternalLink className="w-3.5 h-3.5" />
             </button>
+
             <button
               type="button"
-              onClick={() => {
-                setUnresolvedTab('service');
-                setHandlingViolationId(null);
-                setHandlingServiceId(null);
-              }}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
-                unresolvedTab === 'service'
-                  ? 'bg-white text-[#00685f] shadow-2xs font-extrabold'
-                  : 'text-gray-500 hover:text-gray-700'
+              onClick={toggleCasesSection}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-2xs active:scale-97 flex items-center gap-1.5 border ${
+                isCasesSectionOpen
+                  ? 'bg-amber-50 text-amber-900 border-amber-300'
+                  : 'bg-white hover:bg-gray-50 text-[#0b1c30] border-[#bcc9c6]/50'
               }`}
+              title={isCasesSectionOpen ? 'Sembunyikan detail kasus dari dashboard' : 'Tampilkan daftar kasus di dashboard'}
             >
-              <span>Layanan BK Terjadwal</span>
-              <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-black ${
-                unresolvedTab === 'service' ? 'bg-teal-100 text-[#00685f]' : 'bg-gray-200 text-gray-600'
-              }`}>
-                {unresolvedServices.length}
-              </span>
+              <span>{isCasesSectionOpen ? 'Sembunyikan Panel' : 'Lihat di Dashboard'}</span>
+              {isCasesSectionOpen ? (
+                <ChevronUp className="w-4 h-4 text-amber-700" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-gray-500" />
+              )}
             </button>
           </div>
         </div>
 
-        {/* Content Area */}
-        <div className="space-y-4">
-          <AnimatePresence mode="wait">
-            {unresolvedTab === 'violation' ? (
-              <motion.div
-                key="unresolved-violations"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.2 }}
-                className="space-y-4"
-              >
-                {unresolvedViolations.length === 0 ? (
-                  <div className="py-12 text-center bg-emerald-50/20 rounded-2xl border border-dashed border-emerald-200">
-                    <Check className="w-10 h-10 text-emerald-500 mx-auto mb-2.5 bg-emerald-50 p-2 rounded-full" />
-                    <h4 className="text-xs font-extrabold text-emerald-950">Seluruh Kasus Perilaku Telah Direstitusi</h4>
-                    <p className="text-[11px] text-emerald-800/80 mt-0.5 max-w-sm mx-auto leading-relaxed font-medium">
-                      Hebat! Seluruh rekam bimbingan perilaku siswa telah selesai ditindaklanjuti secara restoratif.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {unresolvedViolations.slice(0, 6).map((v) => {
-                      const isExpanding = handlingViolationId === v.id;
+        {/* Collapsible Expanded Panel */}
+        <AnimatePresence>
+          {isCasesSectionOpen && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.25 }}
+              className="border-t border-[#bcc9c6]/25 p-5 sm:p-6 bg-[#fcfdfd] space-y-5 overflow-hidden"
+            >
+              {/* Tab Selector Inside Panel */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#bcc9c6]/20">
+                <div className="flex bg-[#f4f7f6] p-1.5 rounded-xl border border-[#bcc9c6]/30 self-start">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUnresolvedTab('violation');
+                      setHandlingViolationId(null);
+                      setHandlingServiceId(null);
+                    }}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                      unresolvedTab === 'violation'
+                        ? 'bg-white text-rose-700 shadow-2xs font-extrabold'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    <span>Restitusi Perilaku</span>
+                    <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-black ${
+                      unresolvedTab === 'violation' ? 'bg-rose-100 text-rose-700' : 'bg-gray-200 text-gray-600'
+                    }`}>
+                      {unresolvedViolations.length}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUnresolvedTab('service');
+                      setHandlingViolationId(null);
+                      setHandlingServiceId(null);
+                    }}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                      unresolvedTab === 'service'
+                        ? 'bg-white text-[#00685f] shadow-2xs font-extrabold'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    <span>Layanan BK Terjadwal</span>
+                    <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-black ${
+                      unresolvedTab === 'service' ? 'bg-teal-100 text-[#00685f]' : 'bg-gray-200 text-gray-600'
+                    }`}>
+                      {unresolvedServices.length}
+                    </span>
+                  </button>
+                </div>
 
-                      return (
-                        <div
-                          key={v.id}
-                          className={`p-4 rounded-2xl border transition-all duration-200 flex flex-col justify-between ${
-                            isExpanding
-                              ? 'border-rose-400 bg-rose-50/15 ring-1 ring-rose-400/20 shadow-xs'
-                              : 'border-rose-100 bg-rose-50/5 hover:bg-rose-50/10 hover:border-rose-200 shadow-2xs'
-                          }`}
-                        >
-                          <div className="space-y-2">
-                            <div className="flex justify-between items-start gap-4">
-                              <span className="text-[10px] font-extrabold bg-rose-100/70 text-rose-700 px-2 py-0.5 rounded-lg uppercase tracking-wide border border-rose-200/50">
-                                {v.category}
-                              </span>
-                              <span className="text-xs font-extrabold text-rose-600 font-mono">
-                                Bobot: {v.pointsAdded}
-                              </span>
-                            </div>
+                <span className="text-xs text-[#3d4947]/70 font-semibold">
+                  Menampilkan maksimal 6 data terbaru yang butuh tindak lanjut
+                </span>
+              </div>
 
-                            <div>
-                              <h4
-                                onClick={() => onNavigateToTab('data-siswa', v.studentName)}
-                                className="font-extrabold text-xs text-[#0b1c30] hover:underline cursor-pointer inline-flex items-center gap-1.5"
+              {/* Content Area */}
+              <div className="space-y-4">
+                <AnimatePresence mode="wait">
+                  {unresolvedTab === 'violation' ? (
+                    <motion.div
+                      key="unresolved-violations"
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -8 }}
+                      transition={{ duration: 0.2 }}
+                      className="space-y-4"
+                    >
+                      {unresolvedViolations.length === 0 ? (
+                        <div className="py-10 text-center bg-emerald-50/20 rounded-2xl border border-dashed border-emerald-200">
+                          <Check className="w-9 h-9 text-emerald-500 mx-auto mb-2 bg-emerald-50 p-2 rounded-full" />
+                          <h4 className="text-xs font-extrabold text-emerald-950">Seluruh Kasus Perilaku Telah Direstitusi</h4>
+                          <p className="text-[11px] text-emerald-800/80 mt-0.5 max-w-sm mx-auto leading-relaxed font-medium">
+                            Hebat! Seluruh rekam bimbingan perilaku siswa telah selesai ditindaklanjuti secara restoratif.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {unresolvedViolations.slice(0, 6).map((v, idx) => {
+                            const isExpanding = handlingViolationId === v.id;
+
+                            return (
+                              <div
+                                key={v.id}
+                                className={`p-4 rounded-2xl border transition-all duration-200 flex flex-col justify-between ${
+                                  isExpanding
+                                    ? 'border-rose-400 bg-rose-50/15 ring-1 ring-rose-400/20 shadow-xs'
+                                    : 'border-rose-100 bg-white hover:bg-rose-50/10 hover:border-rose-200 shadow-2xs'
+                                }`}
                               >
-                                {maskStudentName(v.studentName, isPrivacyMode)}
-                                <span className="text-xs text-gray-400 font-semibold font-mono">({v.studentClass})</span>
-                              </h4>
-                              <p className="text-[11px] text-[#3d4947]/70 font-semibold mt-0.5">
-                                Tanggal: {v.date} &bull; {v.time} WIB
-                              </p>
-                            </div>
+                                <div className="space-y-2">
+                                  <div className="flex justify-between items-start gap-4">
+                                    <span className="text-[10px] font-extrabold bg-rose-100/70 text-rose-700 px-2 py-0.5 rounded-lg uppercase tracking-wide border border-rose-200/50">
+                                      {v.category}
+                                    </span>
+                                    <span className="text-xs font-extrabold text-rose-600 font-mono">
+                                      Bobot: {v.pointsAdded}
+                                    </span>
+                                  </div>
 
-                            <div className="bg-white p-2.5 rounded-xl border border-gray-100 text-xs text-gray-600 italic leading-relaxed">
-                              "{v.notes || 'Tidak ada catatan detail.'}"
-                            </div>
-                            
-                            <p className="text-[10px] text-gray-400 font-semibold">
-                              Dilaporkan oleh: <span className="font-bold text-gray-500">{v.reportedBy}</span>
-                            </p>
-                          </div>
+                                  <div>
+                                    <h4
+                                      onClick={() => onNavigateToTab('data-siswa', v.studentName)}
+                                      className="font-extrabold text-xs text-[#0b1c30] hover:underline cursor-pointer inline-flex items-center gap-1.5"
+                                      title="Klik untuk melihat profil lengkap siswa di halaman Data Siswa"
+                                    >
+                                      <span>Siswa {idx + 1} ({v.studentClass || '-'})</span>
+                                    </h4>
+                                    <p className="text-[11px] text-[#3d4947]/70 font-semibold mt-0.5">
+                                      Tanggal: {v.date} &bull; {v.time} WIB
+                                    </p>
+                                  </div>
 
-                          <div className="mt-4 pt-3 border-t border-gray-100/60 flex flex-col gap-2.5">
-                            {!isExpanding ? (
-                              <div className="flex gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setHandlingViolationId(v.id);
-                                    setHandlingHandledBy('Guru BK');
-                                    setHandlingProgress('');
-                                    setHandlingServiceId(null);
-                                  }}
-                                  className="flex-1 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
-                                >
-                                  <AlertCircle className="w-3.5 h-3.5" />
-                                  <span>Tindak Lanjuti & Selesaikan</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => onNavigateToTab('data-siswa', v.studentName)}
-                                  className="py-2 px-3 bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 text-xs font-extrabold rounded-xl transition-colors flex items-center justify-center cursor-pointer shadow-2xs"
-                                  title="Lihat Profil Detail"
-                                >
-                                  <Eye className="w-4 h-4" />
-                                </button>
-                              </div>
-                            ) : (
-                              <motion.div
-                                initial={{ opacity: 0, height: 0 }}
-                                animate={{ opacity: 1, height: 'auto' }}
-                                className="space-y-3 text-left"
-                              >
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-extrabold text-gray-600 uppercase tracking-wider block">
-                                    Pihak Penanggung Jawab:
-                                  </label>
-                                  <div className="grid grid-cols-3 gap-1.5">
-                                    {(['Guru BK', 'Wali Kelas', 'Wali Kelas & Guru BK'] as const).map((role) => (
+                                  <div className="bg-[#f8faf9] p-2.5 rounded-xl border border-gray-100 text-xs text-gray-600 italic leading-relaxed">
+                                    "{v.notes || 'Tidak ada catatan detail.'}"
+                                  </div>
+                                  
+                                  <p className="text-[10px] text-gray-400 font-semibold">
+                                    Dilaporkan oleh: <span className="font-bold text-gray-500">{v.reportedBy}</span>
+                                  </p>
+                                </div>
+
+                                <div className="mt-4 pt-3 border-t border-gray-100/60 flex flex-col gap-2.5">
+                                  {!isExpanding ? (
+                                    <div className="flex gap-2">
                                       <button
-                                        key={role}
                                         type="button"
-                                        onClick={() => setHandlingHandledBy(role)}
-                                        className={`py-1 px-1.5 rounded-lg text-[10px] font-extrabold border transition-all ${
-                                          handlingHandledBy === role
-                                            ? 'bg-rose-50 border-rose-300 text-rose-700'
-                                            : 'bg-white border-gray-200 text-gray-500 hover:text-gray-700'
-                                        }`}
+                                        onClick={() => {
+                                          setHandlingViolationId(v.id);
+                                          setHandlingHandledBy('Guru BK');
+                                          setHandlingProgress('');
+                                          setHandlingServiceId(null);
+                                        }}
+                                        className="flex-1 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
                                       >
-                                        {role}
+                                        <AlertCircle className="w-3.5 h-3.5" />
+                                        <span>Tindak Lanjuti & Selesaikan</span>
                                       </button>
-                                    ))}
+                                      <button
+                                        type="button"
+                                        onClick={() => onNavigateToTab('data-siswa', v.studentName)}
+                                        className="py-2 px-3 bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 text-xs font-extrabold rounded-xl transition-colors flex items-center justify-center cursor-pointer shadow-2xs"
+                                        title="Lihat Profil Detail"
+                                      >
+                                        <Eye className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <motion.div
+                                      initial={{ opacity: 0, height: 0 }}
+                                      animate={{ opacity: 1, height: 'auto' }}
+                                      className="space-y-3 text-left"
+                                    >
+                                      <div className="space-y-1">
+                                        <label className="text-[10px] font-extrabold text-gray-600 uppercase tracking-wider block">
+                                          Pihak Penanggung Jawab:
+                                        </label>
+                                        <div className="grid grid-cols-3 gap-1.5">
+                                          {(['Guru BK', 'Wali Kelas', 'Wali Kelas & Guru BK'] as const).map((role) => (
+                                            <button
+                                              key={role}
+                                              type="button"
+                                              onClick={() => setHandlingHandledBy(role)}
+                                              className={`py-1 px-1.5 rounded-lg text-[10px] font-extrabold border transition-all ${
+                                                handlingHandledBy === role
+                                                  ? 'bg-rose-50 border-rose-300 text-rose-700'
+                                                  : 'bg-white border-gray-200 text-gray-500 hover:text-gray-700'
+                                              }`}
+                                            >
+                                              {role}
+                                            </button>
+                                          ))}
+                                        </div>
+                                      </div>
+
+                                      <div className="space-y-1">
+                                        <label className="text-[10px] font-extrabold text-gray-600 uppercase tracking-wider block">
+                                          Catatan / Progres Tindakan Restitusi:
+                                        </label>
+                                        <textarea
+                                          value={handlingProgress}
+                                          onChange={(e) => setHandlingProgress(e.target.value)}
+                                          placeholder="Tuliskan tindakan pembinaan atau kesepakatan perbaikan yang disepakati..."
+                                          className="w-full text-xs p-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-rose-400 bg-white"
+                                          rows={2}
+                                          required
+                                        />
+                                      </div>
+
+                                      <div className="flex gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (!handlingProgress.trim()) {
+                                              alert('Harap isi progres penanganan terlebih dahulu!');
+                                              return;
+                                            }
+                                            if (onUpdateViolationStatus) {
+                                              onUpdateViolationStatus(v.id, handlingHandledBy, handlingProgress);
+                                              setHandlingViolationId(null);
+                                            }
+                                          }}
+                                          className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl transition-colors cursor-pointer"
+                                        >
+                                          Simpan & Selesaikan
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setHandlingViolationId(null)}
+                                          className="py-1.5 px-3 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-extrabold rounded-xl transition-colors cursor-pointer"
+                                        >
+                                          Batal
+                                        </button>
+                                      </div>
+                                    </motion.div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key="unresolved-services"
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -8 }}
+                      transition={{ duration: 0.2 }}
+                      className="space-y-4"
+                    >
+                      {unresolvedServices.length === 0 ? (
+                        <div className="py-10 text-center bg-teal-50/20 rounded-2xl border border-dashed border-teal-200">
+                          <Check className="w-9 h-9 text-teal-600 mx-auto mb-2 bg-teal-50 p-2 rounded-full" />
+                          <h4 className="text-xs font-extrabold text-teal-950">Tidak Ada Layanan Terjadwal Pending</h4>
+                          <p className="text-[11px] text-teal-800/80 mt-0.5 max-w-sm mx-auto leading-relaxed font-medium">
+                            Semua agenda layanan konseling siswa telah terselesaikan sesuai jadwal.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {unresolvedServices.slice(0, 6).map((srv, idx) => {
+                            const isExpanding = handlingServiceId === srv.id;
+
+                            return (
+                              <div
+                                key={srv.id}
+                                className={`p-4 rounded-2xl border transition-all duration-200 flex flex-col justify-between ${
+                                  isExpanding
+                                    ? 'border-[#00685f] bg-[#e6f4f1]/30 ring-1 ring-[#00685f]/20 shadow-xs'
+                                    : 'border-[#bcc9c6]/30 bg-white hover:bg-[#e6f4f1]/20 shadow-2xs'
+                                }`}
+                              >
+                                <div className="space-y-2">
+                                  <div className="flex justify-between items-start gap-4">
+                                    <span className="text-[10px] font-extrabold bg-[#e6f4f1] text-[#00685f] px-2 py-0.5 rounded-lg uppercase tracking-wide border border-[#00685f]/20">
+                                      {srv.serviceType}
+                                    </span>
+                                    <span className="text-xs font-extrabold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
+                                      Terjadwal
+                                    </span>
+                                  </div>
+
+                                  <div>
+                                    <h4 
+                                      onClick={() => srv.students?.[0] && onNavigateToTab('data-siswa', srv.students[0].name)}
+                                      className="font-extrabold text-xs text-[#0b1c30] hover:underline cursor-pointer inline-flex items-center gap-1.5"
+                                      title="Klik untuk melihat profil lengkap siswa di halaman Data Siswa"
+                                    >
+                                      <span>Siswa {idx + 1} ({srv.students?.map((s) => s.class).join(', ') || '-'}) - {srv.serviceType}</span>
+                                    </h4>
+                                    <p className="text-[11px] text-[#3d4947]/70 font-semibold mt-0.5">
+                                      Jadwal: {srv.date} &bull; {srv.startTime} - {srv.endTime} WIB
+                                    </p>
+                                  </div>
+
+                                  <div className="bg-[#f8faf9] p-2.5 rounded-xl border border-gray-100 text-xs text-gray-600 leading-relaxed">
+                                    <span className="font-bold text-[#0b1c30]">Fokus Masalah: </span>
+                                    {srv.problem || 'Konseling umum'}
                                   </div>
                                 </div>
 
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-extrabold text-gray-600 uppercase tracking-wider block">
-                                    Catatan / Progres Tindakan Restitusi:
-                                  </label>
-                                  <textarea
-                                    value={handlingProgress}
-                                    onChange={(e) => setHandlingProgress(e.target.value)}
-                                    placeholder="Tuliskan tindakan pembinaan atau kesepakatan perbaikan yang disepakati..."
-                                    className="w-full text-xs p-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-rose-400 bg-white"
-                                    rows={2}
-                                    required
-                                  />
-                                </div>
-
-                                <div className="flex gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (!handlingProgress.trim()) {
-                                        alert('Harap isi progres penanganan terlebih dahulu!');
-                                        return;
-                                      }
-                                      if (onUpdateViolationStatus) {
-                                        onUpdateViolationStatus(v.id, handlingHandledBy, handlingProgress);
+                                <div className="mt-4 pt-3 border-t border-gray-100/60 flex flex-col gap-2.5">
+                                  {!isExpanding ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setHandlingServiceId(srv.id);
+                                        setHandlingServiceFollowUp('');
                                         setHandlingViolationId(null);
-                                      }
-                                    }}
-                                    className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl transition-colors cursor-pointer"
-                                  >
-                                    Simpan & Selesaikan
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setHandlingViolationId(null)}
-                                    className="py-1.5 px-3 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-extrabold rounded-xl transition-colors cursor-pointer"
-                                  >
-                                    Batal
-                                  </button>
+                                      }}
+                                      className="w-full py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-extrabold rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
+                                    >
+                                      <HeartHandshake className="w-3.5 h-3.5" />
+                                      <span>Selesaikan Sesi Konseling</span>
+                                    </button>
+                                  ) : (
+                                    <motion.div
+                                      initial={{ opacity: 0, height: 0 }}
+                                      animate={{ opacity: 1, height: 'auto' }}
+                                      className="space-y-3 text-left"
+                                    >
+                                      <div className="space-y-1">
+                                        <label className="text-[10px] font-extrabold text-gray-600 uppercase tracking-wider block">
+                                          Catatan Hasil Layanan & Tindak Lanjut:
+                                        </label>
+                                        <textarea
+                                          value={handlingServiceFollowUp}
+                                          onChange={(e) => setHandlingServiceFollowUp(e.target.value)}
+                                          placeholder="Tuliskan hasil sesi konseling dan rencana tindak lanjut..."
+                                          className="w-full text-xs p-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-[#00685f] bg-white"
+                                          rows={2}
+                                          required
+                                        />
+                                      </div>
+
+                                      <div className="flex gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (onUpdateServiceStatus) {
+                                              onUpdateServiceStatus(srv.id, 'Selesai', handlingServiceFollowUp);
+                                              setHandlingServiceId(null);
+                                            }
+                                          }}
+                                          className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl transition-colors cursor-pointer"
+                                        >
+                                          Tandai Selesai
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setHandlingServiceId(null)}
+                                          className="py-1.5 px-3 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-extrabold rounded-xl transition-colors cursor-pointer"
+                                        >
+                                          Batal
+                                        </button>
+                                      </div>
+                                    </motion.div>
+                                  )}
                                 </div>
-                              </motion.div>
-                            )}
-                          </div>
+                              </div>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </motion.div>
-            ) : (
-              <motion.div
-                key="unresolved-services"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.2 }}
-                className="space-y-4"
-              >
-                {unresolvedServices.length === 0 ? (
-                  <div className="py-12 text-center bg-teal-50/20 rounded-2xl border border-dashed border-teal-200">
-                    <Check className="w-10 h-10 text-teal-600 mx-auto mb-2.5 bg-teal-50 p-2 rounded-full" />
-                    <h4 className="text-xs font-extrabold text-teal-950">Tidak Ada Layanan Terjadwal Pending</h4>
-                    <p className="text-[11px] text-teal-800/80 mt-0.5 max-w-sm mx-auto leading-relaxed font-medium">
-                      Semua agenda layanan konseling siswa telah terselesaikan sesuai jadwal.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {unresolvedServices.slice(0, 6).map((srv) => {
-                      const isExpanding = handlingServiceId === srv.id;
-
-                      return (
-                        <div
-                          key={srv.id}
-                          className={`p-4 rounded-2xl border transition-all duration-200 flex flex-col justify-between ${
-                            isExpanding
-                              ? 'border-[#00685f] bg-[#e6f4f1]/30 ring-1 ring-[#00685f]/20 shadow-xs'
-                              : 'border-[#bcc9c6]/30 bg-[#f8faf9] hover:bg-[#e6f4f1]/20 shadow-2xs'
-                          }`}
-                        >
-                          <div className="space-y-2">
-                            <div className="flex justify-between items-start gap-4">
-                              <span className="text-[10px] font-extrabold bg-[#e6f4f1] text-[#00685f] px-2 py-0.5 rounded-lg uppercase tracking-wide border border-[#00685f]/20">
-                                {srv.serviceType}
-                              </span>
-                              <span className="text-xs font-extrabold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
-                                Terjadwal
-                              </span>
-                            </div>
-
-                            <div>
-                              <h4 className="font-extrabold text-xs text-[#0b1c30]">
-                                {srv.students?.map((s) => maskStudentName(s.name, isPrivacyMode)).join(', ')}
-                                <span className="text-xs text-gray-400 font-semibold font-mono ml-1">
-                                  ({srv.students?.map((s) => s.class).join(', ')})
-                                </span>
-                              </h4>
-                              <p className="text-[11px] text-[#3d4947]/70 font-semibold mt-0.5">
-                                Jadwal: {srv.date} &bull; {srv.startTime} - {srv.endTime} WIB
-                              </p>
-                            </div>
-
-                            <div className="bg-white p-2.5 rounded-xl border border-gray-100 text-xs text-gray-600 leading-relaxed">
-                              <span className="font-bold text-[#0b1c30]">Fokus Masalah: </span>
-                              {srv.problem || 'Konseling umum'}
-                            </div>
-                          </div>
-
-                          <div className="mt-4 pt-3 border-t border-gray-100/60 flex flex-col gap-2.5">
-                            {!isExpanding ? (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setHandlingServiceId(srv.id);
-                                  setHandlingServiceFollowUp('');
-                                  setHandlingViolationId(null);
-                                }}
-                                className="w-full py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-extrabold rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
-                              >
-                                <HeartHandshake className="w-3.5 h-3.5" />
-                                <span>Selesaikan Sesi Konseling</span>
-                              </button>
-                            ) : (
-                              <motion.div
-                                initial={{ opacity: 0, height: 0 }}
-                                animate={{ opacity: 1, height: 'auto' }}
-                                className="space-y-3 text-left"
-                              >
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-extrabold text-gray-600 uppercase tracking-wider block">
-                                    Catatan Hasil Layanan & Tindak Lanjut:
-                                  </label>
-                                  <textarea
-                                    value={handlingServiceFollowUp}
-                                    onChange={(e) => setHandlingServiceFollowUp(e.target.value)}
-                                    placeholder="Tuliskan hasil sesi konseling dan rencana tindak lanjut..."
-                                    className="w-full text-xs p-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-[#00685f] bg-white"
-                                    rows={2}
-                                    required
-                                  />
-                                </div>
-
-                                <div className="flex gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (onUpdateServiceStatus) {
-                                        onUpdateServiceStatus(srv.id, 'Selesai', handlingServiceFollowUp);
-                                        setHandlingServiceId(null);
-                                      }
-                                    }}
-                                    className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl transition-colors cursor-pointer"
-                                  >
-                                    Tandai Selesai
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setHandlingServiceId(null)}
-                                    className="py-1.5 px-3 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-extrabold rounded-xl transition-colors cursor-pointer"
-                                  >
-                                    Batal
-                                  </button>
-                                </div>
-                              </motion.div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* 📌 SEKSI 3: JADWAL MENGAJAR & CATATAN MEMO CEPAT */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <div className="lg:col-span-7">
           <JadwalMengajarWidget
+            activeCounselor={activeCounselor}
             onFillJournalForClass={(className, lastTopic, subject, startTime, endTime, period) => {
               onNavigateToTab('jurnal-harian', undefined, {
                 className,
@@ -752,7 +849,7 @@ export default function DashboardView({
           />
         </div>
         <div className="lg:col-span-5">
-          <StickyNotesWidget />
+          <StickyNotesWidget activeCounselor={activeCounselor} />
         </div>
       </div>
 
@@ -846,7 +943,7 @@ export default function DashboardView({
             return (
               <div className="space-y-4">
                 <div className="relative pl-4 sm:pl-6 border-l-2 border-[#00685f]/15 space-y-3.5 ml-2">
-                  {visibleLogs.map((log) => {
+                  {visibleLogs.map((log, idx) => {
                     let cardStyle = 'bg-[#e6f4f1]/30 border-[#00685f]/20 hover:bg-[#e6f4f1]/60';
                     let iconBg = 'bg-[#00685f]';
                     let iconSymbol = <HeartHandshake className="w-3.5 h-3.5 text-white" />;
@@ -901,13 +998,13 @@ export default function DashboardView({
                               </span>
                             </div>
                             <h4 className="font-black text-xs text-[#0b1c30] truncate">
-                              {isPrivacyMode && log.studentName
-                                ? log.title.replace(new RegExp(log.studentName, 'gi'), maskStudentName(log.studentName, true))
+                              {log.studentName
+                                ? log.title.replace(new RegExp(log.studentName, 'gi'), `Siswa ${idx + 1}`)
                                 : log.title}
                             </h4>
                             <p className="text-[11px] text-[#3d4947] font-medium leading-snug line-clamp-2">
-                              {isPrivacyMode && log.studentName
-                                ? log.description.replace(new RegExp(log.studentName, 'gi'), maskStudentName(log.studentName, true))
+                              {log.studentName
+                                ? log.description.replace(new RegExp(log.studentName, 'gi'), `Siswa ${idx + 1}`)
                                 : log.description}
                             </p>
                           </div>
@@ -956,7 +1053,7 @@ export default function DashboardView({
           Dibuat oleh: <span className="text-[#00685f] font-extrabold">Aulia Aji Sasongko, S.Pd.</span> | HP: <span className="text-[#00685f] font-extrabold">089681287339</span>
         </p>
         <p className="text-[10px] text-gray-400 font-medium">
-          Hak Cipta Dilindungi &copy; {new Date().getFullYear()} Sistem Administrasi BK SMP N 2 Susukan
+          Hak Cipta Dilindungi &copy; {new Date().getFullYear()} Sistem Administrasi BK {activeCounselor?.schoolName || getSchoolConfig(activeCounselor?.schoolId).schoolName}
         </p>
       </footer>
     </div>
