@@ -21,6 +21,7 @@ import { CounselingService, Counselor, Student } from '../types';
 import { downloadRekapSemesterPDF } from '../utils/pdfGenerator';
 import { getSchoolConfig } from '../utils/schoolConfig';
 import { showToast } from '../utils/toast';
+import { formatCardDate, formatCardDateTime } from '../utils/dateFormatter';
 
 interface RekapSemesterViewProps {
   services: CounselingService[];
@@ -547,7 +548,7 @@ export default function RekapSemesterView({
 
                     <div className="flex items-center gap-3 shrink-0 text-right">
                       <span className="text-[10px] font-bold text-gray-500">
-                        Tanggal: {item.date}
+                        Tanggal: {formatCardDate(item.date)}
                       </span>
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-100 text-amber-800">
                         Dalam Pantauan

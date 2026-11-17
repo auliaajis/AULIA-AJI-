@@ -3,14 +3,11 @@ import {
   collection, 
   onSnapshot, 
   query, 
-  orderBy, 
-  doc, 
-  setDoc, 
-  deleteDoc, 
-  writeBatch 
+  orderBy
 } from 'firebase/firestore';
-import { db, SYNC_MAP, saveToFirestore, deleteFromFirestore, saveBulkToFirestore, isQuotaExceeded } from '../utils/firestoreSync';
-import { getDeletedIds } from '../utils/deletionTracker';
+import { db, SYNC_MAP, saveToFirestore, softDeleteFromFirestore, saveBulkToFirestore, isQuotaExceeded, getCurrentUserSchoolIdSync } from '../utils/firestoreSync';
+import { matchesSchoolOrLegacy, isLegacyUnassignedRecord } from '../utils/schoolConfig';
+import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
 import { isDummyRecord } from '../utils/purgeDummyData';
 
 /**
@@ -19,9 +16,8 @@ import { isDummyRecord } from '../utils/purgeDummyData';
  * Features:
  * - Instant UI updates via onSnapshot() server listener
  * - 0ms initial load from LocalStorage cache
- * - Optimistic local updates with automatic server push
- * - Cross-component & cross-tab synchronization
- * - Graceful fallback if offline or quota exceeded
+ * - Dual-condition school scope: displays (schoolId === mySchool OR schoolId empty/null/missing)
+ * - Gracefully preserves soft-deleted protections (isDeleted !== true)
  */
 export function useRealtimeData<T = any>(
   keyOrCollectionName: string,
@@ -53,7 +49,14 @@ export function useRealtimeData<T = any>(
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
           const deletedSet = new Set(getDeletedIds());
-          return parsed.filter((item: any) => !deletedSet.has(String(item?.id)) && !isDummyRecord(item, localKey));
+          const schoolIdUser = getCurrentUserSchoolIdSync();
+          return parsed.filter(
+            (item: any) =>
+              item?.isDeleted !== true &&
+              !deletedSet.has(String(item?.id)) &&
+              !isDummyRecord(item, localKey) &&
+              matchesSchoolOrLegacy(item, schoolIdUser)
+          );
         }
       }
     } catch (e) {
@@ -64,7 +67,7 @@ export function useRealtimeData<T = any>(
 
   const [isRealtimeActive, setIsRealtimeActive] = useState<boolean>(false);
 
-  // 2. Direct onSnapshot Listener to Firestore
+  // 2. Direct onSnapshot Listener to Firestore (2-condition: matching schoolId OR unassigned legacy)
   useEffect(() => {
     if (isQuotaExceeded) {
       setIsRealtimeActive(false);
@@ -72,40 +75,95 @@ export function useRealtimeData<T = any>(
     }
 
     try {
+      const schoolIdUser = getCurrentUserSchoolIdSync();
       const colRef = collection(db, colName);
-      const q = sortField 
-        ? query(colRef, orderBy(sortField, sortDirection))
-        : query(colRef);
+
+      // Jangan pakai where("schoolId", "==", x) sendirian karena Firestore membuang dokumen lama tanpa schoolId.
+      // Tarik koleksi dan terapkan filter 2 syarat (schoolId === schoolIdUser ATAU schoolId kosong/null/missing).
+      let q: any = colRef;
+      if (sortField) {
+        try {
+          q = query(colRef, orderBy(sortField, sortDirection));
+        } catch {
+          q = colRef;
+        }
+      }
+
+      const processSnapshot = (snapshot: any) => {
+        const deletedSet = new Set(getDeletedIds());
+        const remoteList: T[] = [];
+        const remoteIdSet = new Set<string>();
+
+        snapshot.forEach((docSnap: any) => {
+          const rawItem = { id: docSnap.id, ...docSnap.data() } as any;
+          if (!rawItem || !rawItem.id) return;
+          if (rawItem.isDeleted === true) {
+            registerDeletedId(String(rawItem.id));
+            return;
+          }
+          if (deletedSet.has(String(rawItem.id)) || isDummyRecord(rawItem, localKey)) {
+            return;
+          }
+          if (!matchesSchoolOrLegacy(rawItem, schoolIdUser)) {
+            return;
+          }
+          const isUnassigned = isLegacyUnassignedRecord(rawItem);
+          const item = isUnassigned ? { ...rawItem, isLegacyUnmigrated: true } : rawItem;
+          remoteList.push(item);
+          remoteIdSet.add(String(item.id));
+        });
+
+        // Sertakan data lokal yang belum memiliki schoolId atau belum sempat sync agar tidak disembunyikan
+        try {
+          const cached = localStorage.getItem(localKey);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed)) {
+              parsed.forEach((localItem: any) => {
+                if (
+                  localItem &&
+                  localItem.id &&
+                  localItem.isDeleted !== true &&
+                  !remoteIdSet.has(String(localItem.id)) &&
+                  !deletedSet.has(String(localItem.id)) &&
+                  matchesSchoolOrLegacy(localItem, schoolIdUser)
+                ) {
+                  if (isLegacyUnassignedRecord(localItem)) {
+                    remoteList.push({
+                      ...localItem,
+                      isLegacyUnmigrated: true
+                    });
+                    remoteIdSet.add(String(localItem.id));
+                  }
+                }
+              });
+            }
+          }
+        } catch (e) {}
+
+        if (snapshot.size > 0 || remoteList.length > 0) {
+          const remoteStr = JSON.stringify(remoteList);
+          const currentLocalStr = localStorage.getItem(localKey);
+
+          if (currentLocalStr !== remoteStr) {
+            localStorage.setItem(localKey, remoteStr);
+            setData(remoteList);
+            window.dispatchEvent(new CustomEvent('bk_realtime_sync', { detail: { key: localKey, data: remoteList } }));
+          }
+        }
+        setIsRealtimeActive(true);
+      };
 
       const unsubscribe = onSnapshot(
         q,
-        (snapshot) => {
-          const deletedSet = new Set(getDeletedIds());
-          const remoteList: T[] = [];
-
-          snapshot.forEach((docSnap) => {
-            const item = { id: docSnap.id, ...docSnap.data() } as any;
-            if (item && item.id && !deletedSet.has(String(item.id)) && !isDummyRecord(item, localKey)) {
-              remoteList.push(item);
-            }
-          });
-
-          // Only update if there are remote documents or if remoteList changed
-          if (snapshot.size > 0 || remoteList.length > 0) {
-            const remoteStr = JSON.stringify(remoteList);
-            const currentLocalStr = localStorage.getItem(localKey);
-
-            if (currentLocalStr !== remoteStr) {
-              localStorage.setItem(localKey, remoteStr);
-              setData(remoteList);
-              // Notify other listening components in the same window
-              window.dispatchEvent(new CustomEvent('bk_realtime_sync', { detail: { key: localKey, data: remoteList } }));
-            }
-          }
-          setIsRealtimeActive(true);
-        },
+        processSnapshot,
         (error) => {
-          console.warn(`Realtime onSnapshot sync error for [${colName}]:`, error);
+          console.warn(`Realtime onSnapshot sync query error for [${colName}]:`, error);
+          if (sortField) {
+            try {
+              onSnapshot(colRef, processSnapshot);
+            } catch {}
+          }
           setIsRealtimeActive(false);
         }
       );
@@ -183,18 +241,21 @@ export function useRealtimeData<T = any>(
     await saveToFirestore(localKey, targetItem);
   }, [localKey]);
 
-  // 6. Individual Item Delete (Optimistic + Direct Server Push)
+  // 6. Individual Item Delete (Optimistic Soft Delete + Direct Server Push)
   const deleteItem = useCallback(async (id: string) => {
     if (!id) return;
 
+    let deletedSnapshot: any = id;
     setData((prev) => {
+      const target = prev.find((i: any) => String(i.id) === String(id));
+      if (target) deletedSnapshot = target;
       const updated = prev.filter((i: any) => String(i.id) !== String(id));
       localStorage.setItem(localKey, JSON.stringify(updated));
       window.dispatchEvent(new CustomEvent('bk_realtime_sync', { detail: { key: localKey, data: updated } }));
       return updated;
     });
 
-    await deleteFromFirestore(localKey, id);
+    await softDeleteFromFirestore(localKey, deletedSnapshot);
   }, [localKey]);
 
   // 7. Bulk Save

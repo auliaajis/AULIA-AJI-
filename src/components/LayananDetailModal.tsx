@@ -30,24 +30,11 @@ import { exportSingleServiceToIcs } from '../utils/calendarSync';
 import {
   downloadServicePDF,
   downloadCommitmentLetterPDF,
-  downloadBeritaAcaraLayananPDF
+  downloadBeritaAcaraLayananPDF,
+  generateAndUploadLayananPdf
 } from '../utils/pdfGenerator';
 
-function formatIndonesianDate(dateStr?: string): string {
-  if (!dateStr) return '-';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return dateStr;
-    return d.toLocaleDateString('id-ID', {
-      weekday: 'long',
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric',
-    });
-  } catch {
-    return dateStr;
-  }
-}
+import { formatCardDate, formatCardTime, formatCardDateTime } from '../utils/dateFormatter';
 
 interface LayananDetailModalProps {
   service: CounselingService | null;
@@ -71,19 +58,39 @@ export default function LayananDetailModal({
   const [activeTab, setActiveTab] = useState<'detail' | 'spesifikasi' | 'dokumentasi'>('detail');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [servicePdfUrl, setServicePdfUrl] = useState<string | undefined>(service?.pdfUrl);
+  const [driveUploadFailed, setDriveUploadFailed] = useState(false);
+
+  React.useEffect(() => {
+    if (service) {
+      setServicePdfUrl(service.pdfUrl);
+      setDriveUploadFailed(false);
+    }
+  }, [service]);
 
   if (!isOpen || !service) return null;
 
   const pilar = getPilarBadge(service.bkComponent || service.serviceType);
   const colorCfg = getComponentColorConfig(service.bkComponent || service.serviceType);
 
-  const handlePrintService = () => {
+  const handleGenerateLayanan = async () => {
     setIsExporting(true);
+    setDriveUploadFailed(false);
     try {
-      downloadServicePDF(service);
+      const res = await generateAndUploadLayananPdf(service);
+      if (res.success && res.pdfUrl) {
+        setServicePdfUrl(res.pdfUrl);
+        setDriveUploadFailed(false);
+      } else if (res.isDriveFailed) {
+        setDriveUploadFailed(true);
+      }
     } finally {
       setIsExporting(false);
     }
+  };
+
+  const handlePrintService = () => {
+    handleGenerateLayanan();
   };
 
   const handlePrintCommitment = () => {
@@ -147,11 +154,11 @@ export default function LayananDetailModal({
             <div className="flex flex-wrap items-center gap-4 text-xs text-[#3d4947] mt-1.5">
               <span className="flex items-center gap-1.5 font-medium">
                 <Calendar className="w-3.5 h-3.5 text-[#00685f]" />
-                {formatIndonesianDate(service.date)}
+                {formatCardDate(service.date)}
               </span>
               <span className="flex items-center gap-1.5 font-medium">
                 <Clock className="w-3.5 h-3.5 text-[#00685f]" />
-                {service.startTime} - {service.endTime} WIB
+                {formatCardTime(service.startTime)}
               </span>
               {service.counselorName && (
                 <span className="flex items-center gap-1.5 font-medium">
@@ -568,20 +575,23 @@ export default function LayananDetailModal({
                 <Trash2 className="w-3.5 h-3.5" /> Hapus
               </button>
             ) : (
-              <div className="inline-flex items-center gap-2 bg-rose-50 px-3 py-1.5 rounded-xl border border-rose-300">
-                <span className="text-xs font-bold text-rose-700">Yakin hapus sesi?</span>
+              <div className="inline-flex flex-wrap items-center gap-2 bg-rose-50 px-3 py-1.5 rounded-xl border border-rose-300">
+                <span className="text-xs font-bold text-rose-700">
+                  Hapus layanan "{service.serviceType}" saja? Layanan lain tidak akan terhapus.
+                </span>
                 <button
                   onClick={() => {
+                    if (!service.id || !String(service.id).trim()) return;
                     onDelete(service.id);
                     onClose();
                   }}
-                  className="px-2 py-0.5 bg-rose-600 text-white text-xs font-bold rounded hover:bg-rose-700"
+                  className="px-2.5 py-1 bg-rose-600 text-white text-xs font-bold rounded-lg hover:bg-rose-700 cursor-pointer"
                 >
-                  Ya, Hapus
+                  Ya, Hapus 1 Ini Saja
                 </button>
                 <button
                   onClick={() => setShowDeleteConfirm(false)}
-                  className="px-2 py-0.5 bg-gray-200 text-gray-700 text-xs font-medium rounded hover:bg-gray-300"
+                  className="px-2.5 py-1 bg-gray-200 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-300 cursor-pointer"
                 >
                   Batal
                 </button>
@@ -599,32 +609,66 @@ export default function LayananDetailModal({
             </button>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => exportSingleServiceToIcs(service)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 rounded-xl text-xs font-bold transition shadow-2xs cursor-pointer"
-              title="Unduh file kalender .ics sesi ini untuk diimpor ke Google Calendar / Kalender HP"
-            >
-              <Download className="w-3.5 h-3.5 text-emerald-600" /> Ekspor .ics
-            </button>
-
-            {onScheduleFollowUp && (
-              <button
-                onClick={() => {
-                  onClose();
-                  onScheduleFollowUp(service);
-                }}
-                className="inline-flex items-center gap-1.5 px-4 py-2 bg-teal-50 text-[#00685f] border border-[#00685f]/30 hover:bg-teal-100 rounded-xl text-xs font-bold transition shadow-2xs"
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* If Drive file exists: Button [Lihat PDF di Drive] */}
+            {servicePdfUrl && (
+              <a
+                href={servicePdfUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 rounded-xl text-xs font-bold transition shadow-2xs"
+                title="Buka dokumen PDF resmi yang tersimpan di Google Drive"
               >
-                <ArrowRight className="w-3.5 h-3.5" /> Jadwalkan Sesi Lanjutan
+                <ExternalLink className="w-3.5 h-3.5 text-emerald-700" />
+                <span>Lihat PDF di Drive</span>
+              </a>
+            )}
+
+            {/* If Drive upload failed: show button [Coba Lagi ke Drive] */}
+            {driveUploadFailed && (
+              <button
+                type="button"
+                onClick={handleGenerateLayanan}
+                disabled={isExporting}
+                className="inline-flex items-center gap-1 px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold transition shadow-2xs cursor-pointer"
+                title="Coba upload ulang file PDF ke Google Drive"
+              >
+                <AlertCircle className="w-3.5 h-3.5" />
+                <span>Coba Lagi ke Drive</span>
               </button>
             )}
+
+            {/* Button [Download Ulang] if already generated */}
+            {servicePdfUrl ? (
+              <button
+                type="button"
+                onClick={handleGenerateLayanan}
+                disabled={isExporting}
+                className="inline-flex items-center gap-1.5 px-3 py-2 bg-teal-50 text-[#00685f] border border-[#00685f]/30 hover:bg-teal-100 rounded-xl text-xs font-bold transition shadow-2xs cursor-pointer"
+                title="Download ulang berkas PDF layanan ini"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download Ulang</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleGenerateLayanan}
+                disabled={isExporting}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#00685f] text-white hover:bg-[#005049] rounded-xl text-xs font-bold transition shadow-2xs cursor-pointer active:scale-97"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>{isExporting ? 'Memproses...' : 'Generate Layanan'}</span>
+              </button>
+            )}
+
             <button
-              onClick={handlePrintService}
-              disabled={isExporting}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#00685f] text-white hover:bg-[#005049] rounded-xl text-xs font-bold transition shadow-2xs"
+              onClick={() => exportSingleServiceToIcs(service)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold transition shadow-2xs cursor-pointer"
+              title="Unduh file kalender .ics sesi ini untuk diimpor ke Google Calendar / Kalender HP"
             >
-              <Printer className="w-3.5 h-3.5" /> Cetak PDF
+              <Calendar className="w-3.5 h-3.5 text-gray-600" />
+              <span>.ics</span>
             </button>
           </div>
         </div>

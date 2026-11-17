@@ -25,6 +25,7 @@ import {
   LayananTemplateItem
 } from '../utils/layananTemplates';
 import { showToast } from '../utils/toast';
+import { isValidDeleteId } from '../utils/safeDelete';
 import {
   X,
   HeartHandshake,
@@ -106,6 +107,8 @@ export default function EditLayananModal({
   // Student search/selection popover state
   const [showAddStudentPopover, setShowAddStudentPopover] = useState(false);
   const [studentSearchQuery, setStudentSearchQuery] = useState('');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [confirmEmptyFollowUp, setConfirmEmptyFollowUp] = useState(false);
 
   // Quick Problem & Follow-Up Templates State
   const [customProblemTemplates, setCustomProblemTemplates] = useState<LayananTemplateItem[]>(() => getCustomProblemTemplates());
@@ -140,7 +143,7 @@ export default function EditLayananModal({
     const file = e.target.files?.[0];
     if (file) {
       if (file.size > 5 * 1024 * 1024) {
-        alert('Ukuran foto terlalu besar. Maksimal 5 MB.');
+        showToast('Ukuran foto terlalu besar. Maksimal 5 MB.', 'error');
         return;
       }
       const reader = new FileReader();
@@ -155,7 +158,7 @@ export default function EditLayananModal({
   // Add student to list
   const handleAddStudent = (st: Student) => {
     if (selectedStudents.some((s) => s.id === st.id)) {
-      alert('Siswa sudah ada dalam daftar peserta.');
+      showToast('Siswa sudah ada dalam daftar peserta.', 'info');
       return;
     }
     setSelectedStudents([
@@ -167,7 +170,7 @@ export default function EditLayananModal({
   // Remove student from list
   const handleRemoveStudent = (stId: string) => {
     if (selectedStudents.length <= 1) {
-      alert('Sesi layanan minimal harus memiliki 1 siswa peserta.');
+      showToast('Sesi layanan minimal harus memiliki 1 siswa peserta.', 'error');
       return;
     }
     setSelectedStudents(selectedStudents.filter((s) => s.id !== stId));
@@ -187,20 +190,19 @@ export default function EditLayananModal({
     e.preventDefault();
 
     if (selectedStudents.length === 0) {
-      alert('Harap pilih minimal 1 siswa peserta konseling.');
+      showToast('Harap pilih minimal 1 siswa peserta konseling.', 'error');
       return;
     }
 
     if (!problem.trim()) {
-      alert('Harap isi pokok masalah/topik pembahasan.');
+      showToast('Harap isi pokok masalah/topik pembahasan.', 'error');
       return;
     }
 
-    if (status === 'Selesai' && !followUp.trim()) {
-      // Gentle reminder if marking complete without follow up
-      if (!confirm('Rencana tindak lanjut masih kosong. Apakah Anda yakin ingin menyimpan status Selesai?')) {
-        return;
-      }
+    if (status === 'Selesai' && !followUp.trim() && !confirmEmptyFollowUp) {
+      setConfirmEmptyFollowUp(true);
+      showToast('Rencana tindak lanjut masih kosong. Klik Simpan lagi jika tetap ingin menandai Selesai.', 'info');
+      return;
     }
 
     const updated: CounselingService = {
@@ -765,19 +767,44 @@ export default function EditLayananModal({
           {/* Footer Submit & Delete Actions */}
           <div className="pt-4 border-t border-[#bcc9c6]/30 flex items-center justify-between gap-3">
             {onDelete ? (
-              <button
-                type="button"
-                onClick={() => {
-                  if (confirm('Apakah Anda yakin ingin menghapus rekam layanan BK ini secara permanen?')) {
-                    onDelete(service.id);
-                    onClose();
-                  }
-                }}
-                className="py-2.5 px-3.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl font-extrabold text-xs transition-colors flex items-center gap-1.5 cursor-pointer"
-              >
-                <Trash2 className="w-4 h-4" />
-                <span>Hapus Layanan</span>
-              </button>
+              showDeleteConfirm ? (
+                <div className="inline-flex flex-wrap items-center gap-2 bg-rose-50 px-3 py-1.5 rounded-xl border border-rose-300">
+                  <span className="text-xs font-bold text-rose-800">
+                    Hapus layanan ini saja? Layanan lain tidak akan terhapus.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!isValidDeleteId(service.id)) {
+                        showToast('Gagal: ID layanan tidak valid, hapus dibatalkan', 'error');
+                        return;
+                      }
+                      onDelete(service.id);
+                      setShowDeleteConfirm(false);
+                      onClose();
+                    }}
+                    className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg cursor-pointer"
+                  >
+                    Ya, Hapus 1 Ini Saja
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowDeleteConfirm(false)}
+                    className="px-2.5 py-1 bg-white border border-gray-200 text-gray-700 text-xs font-bold rounded-lg cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="py-2.5 px-3.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl font-extrabold text-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Hapus Layanan</span>
+                </button>
+              )
             ) : (
               <div></div>
             )}

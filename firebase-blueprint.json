@@ -1,77 +1,223 @@
 {
   "entities": {
-    "students": {
-      "title": "Data Siswa",
-      "description": "Daftar data siswa bimbingan konseling",
+    "schools": {
+      "title": "Sekolah",
+      "description": "Profil dan metadata sekolah bimbingan konseling multi-tenancy",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" },
+        "schoolAddress": { "type": "string" },
+        "npsn": { "type": "string" },
+        "principalName": { "type": "string" },
+        "principalNip": { "type": "string" },
+        "koordinatorBkName": { "type": "string" },
+        "koordinatorBkNip": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["schoolId", "schoolName"]
+    },
+    "users": {
+      "title": "Pengguna / Guru BK",
+      "description": "Akun dan profil guru BK sekolah",
+      "type": "object",
       "properties": {
         "id": { "type": "string" },
         "name": { "type": "string" },
-        "class": { "type": "string" }
-      }
+        "role": { "type": "string" },
+        "nip": { "type": "string" },
+        "email": { "type": "string" },
+        "username": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
+      },
+      "required": ["schoolId", "schoolName"]
+    },
+    "students": {
+      "title": "Data Siswa",
+      "description": "Daftar data siswa bimbingan konseling dengan partisi sekolah",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "nis": { "type": "string" },
+        "class": { "type": "string" },
+        "gender": { "type": "string" },
+        "violationPoints": { "type": "number" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
+      },
+      "required": ["schoolId", "schoolName"]
+    },
+    "cases": {
+      "title": "Kasus & Pelanggaran Disiplin",
+      "description": "Catatan kasus pelanggaran dan pembinaan restitusi disiplin siswa",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ticketId": { "type": "string" },
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "category": { "type": "string" },
+        "pointsAdded": { "type": "number" },
+        "date": { "type": "string" },
+        "time": { "type": "string" },
+        "restitutionStatus": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
+      },
+      "required": ["schoolId", "schoolName"]
     },
     "violations": {
       "title": "Pelanggaran Siswa",
       "description": "Catatan pelanggaran dan pendampingan disiplin",
+      "type": "object",
       "properties": {
         "id": { "type": "string" },
         "studentId": { "type": "string" },
-        "date": { "type": "string" }
-      }
+        "studentName": { "type": "string" },
+        "date": { "type": "string" },
+        "category": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
+      },
+      "required": ["schoolId", "schoolName"]
     },
-    "services": {
+    "counseling": {
       "title": "Layanan Konseling",
-      "description": "Catatan layanan bimbingan konseling",
+      "description": "Catatan sesi konseling dan bimbingan siswa",
+      "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "date": { "type": "string" }
-      }
+        "serviceType": { "type": "string" },
+        "date": { "type": "string" },
+        "problem": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
+      },
+      "required": ["schoolId", "schoolName"]
+    },
+    "services": {
+      "title": "Layanan BK",
+      "description": "Catatan layanan bimbingan konseling siswa",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "serviceType": { "type": "string" },
+        "date": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
+      },
+      "required": ["schoolId", "schoolName"]
     },
     "daily_journals": {
       "title": "Jurnal Harian BK",
       "description": "Jurnal harian aktivitas guru BK",
+      "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "date": { "type": "string" }
+        "date": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
       }
     },
     "home_visits": {
       "title": "Home Visit",
       "description": "Laporan kunjungan rumah siswa",
+      "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "date": { "type": "string" }
+        "date": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
       }
     },
     "parent_summons": {
       "title": "Pemanggilan Orang Tua",
       "description": "Catatan surat panggilan & notulen kehadiran orang tua",
+      "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "date": { "type": "string" }
+        "date": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
       }
     },
     "attendance_history": {
       "title": "Kehadiran Siswa",
       "description": "Rekapitulasi kehadiran harian siswa",
+      "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "date": { "type": "string" }
+        "date": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
       }
     },
     "student_achievements": {
       "title": "Prestasi Siswa",
       "description": "Apresiasi dan poin prestasi siswa",
+      "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "date": { "type": "string" }
+        "date": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
       }
     },
     "app_config": {
       "title": "Pengaturan Sekolah",
       "description": "Metadata dan konfigurasi sekolah",
+      "type": "object",
       "properties": {
-        "id": { "type": "string" }
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" }
       }
+    }
+  },
+  "firestore": {
+    "/schools/{schoolId}": {
+      "schema": "schools",
+      "description": "Profil dan metadata sekolah multi-tenancy"
+    },
+    "/schools_registry/{schoolId}": {
+      "schema": "schools",
+      "description": "Registri sekolah terdaftar"
+    },
+    "/users/{userId}": {
+      "schema": "users",
+      "description": "Koleksi akun pengguna guru BK"
+    },
+    "/students/{studentId}": {
+      "schema": "students",
+      "description": "Koleksi siswa bimbingan konseling"
+    },
+    "/cases/{caseId}": {
+      "schema": "cases",
+      "description": "Koleksi kasus pelanggaran disiplin siswa"
+    },
+    "/counseling/{counselingId}": {
+      "schema": "counseling",
+      "description": "Koleksi layanan konseling siswa"
+    },
+    "/schools/{schoolId}/counselors/{counselorId}": {
+      "schema": "users",
+      "description": "Akun guru BK per sekolah"
+    },
+    "/schools/{schoolId}/students/{studentId}": {
+      "schema": "students",
+      "description": "Data siswa bimbingan konseling per sekolah"
+    },
+    "/schools/{schoolId}/violations/{violationId}": {
+      "schema": "cases",
+      "description": "Catatan pelanggaran dan kasus per sekolah"
+    },
+    "/schools/{schoolId}/services/{serviceId}": {
+      "schema": "counseling",
+      "description": "Catatan layanan konseling per sekolah"
     }
   }
 }

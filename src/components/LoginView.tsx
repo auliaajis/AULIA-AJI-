@@ -24,7 +24,11 @@ import {
   fetchCloudCounselors,
   searchCloudCounselor,
   saveAccountRequestToCloud,
-  listenToAccountRequests
+  listenToAccountRequests,
+  fetchSchoolsCollection,
+  listenToSchoolsCollection,
+  registerSchoolToFirestore,
+  createUserRegistrationInFirestore
 } from '../utils/firestoreSync';
 import { 
   getSchoolConfig, 
@@ -38,9 +42,10 @@ import {
   sanitizeSchoolId, 
   SchoolConfig 
 } from '../utils/schoolConfig';
-import { initialStudents, initialViolations, initialServices, initialLogs } from '../data/mockData';
-import { clearCanonicalDeletedIds, resetStudentDeletedIds } from '../utils/deletionTracker';
-import { CANONICAL_AULIA_STUDENTS } from '../data/canonicalStudents';
+import { initialViolations, initialServices } from '../data/mockData';
+import { getDeletedIds } from '../utils/deletionTracker';
+import { isDummyStudent } from '../utils/purgeDummyData';
+import { showToast } from '../utils/toast';
 
 interface LoginViewProps {
   allCounselors: (Counselor & { username?: string; password?: string })[];
@@ -81,6 +86,7 @@ export default function LoginView({
   const [showRegPassword, setShowRegPassword] = useState(false);
 
   // Form registrasi akun guru baru
+  const [regSchoolId, setRegSchoolId] = useState<string>(() => currentSchool.schoolId || 'sch_20320123');
   const [regSchoolNpsn, setRegSchoolNpsn] = useState<string>(() => currentSchool.npsn || '20320123');
   const [regSchoolName, setRegSchoolName] = useState<string>(() => currentSchool.schoolName || 'SMP N 2 Susukan');
   const [regSchoolAddress, setRegSchoolAddress] = useState<string>(() => currentSchool.schoolAddress || '');
@@ -95,6 +101,13 @@ export default function LoginView({
   const [isSubmittingReg, setIsSubmittingReg] = useState(false);
   const [liveSubmissionStatus, setLiveSubmissionStatus] = useState<Counselor | null>(null);
 
+  // Sub-modal Daftarkan Sekolah Baru dari form registrasi akun
+  const [showNewSchoolSubModal, setShowNewSchoolSubModal] = useState(false);
+  const [subNewSchoolName, setSubNewSchoolName] = useState('');
+  const [subNewSchoolNpsn, setSubNewSchoolNpsn] = useState('');
+  const [subNewSchoolAddress, setSubNewSchoolAddress] = useState('');
+  const [isRegisteringSubSchool, setIsRegisteringSubSchool] = useState(false);
+
   useEffect(() => {
     const handleSchoolUpdated = () => {
       const cfg = getSchoolConfig();
@@ -104,8 +117,14 @@ export default function LoginView({
     window.addEventListener('bk_school_config_updated', handleSchoolUpdated);
     window.addEventListener('bk_school_changed', handleSchoolUpdated);
 
-    // Ambil daftar sekolah terdaftar dari Cloud
-    fetchCloudRegisteredSchools().then((schools) => {
+    // Ambil daftar sekolah terdaftar dari Cloud Firestore collection `schools`
+    fetchSchoolsCollection().then((schools) => {
+      if (schools && schools.length > 0) {
+        setRegisteredSchools(schools);
+      }
+    });
+
+    const unsubSchools = listenToSchoolsCollection((schools) => {
       if (schools && schools.length > 0) {
         setRegisteredSchools(schools);
       }
@@ -119,7 +138,7 @@ export default function LoginView({
         if (found) {
           setLiveSubmissionStatus(found as Counselor);
           if (found.approvalStatus === 'approved') {
-            setSuccessNotice(`Akun "${found.name}" telah disetujui Administrator BK. Anda dapat langsung masuk sekarang.`);
+            setSuccessNotice(`Akun "${found.name}" telah disetujim Administrator BK. Silakan login sekarang (jika sebelumnya sudah login, silakan logout lalu login ulang agar token baru aktif).`);
             sessionStorage.removeItem('bk_tracked_reg_id');
           } else if (found.approvalStatus === 'rejected') {
             setError(`Permintaan pendaftaran akun untuk "${found.name}" telah ditolak oleh Administrator BK.`);
@@ -131,6 +150,7 @@ export default function LoginView({
     return () => {
       window.removeEventListener('bk_school_config_updated', handleSchoolUpdated);
       window.removeEventListener('bk_school_changed', handleSchoolUpdated);
+      unsubSchools();
       if (typeof unsubAccountRequests === 'function') {
         unsubAccountRequests();
       }
@@ -153,7 +173,7 @@ export default function LoginView({
   const handleSaveNewSchool = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSchoolName.trim() || !newSchoolNpsn.trim()) {
-      alert('Nama Sekolah dan NPSN wajib diisi.');
+      showToast('Nama Sekolah dan NPSN wajib diisi.', 'error');
       return;
     }
     const cleanNpsn = newSchoolNpsn.trim().replace(/[^0-9a-zA-Z]/g, '');
@@ -331,7 +351,7 @@ export default function LoginView({
       role: 'Koordinator BK & Administrator Sekolah',
       nip: 'NIP. 19931231 202221 1 002',
       avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-      allowedClasses: ['7A', '7B', '7C', '7D', '7E', '7F', '8A', '8B', '8C', '8D', '8E', '8F', '8G', '9A', '9B', '9C', '9D', '9E', '9F', '9G'],
+      allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
       username: 'aulia',
       email: 'auliasasongko12@guru.smp.belajar.id',
       phone: '089681287339',
@@ -355,23 +375,38 @@ export default function LoginView({
       }
       if (isAulia) {
         setActiveSchoolId('sch_20320123');
-        resetStudentDeletedIds();
-        if (typeof localStorage !== 'undefined') {
-          localStorage.removeItem('bk_dummy_students_purged');
-          localStorage.removeItem('bk_cleared_sch_20320123');
-          localStorage.removeItem('bk_students_cleared_sch_20320123');
-        }
+        const deletedSet = new Set(getDeletedIds());
+        const seededFlagKey = 'bk_initial_seeded_sch_20320123';
+        const alreadySeeded = typeof localStorage !== 'undefined' && localStorage.getItem(seededFlagKey) === 'true';
         const existingStudents = loadSchoolData<any[]>('bk_students', [], 'sch_20320123');
-        if (!existingStudents || existingStudents.length === 0) {
-          saveSchoolData('bk_students', CANONICAL_AULIA_STUDENTS, 'sch_20320123');
+        if (Array.isArray(existingStudents) && existingStudents.length > 0) {
+          const cleanOnly = existingStudents.filter(
+            (s: any) => s && !isDummyStudent(s) && s.isDeleted !== true && !deletedSet.has(String(s.id))
+          );
+          if (cleanOnly.length !== existingStudents.length) {
+            saveSchoolData('bk_students', cleanOnly, 'sch_20320123');
+          }
         }
-        const existingViolations = loadSchoolData<any[]>('bk_violations', [], 'sch_20320123');
-        if (!existingViolations || existingViolations.length === 0 || existingViolations.length < initialViolations.length) {
-          saveSchoolData('bk_violations', initialViolations, 'sch_20320123');
-        }
-        const existingServices = loadSchoolData<any[]>('bk_services', [], 'sch_20320123');
-        if (!existingServices || existingServices.length === 0 || existingServices.length < initialServices.length) {
-          saveSchoolData('bk_services', initialServices, 'sch_20320123');
+        if (!alreadySeeded) {
+          const existingViolations = loadSchoolData<any[]>('bk_violations', [], 'sch_20320123');
+          if (!existingViolations || existingViolations.length === 0) {
+            saveSchoolData(
+              'bk_violations',
+              initialViolations.filter((v) => !deletedSet.has(String(v.id))),
+              'sch_20320123'
+            );
+          }
+          const existingServices = loadSchoolData<any[]>('bk_services', [], 'sch_20320123');
+          if (!existingServices || existingServices.length === 0) {
+            saveSchoolData(
+              'bk_services',
+              initialServices.filter((s) => !deletedSet.has(String(s.id))),
+              'sch_20320123'
+            );
+          }
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(seededFlagKey, 'true');
+          }
         }
       }
       onLoginSuccess(counselorToLogin);
@@ -473,23 +508,38 @@ export default function LoginView({
 
       if (isAulia) {
         setActiveSchoolId('sch_20320123');
-        resetStudentDeletedIds();
-        if (typeof localStorage !== 'undefined') {
-          localStorage.removeItem('bk_dummy_students_purged');
-          localStorage.removeItem('bk_cleared_sch_20320123');
-          localStorage.removeItem('bk_students_cleared_sch_20320123');
-        }
+        const deletedSet = new Set(getDeletedIds());
+        const seededFlagKey = 'bk_initial_seeded_sch_20320123';
+        const alreadySeeded = typeof localStorage !== 'undefined' && localStorage.getItem(seededFlagKey) === 'true';
         const existingStudents = loadSchoolData<any[]>('bk_students', [], 'sch_20320123');
-        if (!existingStudents || existingStudents.length === 0) {
-          saveSchoolData('bk_students', CANONICAL_AULIA_STUDENTS, 'sch_20320123');
+        if (Array.isArray(existingStudents) && existingStudents.length > 0) {
+          const cleanOnly = existingStudents.filter(
+            (s: any) => s && !isDummyStudent(s) && s.isDeleted !== true && !deletedSet.has(String(s.id))
+          );
+          if (cleanOnly.length !== existingStudents.length) {
+            saveSchoolData('bk_students', cleanOnly, 'sch_20320123');
+          }
         }
-        const existingViolations = loadSchoolData<any[]>('bk_violations', [], 'sch_20320123');
-        if (!existingViolations || existingViolations.length === 0 || existingViolations.length < initialViolations.length) {
-          saveSchoolData('bk_violations', initialViolations, 'sch_20320123');
-        }
-        const existingServices = loadSchoolData<any[]>('bk_services', [], 'sch_20320123');
-        if (!existingServices || existingServices.length === 0 || existingServices.length < initialServices.length) {
-          saveSchoolData('bk_services', initialServices, 'sch_20320123');
+        if (!alreadySeeded) {
+          const existingViolations = loadSchoolData<any[]>('bk_violations', [], 'sch_20320123');
+          if (!existingViolations || existingViolations.length === 0) {
+            saveSchoolData(
+              'bk_violations',
+              initialViolations.filter((v) => !deletedSet.has(String(v.id))),
+              'sch_20320123'
+            );
+          }
+          const existingServices = loadSchoolData<any[]>('bk_services', [], 'sch_20320123');
+          if (!existingServices || existingServices.length === 0) {
+            saveSchoolData(
+              'bk_services',
+              initialServices.filter((s) => !deletedSet.has(String(s.id))),
+              'sch_20320123'
+            );
+          }
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(seededFlagKey, 'true');
+          }
         }
       }
 
@@ -498,10 +548,10 @@ export default function LoginView({
         ...matched,
         id: 'c1',
         name: 'Aulia Aji Sasongko, S.Pd.',
-        role: 'Koordinator BK & Administrator Sekolah',
+        role: 'Koordinator BK & Guru Pembimbing Kelas 8',
         nip: matched.nip && matched.nip !== '-' ? matched.nip : 'NIP. 19931231 202221 1 002',
         avatar: matched.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-        allowedClasses: ['7A', '7B', '7C', '7D', '7E', '7F', '8A', '8B', '8C', '8D', '8E', '8F', '8G', '9A', '9B', '9C', '9D', '9E', '9F', '9G'],
+        allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
         username: 'aulia',
         password: password || 'aulia',
         email: 'auliasasongko12@guru.smp.belajar.id',
@@ -524,22 +574,53 @@ export default function LoginView({
     }
   };
 
+  // Daftarkan Sekolah Baru langsung dari modal registrasi akun
+  const handleRegisterSubSchool = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!subNewSchoolName.trim() || !subNewSchoolNpsn.trim()) {
+      showToast('Nama Sekolah dan NPSN wajib diisi.', 'error');
+      return;
+    }
+    setIsRegisteringSubSchool(true);
+    try {
+      const cleanNpsn = subNewSchoolNpsn.trim().replace(/[^0-9a-zA-Z]/g, '');
+      const created = await registerSchoolToFirestore({
+        schoolName: subNewSchoolName.trim(),
+        npsn: cleanNpsn,
+        schoolAddress: subNewSchoolAddress.trim() || 'Alamat Sekolah Terdaftar'
+      });
+      setRegSchoolId(created.schoolId || cleanNpsn);
+      setRegSchoolName(created.schoolName);
+      setRegSchoolNpsn(created.npsn || '');
+      setRegSchoolAddress(created.schoolAddress || '');
+      setShowNewSchoolSubModal(false);
+      setSubNewSchoolName('');
+      setSubNewSchoolNpsn('');
+      setSubNewSchoolAddress('');
+      showToast(`Sekolah "${created.schoolName}" berhasil didaftarkan.`, 'success');
+    } catch (err: any) {
+      showToast('Gagal mendaftarkan sekolah: ' + (err?.message || err), 'error');
+    } finally {
+      setIsRegisteringSubSchool(false);
+    }
+  };
+
   // Submit Registrasi Akun Baru
   const handleSaveNewAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!regName.trim() || !regUsername.trim()) {
-      alert('Nama Lengkap dan Username wajib diisi.');
+      showToast('Nama Lengkap dan Username wajib diisi.', 'error');
       return;
     }
     const cleanNpsn = regSchoolNpsn.trim().replace(/[^0-9a-zA-Z]/g, '');
     if (!cleanNpsn) {
-      alert('NPSN Sekolah wajib diisi.');
+      showToast('NPSN Sekolah wajib diisi.', 'error');
       return;
     }
 
     setIsSubmittingReg(true);
     try {
-      const targetSchoolId = sanitizeSchoolId(cleanNpsn);
+      const targetSchoolId = sanitizeSchoolId(regSchoolId || cleanNpsn);
       const targetSchoolConfig: SchoolConfig = {
         schoolId: targetSchoolId,
         schoolName: regSchoolName.trim() || `SMP Terdaftar (NPSN: ${cleanNpsn})`,
@@ -575,6 +656,22 @@ export default function LoginView({
         schoolName: regSchoolName.trim()
       };
 
+      // 1. Simpan ke Firestore users collection
+      await createUserRegistrationInFirestore({
+        uid: newAccount.id,
+        name: newAccount.name,
+        email: newAccount.email || `${cleanUsername}@guru.smp.belajar.id`,
+        username: cleanUsername,
+        password: regPassword.trim() || '123456',
+        nip: regNip.trim() || '-',
+        role: regRole.trim() || 'Guru Pembimbing BK',
+        allowedClasses: parsedClasses,
+        schoolId: targetSchoolId,
+        schoolName: regSchoolName.trim() || targetSchoolConfig.schoolName,
+        schoolNpsn: cleanNpsn
+      });
+
+      // 2. Simpan ke account_requests dan cloud registry
       await saveAccountRequestToCloud(newAccount, targetSchoolConfig);
 
       setLiveSubmissionStatus(newAccount);
@@ -607,7 +704,7 @@ export default function LoginView({
       setRegPassword('');
       setRegEmail('');
     } catch (err: any) {
-      alert('Gagal mengirim pendaftaran: ' + (err?.message || 'Terjadi kesalahan'));
+      showToast('Gagal mengirim pendaftaran: ' + (err?.message || 'Terjadi kesalahan'), 'error');
     } finally {
       setIsSubmittingReg(false);
     }
@@ -1127,33 +1224,60 @@ export default function LoginView({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-gray-700 block">
-                    NPSN Sekolah <span className="text-red-500">*</span>
+              {/* Dropdown Koleksi schools & Tombol Daftarkan Sekolah Baru */}
+              <div className="space-y-1.5 p-3 bg-teal-50/50 rounded-xl border border-teal-200/60">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-gray-800 block">
+                    Pilih Sekolah <span className="text-red-500">*</span>
                   </label>
-                  <input
-                    type="text"
-                    required
-                    value={regSchoolNpsn}
-                    onChange={(e) => handleNpsnChange(e.target.value)}
-                    placeholder="20320123"
-                    className="w-full text-xs p-2.5 bg-[#f8faf9] border border-[#bcc9c6]/60 rounded-xl focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] font-mono font-bold text-[#00685f]"
-                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewSchoolSubModal(true)}
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[#00685f] hover:underline cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Daftarkan Sekolah Baru</span>
+                  </button>
                 </div>
+                <select
+                  required
+                  value={regSchoolId}
+                  onChange={(e) => {
+                    const chosen = e.target.value;
+                    setRegSchoolId(chosen);
+                    const matched = registeredSchools.find(s => (s.schoolId || s.npsn) === chosen);
+                    if (matched) {
+                      setRegSchoolName(matched.schoolName);
+                      setRegSchoolNpsn(matched.npsn || '');
+                      setRegSchoolAddress(matched.schoolAddress || '');
+                    }
+                  }}
+                  className="w-full text-xs p-2.5 bg-white border border-[#bcc9c6]/70 rounded-xl focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] font-semibold text-[#0b1c30]"
+                >
+                  <option value="" disabled>-- Pilih Sekolah dari Koleksi schools --</option>
+                  {registeredSchools.map((s) => (
+                    <option key={s.schoolId || s.npsn} value={s.schoolId || s.npsn}>
+                      {s.schoolName} {s.npsn ? `(NPSN: ${s.npsn})` : ''}
+                    </option>
+                  ))}
+                </select>
+                <div className="flex items-center justify-between text-[10px] text-gray-500 px-0.5">
+                  <span>Nama: <strong className="text-[#00685f]">{regSchoolName}</strong></span>
+                  <span>NPSN: <strong className="font-mono text-gray-700">{regSchoolNpsn || '-'}</strong></span>
+                </div>
+              </div>
 
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-gray-700 block">
-                    NIP (Opsional)
-                  </label>
-                  <input
-                    type="text"
-                    value={regNip}
-                    onChange={(e) => setRegNip(e.target.value)}
-                    placeholder="19850101 201001 2 001"
-                    className="w-full text-xs p-2.5 bg-[#f8faf9] border border-[#bcc9c6]/60 rounded-xl focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
-                  />
-                </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-gray-700 block">
+                  NIP Guru (Opsional)
+                </label>
+                <input
+                  type="text"
+                  value={regNip}
+                  onChange={(e) => setRegNip(e.target.value)}
+                  placeholder="19850101 201001 2 001"
+                  className="w-full text-xs p-2.5 bg-[#f8faf9] border border-[#bcc9c6]/60 rounded-xl focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
+                />
               </div>
 
               <div className="space-y-1">
@@ -1242,6 +1366,100 @@ export default function LoginView({
                     </>
                   ) : (
                     <span>Ajukan Akun</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Daftarkan Sekolah Baru (dari dropdown daftar akun baru) */}
+      {showNewSchoolSubModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-4 z-60 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-gray-200 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-teal-50 text-[#00685f] rounded-xl border border-teal-200">
+                  <Building2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-[#0b1c30]">Daftarkan Sekolah Baru</h3>
+                  <p className="text-[10px] text-gray-500">Akan ditambahkan ke koleksi <code className="text-[#00685f] font-mono">schools</code> Firestore</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowNewSchoolSubModal(false)}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleRegisterSubSchool} className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-gray-700 block">
+                  Nama Sekolah <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={subNewSchoolName}
+                  onChange={(e) => setSubNewSchoolName(e.target.value)}
+                  placeholder="Contoh: SMP Negeri 1 Bawang"
+                  className="w-full text-xs p-2.5 bg-[#f8faf9] border border-[#bcc9c6]/60 rounded-xl focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-gray-700 block">
+                  NPSN (Nomor Pokok Sekolah Nasional) <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={subNewSchoolNpsn}
+                  onChange={(e) => setSubNewSchoolNpsn(e.target.value)}
+                  placeholder="Contoh: 20320456"
+                  className="w-full text-xs p-2.5 bg-[#f8faf9] border border-[#bcc9c6]/60 rounded-xl focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] font-mono font-bold text-[#00685f]"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-gray-700 block">
+                  Alamat Sekolah
+                </label>
+                <input
+                  type="text"
+                  value={subNewSchoolAddress}
+                  onChange={(e) => setSubNewSchoolAddress(e.target.value)}
+                  placeholder="Jl. Raya Utama No. 12"
+                  className="w-full text-xs p-2.5 bg-[#f8faf9] border border-[#bcc9c6]/60 rounded-xl focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setShowNewSchoolSubModal(false)}
+                  disabled={isRegisteringSubSchool}
+                  className="px-4 py-2 border border-gray-300 text-gray-600 hover:bg-gray-50 rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={isRegisteringSubSchool}
+                  className="px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {isRegisteringSubSchool ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Menyimpan...</span>
+                    </>
+                  ) : (
+                    <span>Simpan & Pilih Sekolah</span>
                   )}
                 </button>
               </div>

@@ -11,6 +11,7 @@ import { getCloudConnectionInfo, initRealtimeFirestoreSync, forceFullCloudSync, 
 import { getActiveSchoolId, getSchoolConfig } from '../utils/schoolConfig';
 import { isAdministrator } from '../utils/accessControl';
 import { showToast } from '../utils/toast';
+import { formatCardDate, formatCardTime, formatCardDateTime } from '../utils/dateFormatter';
 
 interface HeaderProps {
   activeCounselor: Counselor;
@@ -199,7 +200,7 @@ export default function Header({
   // High Risk Students for Early Warning Notification
   const highRiskStudents = useMemo(() => {
     return (students || [])
-      .filter((s) => (s.violationPoints || 0) >= 30)
+      .filter((s) => s && s.isDeleted !== true && (s.violationPoints || 0) >= 30)
       .sort((a, b) => (b.violationPoints || 0) - (a.violationPoints || 0));
   }, [students]);
 
@@ -329,8 +330,8 @@ export default function Header({
       list.push({
         id: `srv-${s.id}`,
         title: isToday ? '📅 Jadwal Konseling Hari Ini' : '📅 Sesi Konseling Terjadwal',
-        body: `${s.serviceType}: ${studentNames} (${s.problem}) jam ${s.startTime} - ${s.endTime} WIB.`,
-        time: isToday ? `Hari Ini (${s.date})` : s.date,
+        body: `${s.serviceType}: ${studentNames} (${s.problem}) jam ${formatCardTime(s.startTime).replace(' WIB', '')} - ${formatCardTime(s.endTime || s.startTime)}.`,
+        time: isToday ? 'Hari Ini' : formatCardDate(s.date),
         type: 'service',
         unread: isToday,
         targetTab: 'layanan-bk',
@@ -347,7 +348,7 @@ export default function Header({
         id: `viol-${v.id}`,
         title: needsHandling ? '⚠️ Pelanggaran Perlu Penanganan' : '📋 Laporan Pelanggaran',
         body: `${v.studentName} (${v.studentClass}) - ${v.category} (+${v.pointsAdded} Bobot).`,
-        time: isToday ? `Hari Ini, ${v.time}` : `${v.date} ${v.time}`,
+        time: isToday ? `Hari Ini, ${formatCardTime(v.time)}` : formatCardDateTime(v.date, v.time),
         type: 'violation',
         unread: needsHandling,
         targetTab: 'pelanggaran',
@@ -374,14 +375,14 @@ export default function Header({
     return list.sort((a, b) => (b.unread ? 1 : 0) - (a.unread ? 1 : 0)).slice(0, 8);
   }, [services, violations, homeVisits, todayStr]);
 
-  // Instant student search matches across name, NISN, and class
   const matchingStudents = useMemo(() => {
-    if (!students || students.length === 0) return [];
+    const activeStudents = (students || []).filter((s) => s && s.isDeleted !== true);
+    if (activeStudents.length === 0) return [];
     if (!searchQuery || !searchQuery.trim()) {
-      return students.slice(0, 5);
+      return activeStudents.slice(0, 5);
     }
     const q = searchQuery.toLowerCase().trim();
-    return students.filter((s) => {
+    return activeStudents.filter((s) => {
       const name = (s.name || '').toLowerCase();
       const nisn = String(s.nis || (s as any).nisn || '');
       const cls = (s.class || '').toLowerCase();
@@ -956,10 +957,10 @@ export default function Header({
                     type="button"
                     onClick={() => {
                       setShowQuickActionMenu(false);
-                      if (onNavigateToTab) onNavigateToTab('dashboard');
+                      if (onNavigateToTab) onNavigateToTab('si-becik');
                     }}
                     className="flex items-center justify-center gap-1 py-2 px-2 bg-amber-50 hover:bg-amber-100 text-amber-900 rounded-xl text-[10px] font-extrabold transition-all cursor-pointer border border-amber-300 shadow-2xs"
-                    title="Tanya Si Becik 🦉 di Dashboard"
+                    title="Buka Chat Si Becik 🦉"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-amber-600 animate-pulse shrink-0" />
                     <span>Si Becik 🦉</span>
@@ -1410,13 +1411,30 @@ export default function Header({
                       type="button"
                       onClick={() => {
                         setShowMobileMoreMenu(false);
-                        if (onNavigateToTab) onNavigateToTab('dashboard');
+                        if (onNavigateToTab) onNavigateToTab('si-becik');
                       }}
                       className="flex-1 py-1.5 px-2 bg-amber-50 hover:bg-amber-100 text-amber-900 rounded-lg text-[10px] font-extrabold text-center transition-colors cursor-pointer"
                     >
                       🦉 Si Becik
                     </button>
                   </div>
+
+                  {/* Tombol Keluar / Ganti Akun (Mobile) */}
+                  {onLogout && (
+                    <div className="pt-2 border-t border-gray-100">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMobileMoreMenu(false);
+                          onLogout();
+                        }}
+                        className="w-full py-2 px-3 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>Keluar / Ganti Akun</span>
+                      </button>
+                    </div>
+                  )}
                 </motion.div>
               )}
             </AnimatePresence>
@@ -1460,15 +1478,12 @@ export default function Header({
           {onLogout && (
             <button
               type="button"
-              onClick={() => {
-                if (window.confirm('Keluar dari akun Anda dan kembali ke Halaman Login?')) {
-                  onLogout();
-                }
-              }}
-              className="hidden md:inline-flex p-2 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all cursor-pointer active:scale-95 shrink-0"
-              title="Keluar (Logout) ke Halaman Login"
+              onClick={onLogout}
+              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200/70 rounded-xl text-xs font-bold transition-all cursor-pointer active:scale-95 shrink-0"
+              title="Keluar (Logout) / Ganti Akun"
             >
               <LogOut className="w-4 h-4" />
+              <span className="hidden lg:inline">Keluar</span>
             </button>
           )}
         </div>

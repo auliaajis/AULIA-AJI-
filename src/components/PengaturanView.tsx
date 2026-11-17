@@ -7,24 +7,32 @@ import {
   getActiveSchoolId,
   setActiveSchoolId,
   sanitizeSchoolId,
+  generateSchoolIdFromConfig,
+  markManualSchoolIdentitySaved,
+  getKopSuratSchoolName,
   loadSchoolData,
   saveSchoolData,
   SchoolConfig,
   PRESET_LOGOS
 } from '../utils/schoolConfig';
-import { initialStudents, initialViolations, initialServices, initialLogs, initialHomeVisits, initialAttendanceHistory, counselors } from '../data/mockData';
-import { CANONICAL_AULIA_STUDENTS } from '../data/canonicalStudents';
+import { initialViolations, initialServices, initialLogs, initialHomeVisits, counselors } from '../data/mockData';
 import SchoolLogo from './SchoolLogo';
 import KabupatenLogo from './KabupatenLogo';
 import { getAutoJournalSettings, saveAutoJournalSettings, AutoJournalSettings } from '../utils/journalAutoLink';
 import { purgeDummyData } from '../utils/purgeDummyData';
+import { restoreOriginalUserData } from '../utils/multiSchoolMigration';
 import { isAdministrator } from '../utils/accessControl';
-import { clearCanonicalDeletedIds } from '../utils/deletionTracker';
 import { 
   updateAccountRequestInCloud, 
   listenToAccountRequests, 
   fetchAllPendingAccountRequestsFromCloud,
-  saveBulkToFirestore
+  saveBulkToFirestore,
+  listenToPendingUsersQuery,
+  listenToSchoolUsers,
+  approveUserViaCloudFunction,
+  rejectUserInFirestore,
+  formatTanggalPengajuan,
+  UserAccountDoc
 } from '../utils/firestoreSync';
 import { 
   Save, 
@@ -75,6 +83,8 @@ import { generateUserManualPDF } from '../utils/userManualPdfGenerator';
 import PengaturanTataTertibPelanggaran from './PengaturanTataTertibPelanggaran';
 import { applyLatestBkGuideConfig } from '../utils/violationRulesConfig';
 import { PPKSP_2023_SOP } from '../data/juknisBskap2022';
+import { showToast } from '../utils/toast';
+import { isValidDeleteId, safeGuardMassDrop, generateUniqueId } from '../utils/safeDelete';
 
 export interface WaliKelasConfig {
   class: string;
@@ -108,12 +118,37 @@ export default function PengaturanView({
 
   const [config, setConfig] = useState<SchoolConfig>(() => getSchoolConfig());
 
-  const [activeTab, setActiveTab] = useState<'identitas' | 'walikelas' | 'tata-tertib' | 'database' | 'akses' | 'otomatisasi' | 'profil' | 'database-personal' | 'panduan'>(
-    isUserAdmin ? 'identitas' : 'profil'
-  );
+  const [activeTab, setActiveTab] = useState<'identitas' | 'walikelas' | 'tata-tertib' | 'database' | 'akses' | 'otomatisasi' | 'profil' | 'database-personal' | 'panduan'>(() => {
+    try {
+      const stored = sessionStorage.getItem('bk_settings_subtab');
+      if (stored) {
+        sessionStorage.removeItem('bk_settings_subtab');
+        return stored as any;
+      }
+    } catch (e) {}
+    return isUserAdmin ? 'identitas' : 'profil';
+  });
+
+  useEffect(() => {
+    const handleSwitchTab = (e: any) => {
+      if (e?.detail?.tab) {
+        setActiveTab(e.detail.tab);
+      }
+    };
+    window.addEventListener('bk_switch_settings_tab', handleSwitchTab);
+    return () => window.removeEventListener('bk_switch_settings_tab', handleSwitchTab);
+  }, []);
 
   // Visible passwords map for admin user table
   const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({});
+  const [pendingDeleteCounselor, setPendingDeleteCounselor] = useState<Counselor | null>(null);
+  const [pendingPengaturanConfirm, setPendingPengaturanConfirm] = useState<{
+    kind: 'approve-all' | 'db-mode' | 'purge-dummy' | 'reload-demo' | 'fresh-school' | 'delete-walikelas' | 'reset-walikelas' | 'clear-logo' | 'reset-school';
+    title: string;
+    message: string;
+    confirmLabel: string;
+    payload?: any;
+  } | null>(null);
   const togglePasswordVisibility = (id: string) => {
     setVisiblePasswords(prev => ({ ...prev, [id]: !prev[id] }));
   };
@@ -246,53 +281,57 @@ export default function PengaturanView({
     }
   }, [activeCounselor]);
 
-  // Real-time listener for incoming account registration requests from cloud
-  const [realtimePendingRequests, setRealtimePendingRequests] = useState<Counselor[]>(() => {
-    try {
-      const cached = localStorage.getItem('bk_all_account_requests');
-      if (cached) {
-        const parsed: Counselor[] = JSON.parse(cached);
-        return parsed.filter(r => r.approvalStatus === 'pending');
-      }
-    } catch (e) {}
-    return [];
+  // 3 Tab state for account management: [Menunggu (X)] [Aktif] [Ditolak] - Default buka di [Menunggu]
+  const [userAccountTab, setUserAccountTab] = useState<'pending' | 'active' | 'rejected'>('pending');
+
+  const [realtimeSchoolUsers, setRealtimeSchoolUsers] = useState<{
+    pending: UserAccountDoc[];
+    active: UserAccountDoc[];
+    rejected: UserAccountDoc[];
+    all: UserAccountDoc[];
+  }>({
+    pending: [],
+    active: [],
+    rejected: [],
+    all: []
   });
 
+  // Real-time Firestore onSnapshot listener for users collection
+  // query(collection(db, "users"), where("schoolId", "==", schoolIdAdmin), where("status", "==", "pending"), orderBy("createdAt", "desc"))
   useEffect(() => {
-    const unsub = listenToAccountRequests((requests) => {
-      const pending = requests.filter(r => r.approvalStatus === 'pending');
-      setRealtimePendingRequests(pending);
+    const schoolIdAdmin = config.schoolId ? sanitizeSchoolId(config.schoolId) : getActiveSchoolId();
+
+    // 1. Real-time onSnapshot for pending users
+    const unsubPending = listenToPendingUsersQuery(schoolIdAdmin, (pendingUsers) => {
+      setRealtimeSchoolUsers(prev => ({
+        ...prev,
+        pending: pendingUsers
+      }));
     });
 
-    const handleLocalUpdate = (e?: any) => {
-      try {
-        const cached = localStorage.getItem('bk_all_account_requests');
-        if (cached) {
-          const parsed: Counselor[] = JSON.parse(cached);
-          setRealtimePendingRequests(parsed.filter(r => r.approvalStatus === 'pending'));
-        }
-      } catch (err) {}
+    // 2. Real-time onSnapshot for all school users to populate Aktif & Ditolak tabs
+    const unsubAll = listenToSchoolUsers(schoolIdAdmin, (res) => {
+      setRealtimeSchoolUsers(res);
+    });
+
+    const handleLocalUpdate = () => {
+      // Re-trigger refresh if needed
     };
-
     window.addEventListener('bk_account_requests_updated', handleLocalUpdate);
-    window.addEventListener('storage', handleLocalUpdate);
-
-    // Initial check from cloud
-    handleRefreshCloudPending();
 
     return () => {
-      unsub();
+      unsubPending();
+      unsubAll();
       window.removeEventListener('bk_account_requests_updated', handleLocalUpdate);
-      window.removeEventListener('storage', handleLocalUpdate);
     };
-  }, []);
+  }, [config.schoolId]);
 
   const [isRefreshingPendingCloud, setIsRefreshingPendingCloud] = useState(false);
   const handleRefreshCloudPending = async () => {
     setIsRefreshingPendingCloud(true);
     try {
       const fresh = await fetchAllPendingAccountRequestsFromCloud();
-      setRealtimePendingRequests(fresh.filter(r => r.approvalStatus === 'pending'));
+      // Also update local cache
     } catch (e) {
       console.warn('Failed to refresh pending accounts from cloud:', e);
     } finally {
@@ -324,9 +363,22 @@ export default function PengaturanView({
       }
     } catch (e) {}
     (allCounselors || []).filter(c => c.approvalStatus === 'pending' && isForThisSchool(c)).forEach(c => map.set(c.id, c));
-    (realtimePendingRequests || []).filter(c => isForThisSchool(c)).forEach(c => map.set(c.id, c));
+    (realtimeSchoolUsers.pending || []).forEach(u => {
+      const cObj: Counselor = {
+        id: u.uid || u.id || '',
+        name: u.name || u.displayName || 'Guru BK',
+        nip: u.nip || '-',
+        role: u.role || 'Guru Pembimbing BK',
+        email: u.email || '',
+        username: u.username || '',
+        avatar: u.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
+        allowedClasses: Array.isArray(u.allowedClasses) ? u.allowedClasses : [],
+        approvalStatus: 'pending'
+      };
+      map.set(cObj.id, cObj);
+    });
     return Array.from(map.values());
-  }, [allCounselors, realtimePendingRequests, config.schoolId, config.npsn]);
+  }, [allCounselors, realtimeSchoolUsers.pending, config.schoolId, config.npsn]);
 
   const counselorsInCurrentSchoolTable = React.useMemo(() => {
     const curSchoolId = config.schoolId ? sanitizeSchoolId(config.schoolId) : getActiveSchoolId();
@@ -553,94 +605,100 @@ export default function PengaturanView({
       alert('Sistem wajib menyisakan minimal 1 akun konselor aktif.');
       return;
     }
-    if (confirm(`Apakah Anda yakin ingin menghapus akun "${c.name}"?`)) {
-      if (onDeleteCounselor) {
-        onDeleteCounselor(c.id);
-        alert(`Akun "${c.name}" berhasil dihapus.`);
-      }
-    }
+    setPendingDeleteCounselor(c);
   };
 
-  const handleApproveCounselor = (c: Counselor) => {
+  const handleApproveCounselor = async (c: any) => {
     if (!isUserAdmin) {
       alert('Akses Ditolak: Hanya Administrator BK (Bapak Aulia Aji Sasongko) yang berhak menyetujui (ACC) pendaftaran akun.');
       return;
     }
-    const updated: Counselor = {
-      ...c,
-      allowedClasses: Array.isArray(c.allowedClasses) ? c.allowedClasses : [],
-      role: c.role || 'Guru Pembimbing BK',
-      nip: c.nip || '-',
-      avatar: c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-      approvalStatus: 'approved',
-      approvedAt: new Date().toISOString(),
-      approvedBy: activeCounselor?.name || 'Administrator BK',
-      isBlocked: false
-    };
-    if (onUpdateCounselor) {
-      onUpdateCounselor(updated);
+    const uid = c.uid || c.id;
+    const curSchoolId = config.schoolId ? sanitizeSchoolId(config.schoolId) : getActiveSchoolId();
+
+    try {
+      await approveUserViaCloudFunction(uid, curSchoolId, activeCounselor?.id);
+
+      const updated: Counselor = {
+        id: uid,
+        name: c.name || c.displayName || 'Guru BK',
+        allowedClasses: Array.isArray(c.allowedClasses) ? c.allowedClasses : [],
+        role: c.role || 'Guru Pembimbing BK',
+        nip: c.nip || '-',
+        email: c.email || '',
+        username: c.username || '',
+        avatar: c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
+        approvalStatus: 'approved',
+        approvedAt: new Date().toISOString(),
+        approvedBy: activeCounselor?.name || 'Administrator BK',
+        isBlocked: false,
+        schoolId: curSchoolId,
+        schoolName: config.schoolName
+      };
+
+      if (onUpdateCounselor) {
+        onUpdateCounselor(updated);
+      }
+      updateAccountRequestInCloud(updated).catch(console.warn);
+
+      alert('Akun disetujui. Suruh guru logout lalu login ulang.');
+    } catch (err: any) {
+      alert('Gagal menyetujui akun: ' + (err?.message || err));
     }
-    updateAccountRequestInCloud(updated).catch(console.warn);
-    setRealtimePendingRequests(prev => prev.filter(req => req.id !== c.id));
-    alert(`Pendaftaran akun "${c.name}" BERHASIL DISETUJUI (ACC)!\n\nAkun dengan username "${c.username}" sekarang sudah dapat login dan mengakses sistem BK secara realtime.`);
   };
 
-  const handleRejectCounselor = (c: Counselor) => {
+  const handleRejectCounselor = async (c: any) => {
     if (!isUserAdmin) {
       alert('Akses Ditolak: Hanya Administrator BK yang berhak menolak pendaftaran akun.');
       return;
     }
+    const uid = c.uid || c.id;
+    const curSchoolId = config.schoolId ? sanitizeSchoolId(config.schoolId) : getActiveSchoolId();
+
     const reason = prompt(`Masukkan alasan penolakan pendaftaran akun untuk "${c.name}" (opsional):`, 'Data pendaftaran belum lengkap / belum diverifikasi');
     if (reason === null) return; // Batal ditekan
 
-    const updated: Counselor = {
-      ...c,
-      allowedClasses: Array.isArray(c.allowedClasses) ? c.allowedClasses : [],
-      role: c.role || 'Guru Pembimbing BK',
-      nip: c.nip || '-',
-      avatar: c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-      approvalStatus: 'rejected',
-      rejectionReason: reason.trim() || 'Ditolak oleh Administrator BK',
-      isBlocked: true
-    };
-    if (onUpdateCounselor) {
-      onUpdateCounselor(updated);
+    try {
+      await rejectUserInFirestore(uid, curSchoolId, reason);
+
+      const updated: Counselor = {
+        id: uid,
+        name: c.name || c.displayName || 'Guru BK',
+        allowedClasses: Array.isArray(c.allowedClasses) ? c.allowedClasses : [],
+        role: c.role || 'Guru Pembimbing BK',
+        nip: c.nip || '-',
+        avatar: c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
+        approvalStatus: 'rejected',
+        rejectionReason: reason.trim() || 'Ditolak oleh Administrator BK',
+        isBlocked: true,
+        schoolId: curSchoolId
+      };
+      if (onUpdateCounselor) {
+        onUpdateCounselor(updated);
+      }
+      updateAccountRequestInCloud(updated).catch(console.warn);
+
+      alert(`Permintaan pendaftaran akun "${c.name}" telah ditolak.`);
+    } catch (err: any) {
+      alert('Gagal menolak akun: ' + (err?.message || err));
     }
-    updateAccountRequestInCloud(updated).catch(console.warn);
-    setRealtimePendingRequests(prev => prev.filter(req => req.id !== c.id));
-    alert(`Permintaan pendaftaran akun "${c.name}" telah ditolak.`);
   };
 
   const handleApproveAllPending = () => {
     if (!isUserAdmin) return;
     if (allPendingCounselors.length === 0) return;
 
-    if (confirm(`Apakah Anda yakin ingin MENYETUJUI (ACC) sekaligus ${allPendingCounselors.length} permintaan pendaftaran akun guru baru?`)) {
-      allPendingCounselors.forEach(c => {
-        const updated: Counselor = {
-          ...c,
-          allowedClasses: Array.isArray(c.allowedClasses) ? c.allowedClasses : [],
-          role: c.role || 'Guru Pembimbing BK',
-          nip: c.nip || '-',
-          avatar: c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-          approvalStatus: 'approved',
-          approvedAt: new Date().toISOString(),
-          approvedBy: activeCounselor?.name || 'Administrator BK',
-          isBlocked: false
-        };
-        if (onUpdateCounselor) {
-          onUpdateCounselor(updated);
-        }
-        updateAccountRequestInCloud(updated).catch(console.warn);
-      });
-      setRealtimePendingRequests([]);
-      alert(`Berhasil menyetujui (ACC) ${allPendingCounselors.length} akun guru baru! Seluruh guru tersebut sekarang sudah dapat langsung login secara realtime.`);
-    }
+    setPendingPengaturanConfirm({
+      kind: 'approve-all',
+      title: 'Setujui Semua Pendaftaran?',
+      message: `Setujui (ACC) sekaligus ${allPendingCounselors.length} permintaan pendaftaran akun guru baru?`,
+      confirmLabel: 'Ya, Setujui Semua',
+    });
   };
 
   const handleSaveNewUser = () => {
     if (!newCName.trim()) {
-      alert('Nama Lengkap wajib diisi.');
+      showToast('Nama Lengkap wajib diisi.', 'error');
       return;
     }
     const cleanUser = (newCUsername.trim() || newCName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10)).toLowerCase();
@@ -650,7 +708,7 @@ export default function PengaturanView({
       c => c.username?.toLowerCase() === cleanUser
     );
     if (usernameTaken) {
-      alert(`Username "${cleanUser}" sudah digunakan oleh akun lain. Silakan gunakan username yang berbeda.`);
+      showToast(`Username "${cleanUser}" sudah digunakan oleh akun lain.`, 'error');
       return;
     }
 
@@ -661,7 +719,7 @@ export default function PengaturanView({
 
     if (onCreateCounselor) {
       const newAcc: Counselor = {
-        id: `c-${Date.now()}`,
+        id: generateUniqueId('c'),
         name: newCName.trim(),
         nip: newCNip.trim() || '-',
         role: newCRole.trim() || 'Guru Pembimbing BK',
@@ -685,52 +743,33 @@ export default function PengaturanView({
       setNewCUsername('');
       setNewCPassword('123456');
       setNewCClasses('');
-      alert(`Akun baru untuk "${newAcc.name}" berhasil dibuat dan disetujui (ACC)!\n\nUsername: ${newAcc.username}\nPassword: ${newAcc.password}\n\nAkun ini sudah dapat langsung digunakan untuk login.`);
+      showToast(`Akun baru "${newAcc.name}" (username: ${newAcc.username}) berhasil dibuat!`, 'success');
     }
   };
 
   const handleToggleDbMode = (mode: 'shared' | 'isolated') => {
     if (mode === dbMode) return;
-    
-    const message = mode === 'isolated' 
-      ? "⚠️ AKTIFKAN ISOLASI DATABASE (DATABASE MANDIRI PER AKUN)?\n\n" +
-        "Setelah diaktifkan, data siswa, pelanggaran, layanan, jurnal, absensi, dan integrasi Google Sheets akan terpisah secara mandiri untuk masing-masing Akun Konselor.\n\n" +
-        "Akun Anda tidak akan saling menimpa atau mencampuri data rekan sejawat lainnya, meskipun menggunakan browser/perangkat yang sama.\n\n" +
-        "Sistem akan memuat ulang halaman untuk menerapkan ruang penyimpanan terisolasi yang baru. Lanjutkan?"
-      : "⚠️ NONAKTIFKAN ISOLASI DATABASE (KEMBALI KE DATABASE BERSAMA)?\n\n" +
-        "Sistem akan kembali menggunakan satu database lokal global yang sama (dibagikan untuk seluruh akun konselor di browser ini).\n\n" +
-        "Sistem akan memuat ulang halaman untuk menerapkan ruang penyimpanan bersama yang baru. Lanjutkan?";
-        
-    if (confirm(message)) {
-      localStorage.setItem('bk_database_mode', mode);
-      setDbMode(mode);
-      window.dispatchEvent(new Event('storage'));
-      setTimeout(() => {
-        window.location.reload();
-      }, 300);
-    }
+    const message = mode === 'isolated'
+      ? 'Aktifkan Isolasi Database (mandiri per akun)? Halaman akan dimuat ulang untuk menerapkan ruang penyimpanan terpisah.'
+      : 'Kembalikan ke Database Bersama untuk seluruh akun di browser ini? Halaman akan dimuat ulang.';
+    setPendingPengaturanConfirm({
+      kind: 'db-mode',
+      title: 'Ubah Mode Database',
+      message,
+      confirmLabel: 'Ya, Terapkan',
+      payload: mode,
+    });
   };
 
   const [isPurging, setIsPurging] = useState(false);
 
-  const handlePurgeDummyData = async () => {
-    if (!confirm('Apakah Anda yakin ingin membersihkan dan menghapus SEMUA data bawaan/dummy dari LocalStorage & Cloud Database Firestore? Data asli buatan Anda akan tetap aman.')) {
-      return;
-    }
-    setIsPurging(true);
-    try {
-      const { totalPurged } = await purgeDummyData();
-      if (totalPurged > 0) {
-        alert(`SUKSES! Berhasil membersihkan ${totalPurged} catatan data dummy/bawaan dari database lokal & Firestore cloud.`);
-      } else {
-        alert('Database Anda sudah bersih dari data dummy.');
-      }
-      window.location.reload();
-    } catch (err) {
-      alert('Gagal membersihkan data dummy: ' + err);
-    } finally {
-      setIsPurging(false);
-    }
+  const handlePurgeDummyData = () => {
+    setPendingPengaturanConfirm({
+      kind: 'purge-dummy',
+      title: 'Bersihkan Data Bawaan',
+      message: 'Bersihkan data bawaan contoh dari penyimpanan? Data buatan Anda sendiri tetap aman.',
+      confirmLabel: 'Ya, Bersihkan',
+    });
   };
 
   const handleExportDatabase = () => {
@@ -899,7 +938,7 @@ export default function PengaturanView({
       role: 'Koordinator BK & Administrator Sekolah',
       nip: 'NIP. 19931231 202221 1 002',
       avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-      allowedClasses: ['7A', '7B', '7C', '7D', '7E', '7F', '8A', '8B', '8C', '8D', '8E', '8F', '8G', '9A', '9B', '9C', '9D', '9E', '9F', '9G'],
+      allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
       username: 'aulia',
       password: 'aulia',
       email: 'auliasasongko12@guru.smp.belajar.id',
@@ -909,116 +948,51 @@ export default function PengaturanView({
       schoolName: 'SMP N 2 Susukan'
     };
 
-    // 1. Clear any accidental canonical deleted IDs and reset cleared flags
-    clearCanonicalDeletedIds();
-    localStorage.removeItem('bk_cleared_sch_20320123');
-    localStorage.removeItem('bk_students_cleared_sch_20320123');
-
-    // 2. Set canonical school workspace
+    // 1. Set canonical school workspace without wiping deleted records
     setActiveSchoolId('sch_20320123');
-    const existingStudents = loadSchoolData<any[]>('bk_students', [], 'sch_20320123');
-    saveSchoolData('bk_students', existingStudents, 'sch_20320123');
-    saveSchoolData('bk_violations', initialViolations, 'sch_20320123');
-    saveSchoolData('bk_services', initialServices, 'sch_20320123');
-    saveSchoolData('bk_home_visits', initialHomeVisits, 'sch_20320123');
-    saveSchoolData('bk_attendance_history', initialAttendanceHistory, 'sch_20320123');
-    saveSchoolData('bk_logs', initialLogs, 'sch_20320123');
-    saveSchoolData('bk_counselors', counselors, 'sch_20320123');
+    restoreOriginalUserData('sch_20320123').then((res) => {
+      // 3. Update profile in state
+      if (onUpdateCounselor) onUpdateCounselor(defaultAulia);
+      if (onChangeCounselor) onChangeCounselor(defaultAulia);
+      localStorage.setItem('bk_active_counselor_id', 'c1');
+      localStorage.setItem('bk_filter_scope_pref', 'assigned');
+      setProfileName(defaultAulia.name);
+      setProfileNip(defaultAulia.nip || '');
+      setProfileRole(defaultAulia.role);
+      setProfileEmail(defaultAulia.email || '');
+      setProfilePhone(defaultAulia.phone || '');
+      setProfilePassword(defaultAulia.password || '');
+      setClassFilterMode('custom');
+      setSelectedClassesList(['8A', '8B', '8C', '8D', '8E', '8F', '8G']);
 
-    // 3. Sync to Firestore in the background
-    if (existingStudents && existingStudents.length > 0) {
-      saveBulkToFirestore('bk_students', existingStudents, 'sch_20320123').catch(() => {});
-    }
-    saveBulkToFirestore('bk_violations', initialViolations, 'sch_20320123').catch(() => {});
-    saveBulkToFirestore('bk_services', initialServices, 'sch_20320123').catch(() => {});
-    saveBulkToFirestore('bk_home_visits', initialHomeVisits, 'sch_20320123').catch(() => {});
-    saveBulkToFirestore('bk_attendance_history', initialAttendanceHistory, 'sch_20320123').catch(() => {});
-    saveBulkToFirestore('bk_counselors', counselors, 'sch_20320123').catch(() => {});
-
-    // 4. Update profile in state
-    if (onUpdateCounselor) {
-      onUpdateCounselor(defaultAulia);
-    }
-    if (onChangeCounselor) {
-      onChangeCounselor(defaultAulia);
-    }
-    localStorage.setItem('bk_active_counselor_id', 'c1');
-    localStorage.setItem('bk_filter_scope_pref', 'all');
-    setProfileName(defaultAulia.name);
-    setProfileNip(defaultAulia.nip || '');
-    setProfileRole(defaultAulia.role);
-    setProfileEmail(defaultAulia.email || '');
-    setProfilePhone(defaultAulia.phone || '');
-    setProfilePassword(defaultAulia.password || '');
-    setClassFilterMode('all');
-    setSelectedClassesList([]);
-
-    // 5. Notify all listeners
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-      detail: { key: 'bk_students', data: existingStudents, schoolId: 'sch_20320123' }
-    }));
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-      detail: { key: 'bk_violations', data: initialViolations, schoolId: 'sch_20320123' }
-    }));
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-      detail: { key: 'bk_services', data: initialServices, schoolId: 'sch_20320123' }
-    }));
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-      detail: { key: 'bk_home_visits', data: initialHomeVisits, schoolId: 'sch_20320123' }
-    }));
-    window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: initialAttendanceHistory }));
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-      detail: { key: 'bk_attendance_history', data: initialAttendanceHistory, schoolId: 'sch_20320123' }
-    }));
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-      detail: { key: 'bk_counselors', data: counselors, schoolId: 'sch_20320123' }
-    }));
-    window.dispatchEvent(new Event('storage'));
-
-    alert('🎉 BERHASIL MEMULIHKAN DATABASE AULIA AJI SASONGKO!\n\n194 Siswa Kelas 8 SMP Negeri 2 Susukan (Rombel 8A s/d 8G), catatan Pelanggaran, Presensi Absensi Kelas, Home Visit, Layanan Konseling, serta seluruh akun Guru BK (Bapak Aulia Aji Sasongko, S.Pd., Admin Utama, Ibu Nona, Ibu Tri, Ibu Bina) telah dipulihkan secara penuh ke sistem.');
+      alert(`🎉 ${res.message}`);
+    }).catch((err) => {
+      alert(`Gagal memulihkan data: ${err?.message || err}`);
+    });
   };
 
-  const handleRestoreKelas8 = () => {
-    clearCanonicalDeletedIds();
+  const handleRestoreKelas8 = async () => {
     setActiveSchoolId('sch_20320123');
-    
-    saveSchoolData('bk_students', CANONICAL_AULIA_STUDENTS, 'sch_20320123');
-    saveSchoolData('bk_attendance_history', initialAttendanceHistory, 'sch_20320123');
-    saveBulkToFirestore('bk_students', CANONICAL_AULIA_STUDENTS, 'sch_20320123').catch(() => {});
-    saveBulkToFirestore('bk_attendance_history', initialAttendanceHistory, 'sch_20320123').catch(() => {});
-
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-      detail: { key: 'bk_students', data: CANONICAL_AULIA_STUDENTS, schoolId: 'sch_20320123' }
-    }));
-    window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: initialAttendanceHistory }));
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-      detail: { key: 'bk_attendance_history', data: initialAttendanceHistory, schoolId: 'sch_20320123' }
-    }));
-    window.dispatchEvent(new Event('storage'));
-
-    alert('🎉 BERHASIL MENGEMBALIKAN DATA SISWA & PRESENSI KELAS 8!\n\nSeluruh 194 Siswa Kelas 8 (Rombel 8A s/d 8G) dan arsip presensi absensi harian Database Bapak Aulia Aji Sasongko, S.Pd. telah kembali dan disinkronkan ke sistem dan cloud.');
+    const res = await restoreOriginalUserData('sch_20320123');
+    alert(`🎉 ${res.message}`);
   };
 
   const handleReloadDemoData = () => {
-    if (window.confirm('Muat ulang data simulasi/percontohan (siswa, catatan pelanggaran, sesi layanan BK)? Tindakan ini akan mengembalikan contoh data siswa untuk pengujian fitur.')) {
-      const activeSId = getActiveSchoolId();
-      saveSchoolData('bk_students', initialStudents, activeSId);
-      saveSchoolData('bk_violations', initialViolations, activeSId);
-      saveSchoolData('bk_services', initialServices, activeSId);
-      saveSchoolData('bk_logs', initialLogs, activeSId);
-      window.dispatchEvent(new Event('storage'));
-      setTimeout(() => {
-        window.location.reload();
-      }, 300);
-    }
+    setPendingPengaturanConfirm({
+      kind: 'reload-demo',
+      title: 'Sinkronkan Data Asli',
+      message: 'Sinkronkan & pulihkan catatan kasus, layanan BK, dan daftar siswa asli Anda?',
+      confirmLabel: 'Ya, Sinkronkan',
+    });
   };
 
   const handleSetupFreshSchool = () => {
-    if (window.confirm('Apakah Anda ingin menyiapkan database bersih untuk sekolah baru? Sistem akan otomatis mengunduh file cadangan data saat ini terlebih dahulu, lalu mengosongkan data siswa lama agar Anda dapat mulai mengisi data siswa sekolah Anda.')) {
-      if (onResetToFreshSchool) {
-        onResetToFreshSchool();
-      }
-    }
+    setPendingPengaturanConfirm({
+      kind: 'fresh-school',
+      title: 'Siapkan Database Sekolah Baru',
+      message: 'Sistem akan mengunduh file cadangan data saat ini terlebih dahulu sebelum mengosongkan data siswa lama. Lanjutkan?',
+      confirmLabel: 'Ya, Lanjutkan',
+    });
   };
 
   const defaultWaliKelasList: WaliKelasConfig[] = [
@@ -1092,7 +1066,7 @@ export default function PengaturanView({
 
   const handleSaveEdit = (index: number) => {
     if (!editClass.trim() || !editName.trim() || !editEmail.trim()) {
-      alert('Semua data wajib diisi!');
+      showToast('Semua data wali kelas wajib diisi!', 'error');
       return;
     }
     const updated = [...waliKelasList];
@@ -1107,21 +1081,26 @@ export default function PengaturanView({
   };
 
   const handleDelete = (index: number) => {
-    if (confirm(`Apakah Anda yakin ingin menghapus data wali kelas untuk ${waliKelasList[index].class}?`)) {
-      const updated = waliKelasList.filter((_, i) => i !== index);
-      handleSaveWaliKelasList(updated);
-    }
+    const targetItem = waliKelasList[index];
+    if (!targetItem) return;
+    setPendingPengaturanConfirm({
+      kind: 'delete-walikelas',
+      title: 'Konfirmasi Hapus Wali Kelas',
+      message: `Hapus data wali kelas ${targetItem.class} (${targetItem.name}) saja? Data wali kelas lain tidak akan terhapus.`,
+      confirmLabel: 'Ya, Hapus 1 Ini Saja',
+      payload: index,
+    });
   };
 
   const handleAddNew = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newClass.trim() || !newName.trim() || !newEmail.trim()) {
-      alert('Semua data wajib diisi!');
+      showToast('Semua data wali kelas wajib diisi!', 'error');
       return;
     }
     const exists = waliKelasList.some(item => item.class.toLowerCase() === newClass.trim().toLowerCase());
     if (exists) {
-      alert(`Wali kelas untuk ${newClass} sudah terdaftar!`);
+      showToast(`Wali kelas untuk ${newClass} sudah terdaftar!`, 'error');
       return;
     }
     const updated = [
@@ -1143,10 +1122,12 @@ export default function PengaturanView({
   };
 
   const handleResetWaliKelas = () => {
-    if (confirm('Apakah Anda yakin ingin menyetel ulang seluruh data Wali Kelas dan email ke pengaturan bawaan SMP N 2 Susukan?')) {
-      handleSaveWaliKelasList(defaultWaliKelasList);
-      handleSaveThreshold(20);
-    }
+    setPendingPengaturanConfirm({
+      kind: 'reset-walikelas',
+      title: 'Reset Data Wali Kelas',
+      message: 'Setel ulang seluruh data Wali Kelas dan email ke pengaturan bawaan SMP N 2 Susukan?',
+      confirmLabel: 'Ya, Setel Ulang',
+    });
   };
 
   const [savedSuccess, setSavedSuccess] = useState(false);
@@ -1246,33 +1227,42 @@ export default function PengaturanView({
   };
 
   const handleClearLogo = (key: 'bk_custom_school_logo' | 'bk_custom_kabupaten_logo', label: string) => {
-    if (confirm(`Apakah Anda yakin ingin menghapus custom ${label} dan kembali menggunakan logo default?`)) {
-      localStorage.removeItem(key);
-      if (key === 'bk_custom_school_logo') {
-        setConfig(prev => {
-          const updated = { ...prev, customLogo: undefined };
-          saveSchoolConfig(updated);
-          return updated;
-        });
-      } else {
-        setConfig(prev => {
-          const updated = { ...prev, customKabupatenLogo: undefined };
-          saveSchoolConfig(updated);
-          return updated;
-        });
-      }
-      window.dispatchEvent(new Event('logo-update'));
-      window.dispatchEvent(new Event('storage'));
-      window.dispatchEvent(new Event('bk_school_config_updated'));
-      
-      setUploadFeedback(`${label} dikembalikan ke bawaan sistem.`);
-      setTimeout(() => setUploadFeedback(null), 3000);
-    }
+    setPendingPengaturanConfirm({
+      kind: 'clear-logo',
+      title: 'Konfirmasi Hapus Logo Kustom',
+      message: `Hapus custom ${label} saja dan kembali menggunakan logo default?`,
+      confirmLabel: 'Ya, Hapus 1 Ini Saja',
+      payload: { key, label },
+    });
   };
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    saveSchoolConfig(config);
+    const resolvedSchoolId = config.schoolId
+      ? sanitizeSchoolId(config.schoolId)
+      : generateSchoolIdFromConfig(config);
+    const updatedConfig: SchoolConfig = {
+      ...config,
+      schoolId: resolvedSchoolId,
+      schoolName: config.schoolName.trim(),
+      namaSekolah: (config.namaSekolah || '').trim() || getKopSuratSchoolName(config),
+      npsn: (config.npsn || '').trim(),
+      jenjang: config.jenjang || 'SMP',
+      koordinatorBkName: (config.koordinatorBkName || '').trim() || activeCounselor?.name || 'Aulia Aji Sasongko, S.Pd.'
+    };
+    setConfig(updatedConfig);
+    markManualSchoolIdentitySaved();
+    saveSchoolConfig(updatedConfig);
+
+    if (activeCounselor && onUpdateCounselor && updatedConfig.schoolName) {
+      onUpdateCounselor({
+        ...activeCounselor,
+        name: updatedConfig.koordinatorBkName || activeCounselor.name,
+        schoolId: resolvedSchoolId,
+        schoolNpsn: updatedConfig.npsn || '',
+        schoolName: updatedConfig.schoolName
+      });
+    }
     
     // Dispatch events so sidebar, headers, and pdf generators know config updated
     window.dispatchEvent(new Event('storage'));
@@ -1280,34 +1270,34 @@ export default function PengaturanView({
     window.dispatchEvent(new Event('logo-update'));
     
     setSavedSuccess(true);
+    showToast(`Identitas "${updatedConfig.schoolName}" berhasil disimpan!`, 'success');
     setTimeout(() => {
       setSavedSuccess(false);
     }, 3000);
   };
 
   const handleReset = () => {
-    if (confirm('Apakah Anda yakin ingin mengembalikan pengaturan ke default sekolah SMP N 2 Susukan?')) {
-      resetSchoolConfigToDefault();
-      const defaultConfig = getSchoolConfig('sch_20320123');
-      setConfig(defaultConfig);
-      
-      window.dispatchEvent(new Event('logo-update'));
-      window.dispatchEvent(new Event('storage'));
-      
-      setSavedSuccess(true);
-      setTimeout(() => {
-        setSavedSuccess(false);
-      }, 3000);
-    }
+    setPendingPengaturanConfirm({
+      kind: 'reset-school',
+      title: 'Reset Pengaturan Sekolah',
+      message: 'Kembalikan pengaturan sekolah ke default SMP N 2 Susukan?',
+      confirmLabel: 'Ya, Kembalikan',
+    });
   };
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto animate-in fade-in duration-300" id="pengaturan-view-container">
       <div>
-        <h2 className="text-2xl font-extrabold text-[#0b1c30]">Pengaturan Sistem & Wali Kelas</h2>
+        <h2 className="text-2xl font-extrabold text-[#0b1c30]">Pengaturan Sistem &amp; Wali Kelas</h2>
         <p className="text-sm text-[#3d4947]/70 font-semibold mt-0.5">
           Atur identitas sekolah, unggah logo kop surat, serta kelola nama dan alamat email Wali Kelas untuk otomatisasi notifikasi pelanggaran.
         </p>
+        <div className="mt-2.5 px-3.5 py-2 rounded-xl bg-[#e6f4f1] border border-[#00685f]/25 text-xs font-semibold text-[#005049] flex items-center gap-2">
+          <Sparkles className="w-4 h-4 text-[#00685f] shrink-0" />
+          <span>
+            Setelah memperbarui identitas atau data di Preview, pastikan klik tombol <strong>Publish</strong> di AI Studio agar Situs Asli ikut diperbarui.
+          </span>
+        </div>
       </div>
 
       {/* Top Banner Alert for Admin: Pending Account Requests from Any School / Platform */}
@@ -1797,7 +1787,7 @@ export default function PengaturanView({
                             onClick={handleClearSelectedClasses}
                             className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-extrabold transition-all cursor-pointer"
                           >
-                            Kosongkan
+                            Reset Pilihan
                           </button>
                         </div>
                       </div>
@@ -2242,11 +2232,11 @@ export default function PengaturanView({
                   </div>
                 </div>
 
-                {/* School Name & NPSN Grid */}
+                {/* School Name, Nama Resmi Kop Surat & NPSN Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div className="sm:col-span-2 space-y-1.5">
+                  <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
-                      Nama Sekolah (Kop Baris 3)
+                      Nama Sekolah (Header &amp; Sidebar)
                     </label>
                     <div className="relative">
                       <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
@@ -2265,14 +2255,27 @@ export default function PengaturanView({
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
-                      NPSN Sekolah
+                      Nama Sekolah di Kop Surat
+                    </label>
+                    <input
+                      type="text"
+                      value={config.namaSekolah ?? getKopSuratSchoolName(config)}
+                      onChange={(e) => setConfig({ ...config, namaSekolah: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-bold"
+                      placeholder="Contoh: SMP Negeri 2 Susukan"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
+                      NPSN (Opsional, boleh kosong)
                     </label>
                     <input
                       type="text"
                       value={config.npsn || ''}
                       onChange={(e) => setConfig({ ...config, npsn: e.target.value })}
                       className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:border-transparent transition-all font-semibold font-mono"
-                      placeholder="20320123"
+                      placeholder="20320123 (opsional)"
                     />
                   </div>
                 </div>
@@ -2414,15 +2417,15 @@ export default function PengaturanView({
                   </div>
                 </div>
 
-                {/* Koordinator BK Grid */}
+                {/* Guru BK / Koordinator BK Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-700 block uppercase tracking-wider">
-                      Nama Koordinator BK Sekolah
+                      Nama Guru BK / Koordinator BK
                     </label>
                     <input
                       type="text"
-                      value={config.koordinatorBkName || 'Aulia Aji Sasongko, S.Pd.'}
+                      value={config.koordinatorBkName ?? activeCounselor?.name ?? 'Aulia Aji Sasongko, S.Pd.'}
                       onChange={(e) => setConfig({ ...config, koordinatorBkName: e.target.value })}
                       className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#00685f]"
                       placeholder="Contoh: Aulia Aji Sasongko, S.Pd."
@@ -3608,191 +3611,245 @@ export default function PengaturanView({
             </div>
           )}
 
-          {/* SECTION: Permintaan Pendaftaran Akun Guru Baru (Menunggu ACC) */}
-          {allPendingCounselors.length > 0 && (
-            <div className="bg-amber-50/80 border-2 border-amber-300 rounded-2xl p-5 shadow-xs space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-xl bg-amber-500 text-white flex items-center justify-center shadow-2xs relative">
-                    <UserCheck className="w-5 h-5" />
-                    <span className="absolute -top-1 -right-1 flex h-3 w-3">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+          {/* SECTION: Manajemen & Persetujuan Pengajuan Akun Guru BK Realtime */}
+          <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 p-5 shadow-xs space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-teal-50 text-[#00685f] border border-teal-200/80 flex items-center justify-center shadow-2xs shrink-0">
+                  <UserCheck className="w-5 h-5 text-[#00685f]" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-extrabold text-sm text-[#0b1c30]">Persetujuan Akun Guru BK</h4>
+                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded-md border border-emerald-200 flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                      Realtime Firebase
                     </span>
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h4 className="font-extrabold text-sm text-amber-950">Permintaan Pendaftaran Akun Guru Baru</h4>
-                      <span className="px-2.5 py-0.5 bg-amber-200 text-amber-900 text-[10px] font-black rounded-full border border-amber-300 flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-600 animate-pulse" />
-                        {allPendingCounselors.length} Menunggu Persetujuan (ACC)
-                      </span>
-                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[9px] font-bold rounded-md border border-emerald-200">
-                        Realtime Sync Aktif
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-amber-800 font-medium">
-                      {isUserAdmin
-                        ? 'Pendaftaran akun baru masuk secara realtime dari Cloud. Administrator BK dapat menyetujui (ACC) atau menolak permintaan di bawah ini.'
-                        : 'Pendaftaran akun guru baru sedang menunggu persetujuan (ACC) dari Administrator Sekolah.'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleRefreshCloudPending}
-                    disabled={isRefreshingPendingCloud}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-amber-100/70 text-amber-900 border border-amber-300 text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer active:scale-97 disabled:opacity-50"
-                    title="Periksa pendaftaran akun baru langsung dari Firestore Cloud"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingPendingCloud ? 'animate-spin' : ''}`} />
-                    <span>{isRefreshingPendingCloud ? 'Memeriksa...' : 'Segarkan Cloud'}</span>
-                  </button>
-
-                  {isUserAdmin && allPendingCounselors.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={handleApproveAllPending}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer active:scale-97"
-                    >
-                      <CheckCheck className="w-4 h-4" />
-                      <span>Setujui Semua ({allPendingCounselors.length})</span>
-                    </button>
-                  )}
+                  <p className="text-[11px] text-gray-500 font-medium">
+                    Sinkronisasi langsung dengan koleksi <code className="text-[#00685f] font-mono">users</code> Firestore per sekolah.
+                  </p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                {allPendingCounselors
-                  .map((c) => (
-                    <div key={c.id} className="bg-white rounded-xl p-4 border border-amber-200/80 shadow-2xs space-y-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex items-center gap-3">
-                          <img
-                            src={c.avatar}
-                            alt={c.name}
-                            referrerPolicy="no-referrer"
-                            className="w-10 h-10 rounded-full object-cover border border-amber-200 shrink-0"
-                          />
-                          <div className="min-w-0">
-                            <p className="font-extrabold text-xs text-[#0b1c30] truncate">{c.name}</p>
-                            <p className="text-[11px] text-[#00685f] font-semibold">{c.role}</p>
-                            <p className="text-[10px] text-gray-400 font-mono">NIP: {c.nip || '-'}</p>
+              {/* 3 Tab: [Menunggu (X)] [Aktif] [Ditolak] */}
+              <div className="flex items-center bg-gray-100/90 p-1 rounded-xl border border-gray-200/70">
+                <button
+                  type="button"
+                  onClick={() => setUserAccountTab('pending')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    userAccountTab === 'pending'
+                      ? 'bg-[#00685f] text-white shadow-2xs'
+                      : 'text-gray-600 hover:text-[#00685f]'
+                  }`}
+                >
+                  <span>Menunggu</span>
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
+                    userAccountTab === 'pending'
+                      ? 'bg-amber-400 text-amber-950'
+                      : 'bg-amber-100 text-amber-900 border border-amber-300'
+                  }`}>
+                    {realtimeSchoolUsers.pending.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setUserAccountTab('active')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    userAccountTab === 'active'
+                      ? 'bg-[#00685f] text-white shadow-2xs'
+                      : 'text-gray-600 hover:text-[#00685f]'
+                  }`}
+                >
+                  <span>Aktif</span>
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                    userAccountTab === 'active'
+                      ? 'bg-white/30 text-white'
+                      : 'bg-emerald-50 text-emerald-800'
+                  }`}>
+                    {realtimeSchoolUsers.active.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setUserAccountTab('rejected')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    userAccountTab === 'rejected'
+                      ? 'bg-[#00685f] text-white shadow-2xs'
+                      : 'text-gray-600 hover:text-[#00685f]'
+                  }`}
+                >
+                  <span>Ditolak</span>
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                    userAccountTab === 'rejected'
+                      ? 'bg-white/30 text-white'
+                      : 'bg-rose-50 text-rose-800'
+                  }`}>
+                    {realtimeSchoolUsers.rejected.length}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* TAB 1: MENUNGGU (PENDING) */}
+            {userAccountTab === 'pending' && (
+              <div className="space-y-3">
+                {realtimeSchoolUsers.pending.length === 0 ? (
+                  <div className="p-6 text-center bg-gray-50/70 border border-dashed border-gray-200 rounded-xl space-y-1">
+                    <CheckCircle2 className="w-6 h-6 text-emerald-600 mx-auto" />
+                    <p className="text-xs font-bold text-gray-700">Tidak ada pengajuan akun baru yang menunggu</p>
+                    <p className="text-[11px] text-gray-400">Semua pengajuan akun guru untuk sekolah ini telah disetujui atau diproses.</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-100 border border-gray-200/80 rounded-xl overflow-hidden bg-white shadow-2xs">
+                    {realtimeSchoolUsers.pending.map((u) => {
+                      const uid = u.uid || u.id || '';
+                      return (
+                        <div key={uid} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-amber-50/30 transition-colors">
+                          <div className="flex items-start gap-3 min-w-0">
+                            <div className="w-10 h-10 rounded-full bg-teal-50 border border-teal-200 flex items-center justify-center font-bold text-[#00685f] text-sm shrink-0">
+                              {(u.name || u.displayName || 'G').charAt(0).toUpperCase()}
+                            </div>
+                            <div className="min-w-0 space-y-0.5">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h5 className="font-extrabold text-xs sm:text-sm text-[#0b1c30] truncate">
+                                  {u.name || u.displayName || 'Nama Belum Diisi'}
+                                </h5>
+                                <span className="px-2 py-0.5 bg-amber-100 text-amber-900 border border-amber-200 text-[10px] font-black rounded-full">
+                                  Menunggu ACC
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500">
+                                <span>Email: <strong className="font-mono text-gray-700">{u.email || '-'}</strong></span>
+                                <span>•</span>
+                                <span>Username: <strong className="font-mono text-[#00685f]">{u.username || '-'}</strong></span>
+                                <span>•</span>
+                                <span>Tanggal Pengajuan: <strong className="text-gray-700 font-semibold">{formatTanggalPengajuan(u.createdAt)}</strong></span>
+                              </div>
+                            </div>
                           </div>
-                        </div>
-                        <span className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[9px] font-black rounded-md border border-amber-200 uppercase shrink-0">
-                          Pending ACC
-                        </span>
-                      </div>
 
-                      {/* Display School Details if available */}
-                      {((c as any).schoolName || (c as any).schoolNpsn) && (
-                        <div className="p-2 bg-teal-50/70 rounded-lg border border-teal-100/80 flex items-center gap-2 text-[10px] text-[#00685f]">
-                          <Building2 className="w-3.5 h-3.5 shrink-0" />
-                          <span className="truncate">
-                            Sekolah: <strong>{(c as any).schoolName || 'Sekolah'}</strong> {(c as any).schoolNpsn ? `(NPSN: ${(c as any).schoolNpsn})` : ''}
-                          </span>
-                        </div>
-                      )}
-
-                      <div className="bg-slate-50 p-2.5 rounded-lg border border-gray-100 grid grid-cols-2 gap-2 text-[10px]">
-                        <div>
-                          <span className="text-gray-400 block font-semibold">Username Login:</span>
-                          <span className="font-mono font-bold text-[#00685f]">{c.username || '-'}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-400 block font-semibold">Password:</span>
-                          <span className="font-mono font-bold text-gray-700">{c.password || '123456'}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-400 block font-semibold">Email:</span>
-                          <span className="font-mono text-gray-600 truncate block">{c.email || '-'}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-400 block font-semibold">Kelas Bimbingan:</span>
-                          <span className="font-bold text-teal-700">
-                            {Array.isArray(c.allowedClasses) && c.allowedClasses.length > 0 ? c.allowedClasses.join(', ') : 'Semua Kelas (Admin)'}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-end gap-2 pt-1 border-t border-gray-100">
-                        {isUserAdmin ? (
-                          <>
+                          <div className="flex items-center justify-end gap-2 pt-2 sm:pt-0 border-t sm:border-t-0 border-gray-100 shrink-0">
                             <button
                               type="button"
-                              onClick={() => {
-                                setEditingCounselorId(c.id);
-                                setEditCName(c.name);
-                                setEditCNip(c.nip);
-                                setEditCRole(c.role);
-                                setEditCEmail(c.email || '');
-                                setEditCUsername(c.username || '');
-                                setEditCPassword(c.password || '');
-                                setEditCClasses(Array.isArray(c.allowedClasses) ? c.allowedClasses.join(', ') : '');
-                                setIsAddingC(false);
-                              }}
-                              className="px-2.5 py-1.5 border border-gray-200 text-gray-600 hover:bg-gray-100 text-[11px] font-bold rounded-lg transition-all cursor-pointer"
-                              title="Edit Data / Hak Akses Sebelum ACC"
+                              onClick={() => handleRejectCounselor(u)}
+                              className="px-3 py-1.5 bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 hover:border-rose-300 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1 active:scale-97"
                             >
-                              <Pencil className="w-3 h-3 inline mr-1" />
-                              <span>Edit Akses</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleRejectCounselor(c)}
-                              className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold rounded-lg transition-all cursor-pointer"
-                            >
-                              <X className="w-3 h-3 inline mr-1" />
+                              <X className="w-3.5 h-3.5" />
                               <span>Tolak</span>
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleApproveCounselor(c)}
-                              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg shadow-2xs transition-all active:scale-97 cursor-pointer"
+                              onClick={() => handleApproveCounselor(u)}
+                              className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center gap-1.5 active:scale-97"
                             >
-                              <Check className="w-3 h-3 inline mr-1" />
-                              <span>Setujui (ACC)</span>
+                              <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                              <span>Setujui</span>
                             </button>
-                          </>
-                        ) : (
-                          <span className="px-3 py-1.5 bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-[11px] font-extrabold flex items-center gap-1.5">
-                            <Lock className="w-3.5 h-3.5 text-amber-700" />
-                            <span>Menunggu Verifikasi & ACC Administrator</span>
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Card status jika tidak ada pending requests */}
-          {allPendingCounselors.length === 0 && (
-            <div className="bg-white rounded-2xl border border-gray-200/80 p-4 shadow-2xs flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-xl bg-emerald-50 text-[#00685f] flex items-center justify-center border border-emerald-200 shrink-0">
-                  <CheckCircle2 className="w-4 h-4" />
-                </div>
-                <div>
-                  <p className="text-xs font-extrabold text-[#0b1c30]">Semua Akun Guru BK Telah Disetujui</p>
-                  <p className="text-[11px] text-gray-500">Tidak ada pengajuan akun guru baru yang menunggu persetujuan (ACC).</p>
-                </div>
+            {/* TAB 2: AKTIF */}
+            {userAccountTab === 'active' && (
+              <div className="space-y-3">
+                {realtimeSchoolUsers.active.length === 0 ? (
+                  <div className="p-6 text-center bg-gray-50/70 border border-dashed border-gray-200 rounded-xl space-y-1">
+                    <p className="text-xs font-bold text-gray-700">Belum ada akun guru berstatus aktif</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-100 border border-gray-200/80 rounded-xl overflow-hidden bg-white shadow-2xs">
+                    {realtimeSchoolUsers.active.map((u) => {
+                      const uid = u.uid || u.id || '';
+                      return (
+                        <div key={uid} className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-gray-50 transition-colors">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-9 h-9 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 flex items-center justify-center font-bold text-xs shrink-0">
+                              {(u.name || u.displayName || 'G').charAt(0).toUpperCase()}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <p className="font-extrabold text-xs text-[#0b1c30] truncate">
+                                  {u.name || u.displayName}
+                                </p>
+                                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[9px] font-bold rounded-md border border-emerald-200">
+                                  Aktif
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-gray-500 font-mono">
+                                {u.email || '-'} • Username: {u.username || '-'}
+                              </p>
+                            </div>
+                          </div>
+                          <span className="text-[10px] text-gray-400 font-medium">
+                            Disetujui: {formatTanggalPengajuan(u.approvedAt || u.createdAt)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-              <button
-                type="button"
-                onClick={handleRefreshCloudPending}
-                disabled={isRefreshingPendingCloud}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-50 hover:bg-gray-100 text-gray-700 border border-gray-200 text-xs font-bold rounded-xl transition-all cursor-pointer disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingPendingCloud ? 'animate-spin' : ''}`} />
-                <span>{isRefreshingPendingCloud ? 'Memeriksa Cloud...' : 'Cek Pengajuan Baru di Cloud'}</span>
-              </button>
-            </div>
-          )}
+            )}
+
+            {/* TAB 3: DITOLAK */}
+            {userAccountTab === 'rejected' && (
+              <div className="space-y-3">
+                {realtimeSchoolUsers.rejected.length === 0 ? (
+                  <div className="p-6 text-center bg-gray-50/70 border border-dashed border-gray-200 rounded-xl space-y-1">
+                    <p className="text-xs font-bold text-gray-700">Tidak ada pengajuan akun yang ditolak</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-100 border border-rose-200/60 rounded-xl overflow-hidden bg-white shadow-2xs">
+                    {realtimeSchoolUsers.rejected.map((u) => {
+                      const uid = u.uid || u.id || '';
+                      return (
+                        <div key={uid} className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-rose-50/20 hover:bg-rose-50/40 transition-colors">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-9 h-9 rounded-full bg-rose-100 border border-rose-200 text-rose-800 flex items-center justify-center font-bold text-xs shrink-0">
+                              {(u.name || u.displayName || 'G').charAt(0).toUpperCase()}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <p className="font-extrabold text-xs text-[#0b1c30] truncate">
+                                  {u.name || u.displayName}
+                                </p>
+                                <span className="px-2 py-0.5 bg-rose-100 text-rose-800 text-[9px] font-bold rounded-md border border-rose-200">
+                                  Ditolak
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-rose-800/80">
+                                Alasan: {u.rejectionReason || 'Ditolak oleh Administrator'}
+                              </p>
+                              <p className="text-[10px] text-gray-400 font-mono">
+                                {u.email || '-'} • Username: {u.username || '-'}
+                              </p>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => handleApproveCounselor(u)}
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center gap-1 active:scale-97 self-end sm:self-center"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Setujui Kembali</span>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Tabel Pengguna Terdaftar */}
           <div className="bg-white rounded-2xl border border-[#bcc9c6]/30 shadow-sm overflow-hidden">
@@ -4048,7 +4105,7 @@ export default function PengaturanView({
                   };
                   setAutoJournalSettings(defaultSettings);
                   saveAutoJournalSettings(defaultSettings);
-                  alert('Pengaturan otomatisasi jurnal berhasil dikembalikan ke standar awal (Catatan Pelanggaran Nonaktif).');
+                  showToast('Pengaturan otomatisasi jurnal dikembalikan ke standar awal.', 'info');
                 }}
                 className="px-3 py-1.5 text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl flex items-center gap-1.5 transition-all cursor-pointer"
               >
@@ -4395,6 +4452,173 @@ export default function PengaturanView({
                 className="px-4 py-2 text-xs font-bold text-gray-500 hover:bg-gray-100 rounded-xl transition-all cursor-pointer"
               >
                 Batal Pemulihan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {pendingDeleteCounselor && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus Akun Konselor</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+                  Hapus akun "{pendingDeleteCounselor.name}" saja? Akun konselor lain tidak akan terhapus.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteCounselor(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = pendingDeleteCounselor;
+                  setPendingDeleteCounselor(null);
+                  if (!isValidDeleteId(target?.id)) {
+                    showToast('Gagal: ID akun tidak valid, hapus dibatalkan', 'error');
+                    return;
+                  }
+                  if (onDeleteCounselor) {
+                    onDeleteCounselor(target.id);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Ya, Hapus 1 Ini Saja
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingPengaturanConfirm && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">{pendingPengaturanConfirm.title}</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">{pendingPengaturanConfirm.message}</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingPengaturanConfirm(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const act = pendingPengaturanConfirm;
+                  setPendingPengaturanConfirm(null);
+                  if (act.kind === 'approve-all') {
+                    allPendingCounselors.forEach(c => {
+                      const updated: Counselor = {
+                        ...c,
+                        allowedClasses: Array.isArray(c.allowedClasses) ? c.allowedClasses : [],
+                        role: c.role || 'Guru Pembimbing BK',
+                        nip: c.nip || '-',
+                        avatar: c.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
+                        approvalStatus: 'approved',
+                        approvedAt: new Date().toISOString(),
+                        approvedBy: activeCounselor?.name || 'Administrator BK',
+                        isBlocked: false
+                      };
+                      if (onUpdateCounselor) onUpdateCounselor(updated);
+                      updateAccountRequestInCloud(updated).catch(console.warn);
+                    });
+                    showToast(`Berhasil menyetujui ${allPendingCounselors.length} akun guru baru.`, 'success');
+                  } else if (act.kind === 'db-mode') {
+                    const mode = act.payload as 'shared' | 'isolated';
+                    localStorage.setItem('bk_database_mode', mode);
+                    setDbMode(mode);
+                    window.dispatchEvent(new Event('storage'));
+                    setTimeout(() => window.location.reload(), 300);
+                  } else if (act.kind === 'purge-dummy') {
+                    setIsPurging(true);
+                    try {
+                      const { totalPurged } = await purgeDummyData();
+                      showToast(
+                        totalPurged > 0
+                          ? `Berhasil membersihkan ${totalPurged} catatan data bawaan.`
+                          : 'Database sudah bersih.',
+                        'success'
+                      );
+                      setTimeout(() => window.location.reload(), 600);
+                    } catch (err: any) {
+                      showToast('Gagal membersihkan data: ' + (err?.message || err), 'error');
+                    } finally {
+                      setIsPurging(false);
+                    }
+                  } else if (act.kind === 'reload-demo') {
+                    const activeSId = getActiveSchoolId();
+                    const res = await restoreOriginalUserData(activeSId);
+                    showToast(res.message, 'success');
+                    window.dispatchEvent(new Event('storage'));
+                  } else if (act.kind === 'fresh-school') {
+                    onResetToFreshSchool?.();
+                  } else if (act.kind === 'delete-walikelas') {
+                    const idx = Number(act.payload);
+                    const nextList = waliKelasList.filter((_, i) => i !== idx);
+                    const guarded = safeGuardMassDrop(waliKelasList, nextList);
+                    if (!guarded.ok) return;
+                    handleSaveWaliKelasList(guarded.next);
+                    showToast('Data wali kelas dihapus', 'info');
+                  } else if (act.kind === 'reset-walikelas') {
+                    handleSaveWaliKelasList(defaultWaliKelasList);
+                    handleSaveThreshold(20);
+                    showToast('Data Wali Kelas disetel ulang ke bawaan', 'info');
+                  } else if (act.kind === 'clear-logo') {
+                    const { key, label } = act.payload || {};
+                    if (key) {
+                      localStorage.removeItem(key);
+                      if (key === 'bk_custom_school_logo') {
+                        setConfig(prev => {
+                          const updated = { ...prev, customLogo: undefined };
+                          saveSchoolConfig(updated);
+                          return updated;
+                        });
+                      } else {
+                        setConfig(prev => {
+                          const updated = { ...prev, customKabupatenLogo: undefined };
+                          saveSchoolConfig(updated);
+                          return updated;
+                        });
+                      }
+                      window.dispatchEvent(new Event('logo-update'));
+                      window.dispatchEvent(new Event('storage'));
+                      window.dispatchEvent(new Event('bk_school_config_updated'));
+                      setUploadFeedback(`${label} dikembalikan ke bawaan sistem.`);
+                      setTimeout(() => setUploadFeedback(null), 3000);
+                    }
+                  } else if (act.kind === 'reset-school') {
+                    resetSchoolConfigToDefault();
+                    const defaultConfig = getSchoolConfig('sch_20320123');
+                    setConfig(defaultConfig);
+                    window.dispatchEvent(new Event('logo-update'));
+                    window.dispatchEvent(new Event('storage'));
+                    setSavedSuccess(true);
+                    setTimeout(() => setSavedSuccess(false), 3000);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                {pendingPengaturanConfirm.confirmLabel}
               </button>
             </div>
           </div>

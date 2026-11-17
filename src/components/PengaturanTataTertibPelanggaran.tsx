@@ -11,6 +11,7 @@ import {
   DEFAULT_VIOLATION_CATEGORIES
 } from '../utils/violationRulesConfig';
 import { getSchoolConfig, getActiveSchoolId } from '../utils/schoolConfig';
+import { isValidDeleteId, safeFilterSingleDelete, safeGuardMassDrop } from '../utils/safeDelete';
 import {
   Gavel,
   Plus,
@@ -66,6 +67,12 @@ export default function PengaturanTataTertibPelanggaran({
 
   const [showPresetConfirmModal, setShowPresetConfirmModal] = useState(false);
   const [pendingPresetKey, setPendingPresetKey] = useState<string>('smp_mts');
+  const [pendingDeleteRule, setPendingDeleteRule] = useState<{
+    kind: 'category' | 'option';
+    catId: string;
+    optId?: string;
+    label: string;
+  } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -228,28 +235,29 @@ export default function PengaturanTataTertibPelanggaran({
 
   // Delete Category
   const handleDeleteCategory = (catId: string, catName: string) => {
-    if (window.confirm(`Apakah Anda yakin ingin menghapus kategori "${catName}" beserta seluruh butir pelanggarannya?`)) {
-      setCategories((prev) => prev.filter((c) => c.id !== catId));
-      setHasUnsavedChanges(true);
-      onShowToast?.(`Kategori "${catName}" telah dihapus`, 'info');
+    if (!isValidDeleteId(catId)) {
+      onShowToast?.('Gagal: ID kategori tidak valid, hapus dibatalkan', 'error');
+      return;
     }
+    setPendingDeleteRule({
+      kind: 'category',
+      catId,
+      label: catName,
+    });
   };
 
   // Delete Option
   const handleDeleteOption = (catId: string, optId: string, optLabel: string) => {
-    if (window.confirm(`Hapus butir pelanggaran: "${optLabel}"?`)) {
-      setCategories((prev) =>
-        prev.map((cat) => {
-          if (cat.id !== catId) return cat;
-          return {
-            ...cat,
-            options: cat.options.filter((o) => o.id !== optId)
-          };
-        })
-      );
-      setHasUnsavedChanges(true);
-      onShowToast?.(`Butir pelanggaran "${optLabel}" dihapus`, 'info');
+    if (!isValidDeleteId(optId)) {
+      onShowToast?.('Gagal: ID butir pelanggaran tidak valid, hapus dibatalkan', 'error');
+      return;
     }
+    setPendingDeleteRule({
+      kind: 'option',
+      catId,
+      optId,
+      label: optLabel,
+    });
   };
 
   // Save Category Modal
@@ -926,6 +934,65 @@ export default function PengaturanTataTertibPelanggaran({
                 className="px-5 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-bold transition-all shadow-sm"
               >
                 Ya, Terapkan Template
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingDeleteRule && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus Aturan</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+                  Hapus {pendingDeleteRule.kind === 'category' ? 'kategori' : 'butir pelanggaran'} "{pendingDeleteRule.label}" saja? Aturan tata tertib lain tidak akan terhapus.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteRule(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = pendingDeleteRule;
+                  setPendingDeleteRule(null);
+                  if (target.kind === 'category') {
+                    if (!isValidDeleteId(target.catId)) return;
+                    setCategories((prev) => {
+                      const res = safeFilterSingleDelete(prev, target.catId);
+                      return res.ok ? res.next : prev;
+                    });
+                    setHasUnsavedChanges(true);
+                    onShowToast?.(`Kategori "${target.label}" telah dihapus`, 'info');
+                  } else if (target.kind === 'option' && target.optId) {
+                    if (!isValidDeleteId(target.optId)) return;
+                    setCategories((prev) =>
+                      prev.map((cat) => {
+                        if (cat.id !== target.catId) return cat;
+                        const nextOpts = cat.options.filter((o) => o.id !== target.optId);
+                        const guarded = safeGuardMassDrop(cat.options, nextOpts);
+                        if (!guarded.ok) return cat;
+                        return { ...cat, options: guarded.next };
+                      })
+                    );
+                    setHasUnsavedChanges(true);
+                    onShowToast?.(`Butir pelanggaran "${target.label}" dihapus`, 'info');
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Ya, Hapus 1 Ini Saja
               </button>
             </div>
           </div>

@@ -181,6 +181,7 @@ export async function ensureTabsExist(accessToken: string, spreadsheetId: string
 
 /**
  * Direct push (export) data into Google Sheets
+ * // SATU ARAH: Hanya Kirim ke Sheet. Dilarang Tarik dari Sheet.
  */
 export async function pushDataDirect(
   accessToken: string,
@@ -194,35 +195,12 @@ export async function pushDataDirect(
     homeVisits?: any[];
     achievements?: any[];
   },
-  force: boolean = false
+  _force: boolean = false
 ): Promise<{ success: boolean; message: string }> {
+  // SATU ARAH: Hanya Kirim ke Sheet. Dilarang Tarik dari Sheet.
   try {
     // 1. Ensure required tabs exist
     await ensureTabsExist(accessToken, spreadsheetId);
-
-    // Safety check: Prevent overwriting remote data if this device hasn't been verified/synced
-    if (!force && localStorage.getItem('bk_google_sync_verified') !== 'true') {
-      try {
-        const checkUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Siswa!A2:A?majorDimension=ROWS`;
-        const checkRes = await fetch(checkUrl, {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${accessToken}`
-          }
-        });
-        if (checkRes.ok) {
-          const checkData = await checkRes.json();
-          if (checkData.values && checkData.values.length > 0) {
-            return {
-              success: false,
-              message: 'OVERWRITE_PREVENTION: Sistem mendeteksi adanya data riwayat yang tersimpan di Google Sheets Anda, sementara perangkat ini belum melakukan impor data lama. Untuk mencegah terhapusnya data lama Anda di awan, sinkronisasi otomatis ditangguhkan.\n\nSilakan lakukan "Impor Data dari Google Sheets" (Tarik Data) terlebih dahulu di menu Integrasi Google.'
-            };
-          }
-        }
-      } catch (err) {
-        console.warn('Gagal memverifikasi proteksi database:', err);
-      }
-    }
 
     let students = data.students || [];
     let violations = data.violations || [];
@@ -416,147 +394,13 @@ export async function pushDataDirect(
   }
 }
 
-/**
- * Direct pull (import) data from Google Sheets
- */
+// DINONAKTIFKAN: Dilarang tarik dari Sheet, Firestore adalah sumber kebenaran
 export async function pullDataDirect(
-  accessToken: string,
-  spreadsheetId: string
+  _accessToken: string,
+  _spreadsheetId: string
 ): Promise<{ success: boolean; data?: any; message: string }> {
-  try {
-    // 1. Ensure sheets exist before trying to read them
-    await ensureTabsExist(accessToken, spreadsheetId);
-
-    const tabs = ['Siswa', 'Pelanggaran', 'Restitusi', 'LayananBK', 'Absensi', 'JurnalHarian', 'HomeVisit', 'Apresiasi_Prestasi'];
-    const ranges = tabs.map(tab => `${tab}!A:Z`);
-    
-    // Create query parameters for multiple ranges
-    const queryRanges = ranges.map(r => `ranges=${encodeURIComponent(r)}`).join('&');
-    const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${queryRanges}&majorDimension=ROWS`;
-
-    const getRes = await fetch(getUrl, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`
-      }
-    });
-
-    if (!getRes.ok) {
-      if (getRes.status === 401) {
-        throw new Error("UNAUTHENTICATED_SESSION");
-      }
-      const errText = await getRes.text();
-      throw new Error(`Gagal membaca data dari spreadsheet: ${errText}`);
-    }
-
-    const resData = await getRes.json();
-    const valueRanges = resData.valueRanges || [];
-
-    const result: any = {
-      students: [],
-      violations: [],
-      services: [],
-      attendance: [],
-      journals: [],
-      homeVisits: [],
-      achievements: []
-    };
-
-    // Helper to parse Sheet values to JSON arrays
-    const parseValueRange = (values: any[][] | undefined, headersList: string[]) => {
-      if (!values || values.length <= 1) return [];
-      const headers = values[0];
-      const items: any[] = [];
-
-      for (let i = 1; i < values.length; i++) {
-        const row = values[i];
-        const obj: any = {};
-        headersList.forEach((header, index) => {
-          let val = row[index];
-          if (val === undefined || val === null) {
-            val = '';
-          }
-          
-          // Auto-convert stringified JSON arrays or objects
-          if (typeof val === 'string' && (val.startsWith('[') || val.startsWith('{'))) {
-            try {
-              val = JSON.parse(val);
-            } catch (e) {
-              // Leave as string if not parseable
-            }
-          }
-          
-          // Cast numbers where appropriate
-          if (header === 'violationPoints' || header === 'bkServicesCount' || header === 'pointsAdded') {
-            const num = Number(val);
-            if (!isNaN(num)) val = num;
-          }
-
-          obj[header] = val;
-        });
-        items.push(obj);
-      }
-      return items;
-    };
-
-    valueRanges.forEach((vr: any) => {
-      const range: string = vr.range || '';
-      const values: any[][] = vr.values;
-
-      if (range.includes('Siswa')) {
-        result.students = parseValueRange(values, ['id', 'nis', 'name', 'class', 'gender', 'violationPoints', 'bkServicesCount', 'initials']);
-      } else if (range.includes('Pelanggaran') || range.includes('Restitusi')) {
-        const parsed = parseValueRange(values, ['id', 'ticketId', 'studentId', 'studentName', 'studentClass', 'category', 'pointsAdded', 'date', 'time', 'location', 'notes', 'reportedBy', 'handledBy', 'handlingProgress']);
-        parsed.forEach((item: any) => {
-          if (item.id && !result.violations.some((v: any) => v.id === item.id)) {
-            result.violations.push(item);
-          }
-        });
-      } else if (range.includes('LayananBK')) {
-        result.services = parseValueRange(values, ['id', 'serviceType', 'problem', 'description', 'output', 'followUp', 'status', 'date', 'startTime', 'endTime', 'students', 'attachments', 'notes']);
-      } else if (range.includes('Absensi')) {
-        result.attendance = parseValueRange(values, ['id', 'class', 'date', 'records', 'updatedAt', 'submittedBy']);
-      } else if (range.includes('JurnalHarian')) {
-        result.journals = parseValueRange(values, ['id', 'date', 'startTime', 'endTime', 'activityType', 'title', 'description', 'target', 'status', 'counselorId', 'createdAt', 'proofPhotoUrl', 'proofPhotoName', 'absentStudents']);
-      } else if (range.includes('HomeVisit')) {
-        result.homeVisits = parseValueRange(values, [
-          'id', 'reportNumber', 'date', 'studentId', 'studentName', 'studentClass', 'studentNis', 
-          'parentNameMet', 'address', 'purpose', 'result', 'agreement', 'photoUrl', 'photoName', 
-          'parentSignature', 'counselorSignature', 'counselorName', 'counselorId', 'createdAt'
-        ]);
-      } else if (range.includes('Apresiasi_Prestasi')) {
-        result.achievements = parseValueRange(values, ['id', 'studentId', 'studentName', 'studentClass', 'nis', 'category', 'achievementName', 'pointsReward', 'date', 'time', 'location', 'recordedBy', 'notes']);
-      }
-    });
-
-    return {
-      success: true,
-      data: result,
-      message: 'Sinkronisasi dari Google Sheets berhasil!'
-    };
-  } catch (error: any) {
-    const isUnauthenticated = error && error.message && (
-      error.message.includes('invalid authentication credentials') ||
-      error.message.includes('UNAUTHENTICATED') ||
-      error.message.includes('401') ||
-      error.message === 'UNAUTHENTICATED_SESSION'
-    );
-    if (isUnauthenticated) {
-      console.warn('pullDataDirect: Sesi Google Sheets kedaluwarsa atau belum login.', error.message || error);
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('bk_google_access_token');
-        window.dispatchEvent(new Event('storage'));
-      }
-      return {
-        success: false,
-        message: 'UNAUTHENTICATED_SESSION'
-      };
-    } else {
-      console.error('pullDataDirect Error:', error);
-    }
-    return {
-      success: false,
-      message: error.message || 'Gagal menarik data dari Google Sheets.'
-    };
-  }
+  return {
+    success: false,
+    message: 'DINONAKTIFKAN: Dilarang tarik dari Sheet, Firestore adalah sumber kebenaran.'
+  };
 }

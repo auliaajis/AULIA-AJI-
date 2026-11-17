@@ -7,7 +7,13 @@ import {
   PresetServiceData, 
   ViolationRecord,
   BidangBimbinganType,
-  HomeVisitRecord
+  HomeVisitRecord,
+  ServiceHomeVisitDetails,
+  ServiceIndividualDetails,
+  ServiceKelompokParticipant,
+  ServiceMediasiDetails,
+  ServiceKlasikalDetails,
+  ServiceObservasiWawancaraReferalDetails
 } from '../types';
 import { 
   Search, 
@@ -53,13 +59,30 @@ import {
   MapPin,
   PenTool,
   Download,
+  ExternalLink,
   Camera,
   Upload,
   Phone,
-  UserCheck
+  UserCheck,
+  Plus,
+  Trash2,
+  Info
 } from 'lucide-react';
 import { showToast } from '../utils/toast';
 import { generateServicePDF, downloadHomeVisitPDF } from '../utils/pdfGenerator';
+import { formatCardDateTime, formatCardDate, formatCardTime, formatTanggalIndonesia } from '../utils/dateFormatter';
+import {
+  StandardBlokAIdentitas,
+  StandardBlokBKonteks,
+  StandardBlokDTindakLanjut,
+  StandardizedBlokBState,
+  StandardizedBlokDState,
+  StandardizedServiceFormKind,
+  getDefaultBlokDState,
+  buildLocalContextAwareRecommendation,
+  requestContextualServiceFormAi,
+} from './ServiceFormSharedBlocks';
+import { BIDANG_HEX_COLORS, mapJenisMasalahToBidang } from '../utils/evaluationHelpers';
 
 interface TambahLayananFormProps {
   students: Student[];
@@ -243,6 +266,17 @@ export const ALL_16_SERVICES: ServiceDefinition[] = [
     desc: 'Penyelesaian perselisihan, pertikaian, dan pemulihan relasi pertemanan',
     defaultMode: 'Kelompok',
     icon: Scale,
+    accentColor: 'border-amber-200 bg-amber-50/70 text-amber-900 hover:border-amber-400',
+  },
+  {
+    type: 'Observasi & Wawancara',
+    label: 'Observasi / Wawancara',
+    group: 'Layanan Responsif',
+    pilarId: 'Layanan Responsif',
+    bidangDefault: 'Pribadi',
+    desc: 'Asesmen perilaku langsung (observasi) atau penggalian data (wawancara siswa/guru/ortu)',
+    defaultMode: 'Individu',
+    icon: Eye,
     accentColor: 'border-amber-200 bg-amber-50/70 text-amber-900 hover:border-amber-400',
   },
 
@@ -616,6 +650,10 @@ export default function TambahLayananForm({
     'Mendengarkan Aktif (Active Listening)',
   ]);
   const [counselingDinamika, setCounselingDinamika] = useState<string>('');
+  const [indivProsesPendekatan, setIndivProsesPendekatan] = useState<string>(
+    'Solution-Focused Brief Counseling (SFBC) & Active Listening'
+  );
+  const [indivResponSiswa, setIndivResponSiswa] = useState<string>('');
 
   // Bagian D - Hasil
   const [counselingHasilKategori, setCounselingHasilKategori] = useState<
@@ -777,11 +815,72 @@ export default function TambahLayananForm({
   const [bimbKelAiDinamika, setBimbKelAiDinamika] = useState('');
   const [bimbKelUseAi, setBimbKelUseAi] = useState(false);
 
-  // 4. Konseling Kelompok Specific
+  // 4. Konseling Kelompok Specific (Terstandar Blok A-D)
   const [konsKelPeranSiswa, setKonsKelPeranSiswa] = useState('');
   const [konsKelRawSummary, setKonsKelRawSummary] = useState('');
   const [konsKelAiSummary, setKonsKelAiSummary] = useState('');
   const [konsKelUseAi, setKonsKelUseAi] = useState(false);
+
+  // Standardized Blok A / B / D shared across 4 revised forms (Kelompok, Mediasi, Klasikal, Observasi/Wawancara+Referal)
+  const [stdTempat, setStdTempat] = useState<string>('Ruang BK');
+  const [stdPertemuanKe, setStdPertemuanKe] = useState<number>(1);
+  const [stdSifatLayanan, setStdSifatLayanan] = useState<'Baru' | 'Lanjutan'>('Baru');
+  const [stdBlokB, setStdBlokB] = useState<StandardizedBlokBState>({
+    jenisMasalah: 'Motivasi Belajar Rendah',
+    alasanMasalahLainnya: '',
+    tujuanLayanan: 'Mengubah Perilaku',
+    teknik: 'Konseling Kelompok',
+    baseline: {
+      keparahan: 3,
+      frekuensi: 3,
+      motivasiAwal: 3,
+      baselineDariIngatan: true,
+    },
+  });
+  const [stdBlokD, setStdBlokD] = useState<StandardizedBlokDState>(() =>
+    getDefaultBlokDState(activeCounselorInfo.name)
+  );
+  const [stdAiCustomRec, setStdAiCustomRec] = useState<string>('');
+  const [isGeneratingStdAi, setIsGeneratingStdAi] = useState<boolean>(false);
+  const [isPolishingBlokC, setIsPolishingBlokC] = useState<boolean>(false);
+
+  // Blok C1: Konseling Kelompok Peserta
+  const [kelompokParticipants, setKelompokParticipants] = useState<ServiceKelompokParticipant[]>([]);
+  const [kelompokKomitmenBersama, setKelompokKomitmenBersama] = useState<string>('');
+  const [kelompokAddStudentId, setKelompokAddStudentId] = useState<string>('');
+
+  // Blok C2: Mediasi
+  const [mediasiData, setMediasiData] = useState<ServiceMediasiDetails>({
+    pihak1Nama: '',
+    pihak2Nama: '',
+    versiPihak1: '',
+    versiPihak2: '',
+    titikKonflikUtama: '',
+    statusMediasi: 'Sepakat',
+    kesepakatanBersama: '',
+    alasanTidakSepakat: '',
+    rencanaBerikutnya: '',
+  });
+
+  // Blok C3: Bimbingan Klasikal tambahan
+  const [klasikalTotalSiswa, setKlasikalTotalSiswa] = useState<number>(32);
+  const [klasikalDinamikaKelas, setKlasikalDinamikaKelas] = useState<'Aktif' | 'Pasif' | 'Gaduh' | 'Campuran'>('Aktif');
+  const [klasikalResponSiswa, setKlasikalResponSiswa] = useState<string>('');
+
+  // Blok C4: Observasi / Wawancara + Referal
+  const [obsWawRefData, setObsWawRefData] = useState<ServiceObservasiWawancaraReferalDetails>({
+    subJenis: 'Observasi',
+    yangDiamati: '',
+    tempat: 'Ruang Kelas',
+    durasi: '20 menit',
+    hasilPengamatan: '',
+    diwawancarai: 'Siswa',
+    pertanyaanKunci: '',
+    ringkasanJawaban: '',
+    alasanDirujuk: '',
+    dirujukKe: 'Psikolog',
+    statusRujukan: 'Menunggu',
+  });
 
   // 5. Home Visit (Kunjungan Rumah) Specific
   // Tahap 2 States
@@ -973,11 +1072,106 @@ export default function TambahLayananForm({
     }
   }, [presetServiceData, students]);
 
-  // Sync mode when selected service changes
+  // Sync mode & standardized Blok B defaults when selected service changes
   const handleSelectService = (srv: ServiceDefinition) => {
     setSelectedService(srv);
     setMode(srv.defaultMode);
+    setStdAiCustomRec('');
+    if (srv.type === 'Layanan Konseling Perorangan (Individual)') {
+      setStdTempat('Ruang BK');
+      setStdBlokB((prev) => ({
+        ...prev,
+        jenisMasalah: 'Motivasi Belajar Rendah',
+        tujuanLayanan: 'Mengubah Perilaku',
+        teknik: 'Konseling Individual',
+      }));
+    } else if (srv.type === 'Kunjungan Rumah (Home Visit)') {
+      setStdTempat('Rumah Siswa');
+      setStdBlokB((prev) => ({
+        ...prev,
+        jenisMasalah: 'Bolos',
+        tujuanLayanan: 'Memberi Dukungan',
+        teknik: 'Home Visit',
+      }));
+    } else if (srv.type === 'Layanan Konseling Kelompok') {
+      setStdTempat('Ruang BK');
+      setStdBlokB((prev) => ({
+        ...prev,
+        jenisMasalah: 'Motivasi Belajar Rendah',
+        tujuanLayanan: 'Mengubah Perilaku',
+        teknik: 'Konseling Kelompok',
+      }));
+    } else if (srv.type === 'Layanan Mediasi') {
+      setStdTempat('Ruang BK');
+      setStdBlokB((prev) => ({
+        ...prev,
+        jenisMasalah: 'Konflik Teman',
+        tujuanLayanan: 'Menyelesaikan Konflik',
+        teknik: 'Mediasi',
+      }));
+    } else if (srv.type === 'Bimbingan Klasikal') {
+      setStdBlokB((prev) => ({
+        ...prev,
+        jenisMasalah: 'Motivasi Belajar Rendah',
+        tujuanLayanan: 'Memahami Masalah',
+        teknik: 'Bimbingan Klasikal',
+      }));
+    } else if (srv.type === 'Alih Tangan Kasus (Referral)') {
+      setObsWawRefData((prev) => ({ ...prev, subJenis: 'Referal' }));
+      setStdBlokB((prev) => ({
+        ...prev,
+        jenisMasalah: 'Kecemasan',
+        tujuanLayanan: 'Memberi Dukungan',
+        teknik: 'Referal',
+      }));
+    } else if (srv.type === 'Observasi & Wawancara') {
+      setObsWawRefData((prev) => ({ ...prev, subJenis: 'Observasi' }));
+      setStdBlokB((prev) => ({
+        ...prev,
+        jenisMasalah: 'Disiplin',
+        tujuanLayanan: 'Memahami Masalah',
+        teknik: 'Observasi',
+      }));
+    }
   };
+
+  // Seed Konseling Kelompok participants & Mediasi parties whenever selectedStudents changes
+  useEffect(() => {
+    if (selectedService.type === 'Layanan Konseling Kelompok' && selectedStudents.length > 0) {
+      setKelompokParticipants((prev) => {
+        const existingMap = new Map(prev.map((p) => [p.studentId || p.nama, p]));
+        return selectedStudents.map((st, idx) => {
+          const hit = existingMap.get(st.id) || existingMap.get(st.name);
+          return (
+            hit || {
+              id: `kp-${st.id}-${idx}`,
+              studentId: st.id,
+              nama: st.name,
+              kelas: st.class,
+              peran: 'Aktif',
+              keterbukaan: 3,
+              kesepakatanSiswa: '',
+            }
+          );
+        });
+      });
+    }
+    if (selectedService.type === 'Layanan Mediasi' && selectedStudents.length > 0) {
+      setMediasiData((prev) => ({
+        ...prev,
+        pihak1Nama: prev.pihak1Nama || selectedStudents[0]?.name || '',
+        pihak2Nama: prev.pihak2Nama || selectedStudents[1]?.name || '',
+      }));
+    }
+  }, [selectedStudents, selectedService.type]);
+
+  // Sync Klasikal total count when class changes
+  useEffect(() => {
+    if (selectedService.type === 'Bimbingan Klasikal' && selectedStudents.length > 0) {
+      setKlasikalTotalSiswa(selectedStudents.length);
+      setKlasikalHadir(selectedStudents.length);
+    }
+  }, [selectedStudents.length, selectedService.type]);
 
   // Available classes for Klasikal & Absen
   const availableClasses = useMemo(() => {
@@ -1112,19 +1306,222 @@ export default function TambahLayananForm({
   const serviceLabelLower = selectedService.label.toLowerCase();
 
   const isFormAbsen = serviceLabelLower.includes('absen') || serviceTypeLower.includes('absen');
-  const isFormCatatKasus = serviceLabelLower.includes('catat kasus') || serviceTypeLower.includes('kasus') && !serviceLabelLower.includes('konferensi');
+  const isFormCatatKasus = serviceLabelLower.includes('catat kasus') || (serviceTypeLower.includes('kasus') && !serviceLabelLower.includes('konferensi') && !serviceTypeLower.includes('alih tangan'));
   const isFormKonselingIndividual = selectedService.type === 'Layanan Konseling Perorangan (Individual)';
   const isBimbinganKlasikalOnly = selectedService.type === 'Bimbingan Klasikal';
   const isFormBimbinganKlasikal = isBimbinganKlasikalOnly || selectedService.type === 'Layanan Informasi' || selectedService.type === 'Layanan Orientasi' || selectedService.type === 'Papan Bimbingan & Media BK';
   const isFormBimbinganKelompok = selectedService.type === 'Bimbingan Kelompok' || selectedService.type === 'Layanan Penguasaan Konten';
-  const isFormKonselingKelompok = selectedService.type === 'Layanan Konseling Kelompok' || selectedService.type === 'Layanan Mediasi';
+  const isFormKonselingKelompok = selectedService.type === 'Layanan Konseling Kelompok';
+  const isFormMediasi = selectedService.type === 'Layanan Mediasi';
   const isHomeVisitOnly = selectedService.type === 'Kunjungan Rumah (Home Visit)' || serviceLabelLower.includes('home visit') || serviceTypeLower.includes('kunjungan rumah');
   const isFormHomeVisit = isHomeVisitOnly;
   const isFormKonsultasi = selectedService.type === 'Layanan Konsultasi' || selectedService.type === 'Kolaborasi Guru & Wali Kelas' || selectedService.type === 'Kemitraan (Puskesmas/Psikolog/Mitra)';
   const isFormKonferensiKasus = selectedService.type === 'Konferensi Kasus (Case Conference)';
-  const isFormAlihTangan = selectedService.type === 'Alih Tangan Kasus (Referral)';
+  const isFormObservasiWawancaraReferal = selectedService.type === 'Observasi & Wawancara' || selectedService.type === 'Alih Tangan Kasus (Referral)';
+  const isFormAlihTangan = isFormObservasiWawancaraReferal;
 
-  // Meta AI Live Recommendation for the current form
+  const activeRevisedFormKind: StandardizedServiceFormKind | null =
+    isFormKonselingIndividual
+      ? 'individual'
+      : isHomeVisitOnly
+        ? 'home-visit'
+        : isFormKonselingKelompok
+          ? 'kelompok'
+          : isFormMediasi
+            ? 'mediasi'
+            : isBimbinganKlasikalOnly
+              ? 'klasikal'
+              : isFormObservasiWawancaraReferal
+                ? 'observasi-wawancara-referal'
+                : null;
+
+  const indivBlokCPayload: ServiceIndividualDetails = useMemo(
+    () => ({
+      uraianMasalah:
+        counselingUseAiStory && counselingAiPolishedStory
+          ? counselingAiPolishedStory
+          : counselingRawStory,
+      prosesPendekatan: indivProsesPendekatan,
+      responSiswa: indivResponSiswa || counselingDinamika,
+      hasilKategori: counselingHasilKategori,
+      jaminanKerahasiaan: counselingAgreedConfidentiality,
+    }),
+    [
+      counselingUseAiStory,
+      counselingAiPolishedStory,
+      counselingRawStory,
+      indivProsesPendekatan,
+      indivResponSiswa,
+      counselingDinamika,
+      counselingHasilKategori,
+      counselingAgreedConfidentiality,
+    ]
+  );
+
+  const hvBlokCPayload: ServiceHomeVisitDetails = useMemo(
+    () => ({
+      yangDitemui: homeVisitYangDitemui,
+      yangDitemuiLainnya:
+        homeVisitYangDitemui === 'Lainnya' && homeVisitYangDitemuiLainnya.trim()
+          ? homeVisitYangDitemuiLainnya.trim()
+          : undefined,
+      alamat: homeVisitAlamat,
+      namaOrtu: homeVisitNamaOrtu,
+      noHpOrtu: homeVisitNoHpOrtu,
+      kondisiRumahSingkat: homeVisitKondisiRumah,
+      hasilPembicaraan:
+        homeVisitUseAi && homeVisitAiHasil ? homeVisitAiHasil : homeVisitRawHasil,
+      kesepakatanOrtu: homeVisitKesepakatanOrtu,
+      statusKunjungan: homeVisitStatus,
+      fotoBuktiUrl: homeVisitFotoBukti || undefined,
+    }),
+    [
+      homeVisitYangDitemui,
+      homeVisitYangDitemuiLainnya,
+      homeVisitAlamat,
+      homeVisitNamaOrtu,
+      homeVisitNoHpOrtu,
+      homeVisitKondisiRumah,
+      homeVisitUseAi,
+      homeVisitAiHasil,
+      homeVisitRawHasil,
+      homeVisitKesepakatanOrtu,
+      homeVisitStatus,
+      homeVisitFotoBukti,
+    ]
+  );
+
+  const currentContextualAiText = useMemo(() => {
+    if (!activeRevisedFormKind) return '';
+    if (stdAiCustomRec) return stdAiCustomRec;
+    return buildLocalContextAwareRecommendation({
+      formKind: activeRevisedFormKind,
+      mode: 'recommendation',
+      blokB: stdBlokB,
+      blokC: {
+        individual: indivBlokCPayload,
+        homeVisit: hvBlokCPayload,
+        kelompokParticipants,
+        mediasi: mediasiData,
+        klasikal: {
+          kelas: selectedClass || '8A',
+          jumlahHadir: klasikalHadir,
+          totalSiswa: klasikalTotalSiswa,
+          topikKlasikal: klasikalTopik,
+          dinamikaKelas: klasikalDinamikaKelas,
+          responSiswa: klasikalResponSiswa,
+        },
+        observasiWawancaraReferal: obsWawRefData,
+      },
+      blokD: {
+        apa: stdBlokD.tindakLanjutApa,
+        tanggal: stdBlokD.tindakLanjutTanggal,
+        penanggungJawab: stdBlokD.penanggungJawab,
+      },
+      layananKeBerapa: stdPertemuanKe,
+      sasaranLabel: studentDisplayText,
+    });
+  }, [
+    activeRevisedFormKind,
+    stdAiCustomRec,
+    stdBlokB,
+    indivBlokCPayload,
+    hvBlokCPayload,
+    kelompokParticipants,
+    mediasiData,
+    selectedClass,
+    klasikalHadir,
+    klasikalTotalSiswa,
+    klasikalTopik,
+    klasikalDinamikaKelas,
+    klasikalResponSiswa,
+    obsWawRefData,
+    stdBlokD,
+    stdPertemuanKe,
+    studentDisplayText,
+  ]);
+
+  const handleRefreshContextualAi = async () => {
+    if (!activeRevisedFormKind) return;
+    setIsGeneratingStdAi(true);
+    try {
+      const res = await requestContextualServiceFormAi({
+        formKind: activeRevisedFormKind,
+        mode: 'recommendation',
+        blokB: stdBlokB,
+        blokC: {
+          individual: indivBlokCPayload,
+          homeVisit: hvBlokCPayload,
+          kelompokParticipants,
+          mediasi: mediasiData,
+          klasikal: {
+            kelas: selectedClass || '8A',
+            jumlahHadir: klasikalHadir,
+            totalSiswa: klasikalTotalSiswa,
+            topikKlasikal: klasikalTopik,
+            dinamikaKelas: klasikalDinamikaKelas,
+            responSiswa: klasikalResponSiswa,
+          },
+          observasiWawancaraReferal: obsWawRefData,
+        },
+        blokD: {
+          apa: stdBlokD.tindakLanjutApa,
+          tanggal: stdBlokD.tindakLanjutTanggal,
+          penanggungJawab: stdBlokD.penanggungJawab,
+        },
+        layananKeBerapa: stdPertemuanKe,
+        sasaranLabel: studentDisplayText,
+      });
+      setStdAiCustomRec(res.text);
+      showToast('✨ Rekomendasi AI kontekstual diperbarui!', 'success');
+    } finally {
+      setIsGeneratingStdAi(false);
+    }
+  };
+
+  const handlePolishBlokCText = async (
+    formKind: StandardizedServiceFormKind,
+    draft: string,
+    onApply: (text: string) => void
+  ) => {
+    setIsPolishingBlokC(true);
+    try {
+      const res = await requestContextualServiceFormAi({
+        formKind,
+        mode: 'polish',
+        draftText: draft,
+        blokB: stdBlokB,
+        blokC: {
+          individual: indivBlokCPayload,
+          homeVisit: hvBlokCPayload,
+          kelompokParticipants,
+          mediasi: mediasiData,
+          klasikal: {
+            kelas: selectedClass || '8A',
+            jumlahHadir: klasikalHadir,
+            totalSiswa: klasikalTotalSiswa,
+            topikKlasikal: klasikalTopik,
+            dinamikaKelas: klasikalDinamikaKelas,
+            responSiswa: klasikalResponSiswa,
+          },
+          observasiWawancaraReferal: obsWawRefData,
+        },
+        blokD: {
+          apa: stdBlokD.tindakLanjutApa,
+          tanggal: stdBlokD.tindakLanjutTanggal,
+          penanggungJawab: stdBlokD.penanggungJawab,
+        },
+        layananKeBerapa: stdPertemuanKe,
+        sasaranLabel: studentDisplayText,
+      });
+      onApply(res.text);
+      showToast('✨ Teks berhasil dirapikan sesuai konteks layanan!', 'success');
+    } finally {
+      setIsPolishingBlokC(false);
+    }
+  };
+
+  // Meta AI Live Recommendation for non-revised legacy forms
   const currentActiveStory = isFormKonselingIndividual
     ? counselingRawStory
     : isFormBimbinganKlasikal
@@ -1141,28 +1538,34 @@ export default function TambahLayananForm({
     return getMetaAiRecommendation(selectedService.label, counselingTopic, currentActiveStory);
   }, [selectedService.label, counselingTopic, currentActiveStory]);
 
-  // Helper build complete official BK Counseling Record for Konseling Individual
+  // Helper build complete official BK Counseling Record for Konseling Individual (Blok A-D Terstandar)
   const buildKonselingIndividualRecord = (): CounselingService => {
-    const finalStory = counselingUseAiStory && counselingAiPolishedStory 
-      ? counselingAiPolishedStory 
-      : (counselingRawStory || `Siswa berkonsultasi mengenai ${counselingTopic}.`);
+    const finalStory = counselingUseAiStory && counselingAiPolishedStory
+      ? counselingAiPolishedStory
+      : (counselingRawStory || `Siswa berkonsultasi mengenai ${stdBlokB.jenisMasalah}.`);
+
+    const indDetails: ServiceIndividualDetails = {
+      uraianMasalah: finalStory,
+      prosesPendekatan: indivProsesPendekatan,
+      responSiswa: indivResponSiswa || counselingDinamika || 'Siswa kooperatif mengikuti sesi.',
+      hasilKategori: counselingHasilKategori,
+      jaminanKerahasiaan: counselingAgreedConfidentiality,
+    };
 
     const descParts = [
-      `[IDENTITAS & TEMPAT] Pertemuan Ke-${counselingPertemuanKe} di ${counselingTempat} (${counselingSifat}). Konselor: ${activeCounselorInfo.name}.`,
-      `[URAIAN MASALAH] ${finalStory} (Tingkat Masalah: ${counselingTingkat})`,
-      counselingTeknik.length > 0 ? `[TEKNIK KONSELING] ${counselingTeknik.join(', ')}` : '',
-      counselingDinamika ? `[DINAMIKA SESI] ${counselingDinamika}` : '',
+      `[IDENTITAS] Layanan Ke-${stdPertemuanKe} (${stdSifatLayanan}) di ${stdTempat || counselingTempat} • ${formatTanggalIndonesia(date)}. Konselor: ${activeCounselorInfo.name}.`,
+      `[BLOK B - KONTEKS] Masalah: ${stdBlokB.jenisMasalah}${stdBlokB.alasanMasalahLainnya ? ` (${stdBlokB.alasanMasalahLainnya})` : ''} | Tujuan: ${stdBlokB.tujuanLayanan} | Teknik: ${stdBlokB.teknik}.`,
+      `[BLOK C - PROSES & HASIL] Uraian: ${finalStory} | Pendekatan: ${indDetails.prosesPendekatan} | Respon: ${indDetails.responSiswa}`,
     ].filter(Boolean).join('\n\n');
 
     const outputParts = [
       `[HASIL KONSELING] Kategori: ${counselingHasilKategori}.`,
-      counselingKesimpulan ? `Kesimpulan: ${counselingKesimpulan}` : '',
-      counselingKomitmenSiswa ? `Komitmen Siswa: "${counselingKomitmenSiswa}"` : '',
+      stdBlokD.kesepakatan ? `Kesepakatan: ${stdBlokD.kesepakatan}` : '',
     ].filter(Boolean).join(' ');
 
     const followUpParts = [
-      counselingTindakLanjutMulti.length > 0 ? counselingTindakLanjutMulti.join(', ') : counselingFollowUp,
-      counselingJadwalEvaluasi ? `(Jadwal Evaluasi: ${counselingJadwalEvaluasi})` : '',
+      stdBlokD.tindakLanjutApa || 'Review komitmen konseling individual',
+      stdBlokD.tindakLanjutTanggal ? `(${formatTanggalIndonesia(stdBlokD.tindakLanjutTanggal)} - PJ: ${stdBlokD.penanggungJawab})` : '',
     ].filter(Boolean).join(' ');
 
     const startH = time.split(':')[0] || '08';
@@ -1173,7 +1576,7 @@ export default function TambahLayananForm({
     return {
       id: `srv-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
       serviceType: selectedService.type,
-      bkComponent: selectedService.pilarId,
+      bkComponent: mapJenisMasalahToBidang(stdBlokB.jenisMasalah) as BKComponentType,
       bidangBimbingan: selectedService.bidangDefault,
       students: selectedStudents.map((s) => ({
         id: s.id,
@@ -1181,10 +1584,10 @@ export default function TambahLayananForm({
         class: s.class,
         nis: s.nis || '-',
       })),
-      problem: `${counselingTopic} (${counselingTingkat})`,
+      problem: `Konseling Individual: ${stdBlokB.jenisMasalah}${stdBlokB.alasanMasalahLainnya ? ` (${stdBlokB.alasanMasalahLainnya})` : ''}`,
       description: descParts,
-      output: outputParts || `Siswa telah menyelesaikan konseling individual dengan kesepakatan ${counselingHasilKategori}.`,
-      followUp: followUpParts || 'Pantau 1 Minggu',
+      output: outputParts || `Siswa telah menyelesaikan konseling individual dengan capaian ${counselingHasilKategori}.`,
+      followUp: followUpParts || 'Pantau 14 hari',
       status: (counselingStatusAkhir === 'Dirujuk' ? 'Selesai' : counselingStatusAkhir) as any,
       date,
       startTime: time,
@@ -1193,9 +1596,26 @@ export default function TambahLayananForm({
       targetType: mode,
       counselorName: activeCounselorInfo.name,
       specificDetails: {
-        akarMasalah: `${counselingTopic} (${counselingTingkat})`,
-        pendekatanKonseling: counselingTeknik.join(', '),
-        komitmenKonseli: counselingKomitmenSiswa || counselingKesimpulan,
+        akarMasalah: `${stdBlokB.jenisMasalah}${stdBlokB.alasanMasalahLainnya ? ` (${stdBlokB.alasanMasalahLainnya})` : ''}`,
+        pendekatanKonseling: indDetails.prosesPendekatan,
+        komitmenKonseli: stdBlokD.kesepakatan || counselingKomitmenSiswa,
+        evaluasiProses: indDetails.responSiswa,
+        evaluasiHasil: outputParts,
+        rencanaAksiSiswa: stdBlokD.kesepakatan,
+        blokA: {
+          tanggal: date,
+          jam: time,
+          tempat: stdTempat || counselingTempat,
+          pertemuanKe: stdPertemuanKe,
+          sifatLayanan: stdSifatLayanan,
+        },
+        blokB: stdBlokB,
+        blokC: {
+          individual: indDetails,
+        },
+        individual: indDetails,
+        tindakLanjutPlan: stdBlokD,
+        aiContextualRecommendation: currentContextualAiText,
       },
       linkedViolationId: presetServiceData?.linkedViolationId,
       linkedTicketId: presetServiceData?.linkedTicketId,
@@ -1215,39 +1635,47 @@ export default function TambahLayananForm({
     showToast('📄 Laporan PDF resmi konseling individual berhasil diunduh dan dibukukan!', 'success');
   };
 
-  // Helper build complete official BK Klasikal & RPL Record
+  // Helper build complete official BK Klasikal & RPL Record (Blok A-D Terstandar)
   const buildKlasikalRecord = (): CounselingService => {
     const startH = time.split(':')[0] || '08';
     const startM = time.split(':')[1] || '00';
     const endH = String((parseInt(startH, 10) + 1) % 24).padStart(2, '0');
     const endTimeStr = `${endH}:${startM}`;
+    const totalSiswaVal = Math.max(klasikalTotalSiswa, klasikalHadir);
+
+    const klasikalDetails: ServiceKlasikalDetails = {
+      kelas: selectedClass || '8A',
+      jumlahHadir: klasikalHadir,
+      totalSiswa: totalSiswaVal,
+      topikKlasikal: klasikalTopik,
+      dinamikaKelas: klasikalDinamikaKelas,
+      responSiswa: klasikalResponSiswa,
+    };
 
     const descParts = [
-      `[PELAKSANAAN & PRESENSI] Kelas: ${selectedClass || '8A'} | Tempat: ${klasikalTempat} | Waktu: ${klasikalJamKe} (${date}). Hadir: ${klasikalHadir} Siswa, Tidak Hadir: ${klasikalTidakHadir} Siswa.`,
-      `[RPL - BIDANG & TOPIK] Bidang Bimbingan: ${klasikalBidang} | Topik/Judul Materi: ${klasikalTopik}`,
-      klasikalTujuan ? `[TUJUAN LAYANAN]\n${klasikalTujuan}` : '',
-      klasikalMateriUraian ? `[MATERI YANG DISAMPAIKAN]\n${klasikalMateriUraian}` : '',
-      klasikalMetode.length > 0 ? `[METODE LAYANAN] ${klasikalMetode.join(', ')}` : '',
-      klasikalMedia.length > 0 ? `[MEDIA LAYANAN] ${klasikalMedia.join(', ')}` : '',
+      `[LAYANAN KLASIKAL - DINAMIKA KELAS] Kelas: ${klasikalDetails.kelas} | Hadir: ${klasikalHadir}/${totalSiswaVal} siswa | Tempat: ${stdTempat || klasikalTempat} (${formatTanggalIndonesia(date)}).`,
+      `[BLOK B - KONTEKS] Masalah: ${stdBlokB.jenisMasalah}${stdBlokB.alasanMasalahLainnya ? ` (${stdBlokB.alasanMasalahLainnya})` : ''} | Tujuan: ${stdBlokB.tujuanLayanan} | Teknik: ${stdBlokB.teknik}.`,
+      `[BLOK C - DINAMIKA KELAS] Topik Klasikal: ${klasikalTopik} | Dinamika Kelas: ${klasikalDinamikaKelas} | Contoh Respon Siswa: ${klasikalResponSiswa || '-'}`,
+      klasikalTujuan ? `[TUJUAN RPL]\n${klasikalTujuan}` : '',
+      klasikalMateriUraian ? `[MATERI]\n${klasikalMateriUraian}` : '',
     ].filter(Boolean).join('\n\n');
 
     const outputParts = [
-      `[EVALUASI HASIL & PROSES] Capaian: ${klasikalHasilEvaluasi}.`,
-      klasikalLaiseg ? `Laiseg: ${klasikalLaiseg}` : '',
-      klasikalLaijapen ? `Laijapen: ${klasikalLaijapen}` : '',
-      klasikalLaijapang ? `Laijapang: ${klasikalLaijapang}` : '',
+      stdBlokD.kesepakatan ? `Kesepakatan Kelas: ${stdBlokD.kesepakatan}.` : '',
+      `Dinamika kelas teramati ${klasikalDinamikaKelas} (${klasikalHadir}/${totalSiswaVal} hadir).`,
+      klasikalResponSiswa ? `Respon siswa: ${klasikalResponSiswa}.` : '',
     ].filter(Boolean).join(' ');
 
     const followUpParts = [
-      klasikalTindakLanjutChecklist.length > 0 ? `Tindak Lanjut: ${klasikalTindakLanjutChecklist.join(', ')}.` : '',
-      klasikalSiswaPerluLanjut ? `Siswa Perlu Ditindaklanjuti: ${klasikalSiswaPerluLanjut}.` : '',
-      klasikalRencanaBerikutnya ? `Rencana Pertemuan Berikutnya: ${klasikalRencanaBerikutnya}.` : '',
-    ].filter(Boolean).join(' ');
+      stdBlokD.tindakLanjutApa ? `Tindak Lanjut: ${stdBlokD.tindakLanjutApa}` : klasikalRencanaBerikutnya,
+      stdBlokD.tindakLanjutTanggal ? `Jadwal: ${formatTanggalIndonesia(stdBlokD.tindakLanjutTanggal)}` : '',
+      stdBlokD.penanggungJawab ? `PJ: ${stdBlokD.penanggungJawab}` : '',
+    ].filter(Boolean).join(' | ');
 
     return {
       id: `srv-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
-      serviceType: selectedService.type,
-      bkComponent: selectedService.pilarId,
+      serviceType: 'Bimbingan Klasikal',
+      bkComponent: mapJenisMasalahToBidang(stdBlokB.jenisMasalah) as BKComponentType,
       bidangBimbingan: klasikalBidang,
       students: selectedStudents.map((s) => ({
         id: s.id,
@@ -1255,10 +1683,10 @@ export default function TambahLayananForm({
         class: s.class,
         nis: s.nis || '-',
       })),
-      problem: `Bimbingan Klasikal: ${klasikalTopik} (Kelas ${selectedClass || '8A'})`,
+      problem: `Bimbingan Klasikal (${klasikalDetails.kelas}): ${klasikalTopik}`,
       description: descParts,
-      output: outputParts || `Bimbingan klasikal telah terlaksana dengan hasil ${klasikalHasilEvaluasi}.`,
-      followUp: followUpParts || 'Lanjut materi bimbingan klasikal berikutnya',
+      output: outputParts,
+      followUp: followUpParts || 'Evaluasi dinamika kelas',
       status: status,
       date,
       startTime: time,
@@ -1271,9 +1699,23 @@ export default function TambahLayananForm({
         aspekSkkpd: klasikalTopik,
         metodeLayanan: klasikalMetode.join(', '),
         mediaLayanan: klasikalMedia.join(', '),
-        evaluasiProses: klasikalLaiseg,
-        evaluasiHasil: `${klasikalHasilEvaluasi}. Laijapen: ${klasikalLaijapen}. Laijapang: ${klasikalLaijapang}`,
-        rencanaAksiSiswa: klasikalTujuan,
+        evaluasiProses: `Dinamika ${klasikalDinamikaKelas}: ${klasikalResponSiswa || klasikalLaiseg}`,
+        evaluasiHasil: outputParts,
+        rencanaAksiSiswa: stdBlokD.kesepakatan || klasikalTujuan,
+        blokA: {
+          tanggal: date,
+          jam: time,
+          tempat: stdTempat || klasikalTempat,
+          pertemuanKe: stdPertemuanKe,
+          sifatLayanan: stdSifatLayanan,
+        },
+        blokB: stdBlokB,
+        blokC: {
+          klasikal: klasikalDetails,
+        },
+        klasikal: klasikalDetails,
+        tindakLanjutPlan: stdBlokD,
+        aiContextualRecommendation: currentContextualAiText,
       },
       linkedViolationId: presetServiceData?.linkedViolationId,
       linkedTicketId: presetServiceData?.linkedTicketId,
@@ -1293,7 +1735,7 @@ export default function TambahLayananForm({
     showToast('📄 Laporan PDF RPL Bimbingan Klasikal berhasil diunduh dan dibukukan!', 'success');
   };
 
-  // Builder for Home Visit Record
+  // Builder for Home Visit Record (Blok A-D Terstandar)
   const buildHomeVisitRecord = () => {
     const st = selectedStudents[0] || {
       id: 'unknown',
@@ -1301,41 +1743,45 @@ export default function TambahLayananForm({
       class: '8A',
       nis: '-'
     };
-    const effectivePurpose = homeVisitTujuan === 'Lainnya' && homeVisitTujuanCustom.trim()
-      ? homeVisitTujuanCustom.trim()
-      : homeVisitTujuan;
     const effectivePerson = homeVisitYangDitemui === 'Lainnya' && homeVisitYangDitemuiLainnya.trim()
       ? homeVisitYangDitemuiLainnya.trim()
       : homeVisitYangDitemui;
     const effectiveResult = homeVisitUseAi && homeVisitAiHasil
       ? homeVisitAiHasil
       : (homeVisitRawHasil || `Kunjungan rumah terlaksana dengan status ${homeVisitStatus}. Ditemui ${effectivePerson}.`);
-    
-    const effectiveAgreement = [
-      homeVisitKesepakatanOrtu ? `Kesepakatan: ${homeVisitKesepakatanOrtu}` : '',
-      homeVisitKomitmenOrtu ? `Komitmen Ortu: ${homeVisitKomitmenOrtu}` : '',
-      homeVisitKomitmenSiswa ? `Komitmen Siswa: ${homeVisitKomitmenSiswa}` : '',
-      homeVisitKomitmenSekolah ? `Komitmen Sekolah: ${homeVisitKomitmenSekolah}` : '',
-      homeVisitTindakLanjut.length > 0 ? `Tindak Lanjut: ${homeVisitTindakLanjut.join(', ')}` : '',
-      homeVisitJadwalPantau ? `Jadwal Pantau: ${homeVisitJadwalPantau}` : ''
-    ].filter(Boolean).join('. ');
+    const effectiveKesepakatanOrtu = homeVisitKesepakatanOrtu || stdBlokD.kesepakatan || '-';
+    const hvDetails: ServiceHomeVisitDetails = {
+      yangDitemui: homeVisitYangDitemui,
+      yangDitemuiLainnya:
+        homeVisitYangDitemui === 'Lainnya' && homeVisitYangDitemuiLainnya.trim()
+          ? homeVisitYangDitemuiLainnya.trim()
+          : undefined,
+      alamat: homeVisitAlamat || `Kediaman siswa ${st.name}`,
+      namaOrtu: homeVisitNamaOrtu,
+      noHpOrtu: homeVisitNoHpOrtu,
+      kondisiRumahSingkat: homeVisitKondisiRumah,
+      hasilPembicaraan: effectiveResult,
+      kesepakatanOrtu: effectiveKesepakatanOrtu,
+      statusKunjungan: homeVisitStatus,
+      fotoBuktiUrl: homeVisitFotoBukti || undefined,
+    };
 
     const repNum = `HV-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`;
 
     const hvRecord: HomeVisitRecord = {
       id: `hv-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       reportNumber: repNum,
-      date: homeVisitTanggal || date,
+      date: date,
       studentId: st.id,
       studentName: st.name,
       studentClass: st.class,
       studentNis: String(st.nis || '-'),
-      parentNameMet: homeVisitTtdOrtu || homeVisitNamaOrtu || effectivePerson,
-      address: homeVisitAlamat || `Kediaman siswa ${st.name}`,
+      parentNameMet: homeVisitNamaOrtu || effectivePerson,
+      address: hvDetails.alamat,
       bidangBimbingan: 'Sosial',
-      purpose: effectivePurpose,
+      purpose: `${stdBlokB.jenisMasalah} — ${stdBlokB.tujuanLayanan}`,
       result: effectiveResult,
-      agreement: effectiveAgreement,
+      agreement: effectiveKesepakatanOrtu,
       photoUrl: homeVisitFotoBukti || undefined,
       photoName: homeVisitFotoName || undefined,
       counselorName: activeCounselorInfo.name,
@@ -1343,10 +1789,12 @@ export default function TambahLayananForm({
       createdAt: new Date().toISOString()
     };
 
+    const followUpLine = `${stdBlokD.tindakLanjutApa || 'Koordinasi perkembangan dengan orang tua & wali kelas'} (${formatTanggalIndonesia(stdBlokD.tindakLanjutTanggal)} - PJ: ${stdBlokD.penanggungJawab})`;
+
     const serviceRecord: CounselingService = {
       id: `srv-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
       serviceType: 'Kunjungan Rumah (Home Visit)',
-      bkComponent: 'Layanan Responsif',
+      bkComponent: mapJenisMasalahToBidang(stdBlokB.jenisMasalah) as BKComponentType,
       bidangBimbingan: 'Sosial',
       students: [{
         id: st.id,
@@ -1354,23 +1802,40 @@ export default function TambahLayananForm({
         class: st.class,
         nis: st.nis || '-'
       }],
-      problem: `Home Visit: ${st.name} (${st.class}) - ${effectivePurpose}`,
-      description: `Laporan Kunjungan Rumah (Home Visit).\nNomor Dokumen: ${repNum}\nAlamat: ${homeVisitAlamat}\nTanggal/Jam: ${homeVisitTanggal || date} (${homeVisitJamBerangkat})\nPetugas: ${homeVisitPetugas}\nYang Ditemui: ${effectivePerson} (${homeVisitNamaOrtu})\nTujuan: ${effectivePurpose}\nKondisi Rumah: ${homeVisitKondisiRumah || '-'}\n\nUraian Hasil Pembicaraan:\n${effectiveResult}`,
-      output: `Status Kunjungan: ${homeVisitStatus}.\n${effectiveAgreement}`,
-      followUp: homeVisitTindakLanjut.length > 0 ? homeVisitTindakLanjut.join(', ') : 'Pemantauan perkembangan siswa 1 minggu',
+      problem: `Home Visit: ${st.name} (${st.class}) - ${stdBlokB.jenisMasalah}`,
+      description: `[IDENTITAS] Layanan Ke-${stdPertemuanKe} (${stdSifatLayanan}) di ${hvDetails.alamat} (${formatTanggalIndonesia(date)}).\n[BLOK B] Masalah: ${stdBlokB.jenisMasalah}${stdBlokB.alasanMasalahLainnya ? ` (${stdBlokB.alasanMasalahLainnya})` : ''} | Tujuan: ${stdBlokB.tujuanLayanan}.\n[BLOK C - HOME VISIT] Ditemui: ${effectivePerson} (${homeVisitNamaOrtu || '-'}, HP: ${homeVisitNoHpOrtu || '-'})\nKondisi Rumah: ${homeVisitKondisiRumah || '-'}\nHasil Pembicaraan: ${effectiveResult}`,
+      output: `Status Kunjungan: ${homeVisitStatus}. Kesepakatan Orang Tua: ${effectiveKesepakatanOrtu}`,
+      followUp: followUpLine,
       status: 'Selesai',
-      date: homeVisitTanggal || date,
-      startTime: homeVisitJamBerangkat.slice(0, 5) || time,
+      date: date,
+      startTime: time,
       endTime: time,
       attachments: homeVisitFotoName ? [{ name: homeVisitFotoName, size: 'Foto Bukti' }] : [],
       targetType: 'Individu',
       counselorName: activeCounselorInfo.name,
       specificDetails: {
         bidangBimbingan: 'Sosial',
-        aspekSkkpd: effectivePurpose,
+        aspekSkkpd: stdBlokB.jenisMasalah,
         evaluasiProses: homeVisitKondisiRumah,
         evaluasiHasil: effectiveResult,
-        rencanaAksiSiswa: effectiveAgreement
+        rencanaAksiSiswa: effectiveKesepakatanOrtu,
+        blokA: {
+          tanggal: date,
+          jam: time,
+          tempat: stdTempat || hvDetails.alamat,
+          pertemuanKe: stdPertemuanKe,
+          sifatLayanan: stdSifatLayanan,
+        },
+        blokB: {
+          ...stdBlokB,
+          teknik: 'Home Visit',
+        },
+        blokC: {
+          homeVisit: hvDetails,
+        },
+        homeVisit: hvDetails,
+        tindakLanjutPlan: stdBlokD,
+        aiContextualRecommendation: currentContextualAiText,
       },
       linkedViolationId: presetServiceData?.linkedViolationId,
       linkedTicketId: presetServiceData?.linkedTicketId
@@ -1403,11 +1868,201 @@ export default function TambahLayananForm({
     showToast('📄 Berkas PDF Laporan Home Visit berhasil diunduh dan dibukukan!', 'success');
   };
 
+  // Builder 1: Konseling Kelompok (Blok A-D Terstandar)
+  const buildKonselingKelompokRecord = (): CounselingService => {
+    const startH = time.split(':')[0] || '08';
+    const startM = time.split(':')[1] || '00';
+    const endH = String((parseInt(startH, 10) + 1) % 24).padStart(2, '0');
+    const prosesSummary = konsKelUseAi && konsKelAiSummary ? konsKelAiSummary : konsKelRawSummary;
+    const participantSummary = kelompokParticipants
+      .map((p) => `- ${p.nama} (${p.kelas || '-'}) | Peran: ${p.peran} | Keterbukaan: ${p.keterbukaan}/5 | Kesepakatan: ${p.kesepakatanSiswa || '-'}`)
+      .join('\n');
+
+    return {
+      id: `srv-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      serviceType: 'Layanan Konseling Kelompok',
+      bkComponent: mapJenisMasalahToBidang(stdBlokB.jenisMasalah) as BKComponentType,
+      bidangBimbingan: 'Sosial',
+      students: selectedStudents.map((s) => ({
+        id: s.id,
+        name: s.name,
+        class: s.class,
+        nis: s.nis || '-',
+      })),
+      problem: `Konseling Kelompok: ${stdBlokB.jenisMasalah}${stdBlokB.alasanMasalahLainnya ? ` (${stdBlokB.alasanMasalahLainnya})` : ''}`,
+      description: `[BLOK B - KONTEKS] Masalah: ${stdBlokB.jenisMasalah} | Tujuan: ${stdBlokB.tujuanLayanan} | Teknik: ${stdBlokB.teknik}\n\n[BLOK C - PESERTA KELOMPOK]\n${participantSummary || '-'}\n\n[PROSES KELOMPOK]\n${prosesSummary || '-'}`,
+      output: kelompokKomitmenBersama || stdBlokD.kesepakatan || 'Peserta kelompok menyepakati komitmen perubahan bersama.',
+      followUp: `${stdBlokD.tindakLanjutApa || 'Review komitmen kelompok'} (${formatTanggalIndonesia(stdBlokD.tindakLanjutTanggal)} - PJ: ${stdBlokD.penanggungJawab})`,
+      status,
+      date,
+      startTime: time,
+      endTime: `${endH}:${startM}`,
+      attachments: [],
+      targetType: 'Kelompok',
+      counselorName: activeCounselorInfo.name,
+      specificDetails: {
+        bidangBimbingan: 'Sosial',
+        aspekSkkpd: stdBlokB.jenisMasalah,
+        evaluasiProses: prosesSummary,
+        evaluasiHasil: kelompokKomitmenBersama || stdBlokD.kesepakatan,
+        rencanaAksiSiswa: stdBlokD.kesepakatan,
+        blokA: {
+          tanggal: date,
+          jam: time,
+          tempat: stdTempat,
+          pertemuanKe: stdPertemuanKe,
+          sifatLayanan: stdSifatLayanan,
+        },
+        blokB: stdBlokB,
+        blokC: {
+          kelompokParticipants,
+          kelompokRingkasanProses: prosesSummary,
+          kelompokKomitmenBersama,
+        },
+        kelompokParticipants,
+        tindakLanjutPlan: stdBlokD,
+        aiContextualRecommendation: currentContextualAiText,
+      },
+      linkedViolationId: presetServiceData?.linkedViolationId,
+      linkedTicketId: presetServiceData?.linkedTicketId,
+    };
+  };
+
+  // Builder 2: Mediasi (Blok A-D Terstandar)
+  const buildMediasiRecord = (): CounselingService => {
+    const startH = time.split(':')[0] || '08';
+    const startM = time.split(':')[1] || '00';
+    const endH = String((parseInt(startH, 10) + 1) % 24).padStart(2, '0');
+    const kesepakatanText =
+      mediasiData.statusMediasi === 'Sepakat'
+        ? mediasiData.kesepakatanBersama
+        : `Tidak Sepakat (${mediasiData.alasanTidakSepakat}). Rencana Berikutnya: ${mediasiData.rencanaBerikutnya}`;
+
+    return {
+      id: `srv-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      serviceType: 'Layanan Mediasi',
+      bkComponent: 'Layanan Responsif',
+      bidangBimbingan: 'Sosial',
+      students: selectedStudents.map((s) => ({
+        id: s.id,
+        name: s.name,
+        class: s.class,
+        nis: s.nis || '-',
+      })),
+      problem: `Mediasi: ${mediasiData.pihak1Nama || 'Pihak 1'} vs ${mediasiData.pihak2Nama || 'Pihak 2'} (${stdBlokB.jenisMasalah})`,
+      description: `[BLOK B] Masalah: ${stdBlokB.jenisMasalah} | Tujuan: ${stdBlokB.tujuanLayanan}\n\n[BLOK C - MEDIASI]\nPihak 1 (${mediasiData.pihak1Nama}): ${mediasiData.versiPihak1 || '-'}\nPihak 2 (${mediasiData.pihak2Nama}): ${mediasiData.versiPihak2 || '-'}\nTitik Konflik Utama: ${mediasiData.titikKonflikUtama}\nStatus: ${mediasiData.statusMediasi}`,
+      output: kesepakatanText,
+      followUp: `${stdBlokD.tindakLanjutApa || (mediasiData.statusMediasi === 'Tidak Sepakat' ? mediasiData.rencanaBerikutnya : 'Cek kepatuhan kesepakatan dua pihak')} (${formatTanggalIndonesia(stdBlokD.tindakLanjutTanggal)} - PJ: ${stdBlokD.penanggungJawab})`,
+      status,
+      date,
+      startTime: time,
+      endTime: `${endH}:${startM}`,
+      attachments: [],
+      targetType: 'Kelompok',
+      counselorName: activeCounselorInfo.name,
+      specificDetails: {
+        bidangBimbingan: 'Sosial',
+        aspekSkkpd: mediasiData.titikKonflikUtama,
+        evaluasiProses: `Versi P1: ${mediasiData.versiPihak1} | Versi P2: ${mediasiData.versiPihak2}`,
+        evaluasiHasil: kesepakatanText,
+        rencanaAksiSiswa: stdBlokD.kesepakatan || mediasiData.kesepakatanBersama || mediasiData.rencanaBerikutnya,
+        blokA: {
+          tanggal: date,
+          jam: time,
+          tempat: stdTempat,
+          pertemuanKe: stdPertemuanKe,
+          sifatLayanan: stdSifatLayanan,
+        },
+        blokB: stdBlokB,
+        blokC: {
+          mediasi: mediasiData,
+        },
+        mediasi: mediasiData,
+        tindakLanjutPlan: stdBlokD,
+        aiContextualRecommendation: currentContextualAiText,
+      },
+      linkedViolationId: presetServiceData?.linkedViolationId,
+      linkedTicketId: presetServiceData?.linkedTicketId,
+    };
+  };
+
+  // Builder 3: Observasi / Wawancara + Referal (Blok A-D Terstandar)
+  const buildObservasiWawancaraReferalRecord = (): CounselingService => {
+    const startH = time.split(':')[0] || '08';
+    const startM = time.split(':')[1] || '00';
+    const endH = String((parseInt(startH, 10) + 1) % 24).padStart(2, '0');
+    const isRef = obsWawRefData.subJenis === 'Referal';
+    const isWaw = obsWawRefData.subJenis === 'Wawancara';
+    const finalServiceType: BKServiceType = isRef ? 'Alih Tangan Kasus (Referral)' : 'Observasi & Wawancara';
+    const detailText = isRef
+      ? `Dirujuk Ke: ${obsWawRefData.dirujukKe} | Status: ${obsWawRefData.statusRujukan} | Alasan: ${obsWawRefData.alasanDirujuk}`
+      : isWaw
+        ? `Narasumber: ${obsWawRefData.diwawancarai} | Pertanyaan Kunci: ${obsWawRefData.pertanyaanKunci || '-'} | Ringkasan Jawaban: ${obsWawRefData.ringkasanJawaban}`
+        : `Yang Diamati: ${obsWawRefData.yangDiamati || '-'} | Tempat: ${obsWawRefData.tempat || '-'} | Durasi: ${obsWawRefData.durasi || '-'} | Hasil Pengamatan: ${obsWawRefData.hasilPengamatan}`;
+
+    return {
+      id: `srv-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      serviceType: finalServiceType,
+      bkComponent: 'Layanan Responsif',
+      bidangBimbingan: 'Pribadi',
+      students: selectedStudents.map((s) => ({
+        id: s.id,
+        name: s.name,
+        class: s.class,
+        nis: s.nis || '-',
+      })),
+      problem: isRef
+        ? `Referal ke ${obsWawRefData.dirujukKe}: ${stdBlokB.jenisMasalah}`
+        : `${obsWawRefData.subJenis}: ${stdBlokB.jenisMasalah} (${selectedStudents[0]?.name || 'Siswa'})`,
+      description: `[BLOK B] Masalah: ${stdBlokB.jenisMasalah}${stdBlokB.alasanMasalahLainnya ? ` (${stdBlokB.alasanMasalahLainnya})` : ''} | Tujuan: ${stdBlokB.tujuanLayanan} | Teknik: ${obsWawRefData.subJenis}\n\n[BLOK C - ${obsWawRefData.subJenis.toUpperCase()}]\n${detailText}`,
+      output: stdBlokD.kesepakatan || (isRef ? `Rujukan profesional ke ${obsWawRefData.dirujukKe} (${obsWawRefData.statusRujukan}).` : detailText),
+      followUp: `${stdBlokD.tindakLanjutApa || (isRef ? 'Koordinasi hasil rujukan' : 'Tinjau kebutuhan konseling lanjutan')} (${formatTanggalIndonesia(stdBlokD.tindakLanjutTanggal)} - PJ: ${stdBlokD.penanggungJawab})`,
+      status,
+      date,
+      startTime: time,
+      endTime: `${endH}:${startM}`,
+      attachments: [],
+      targetType: mode,
+      counselorName: activeCounselorInfo.name,
+      specificDetails: {
+        bidangBimbingan: 'Pribadi',
+        aspekSkkpd: stdBlokB.jenisMasalah,
+        evaluasiProses: detailText,
+        evaluasiHasil: stdBlokD.kesepakatan || detailText,
+        rencanaAksiSiswa: stdBlokD.tindakLanjutApa,
+        blokA: {
+          tanggal: date,
+          jam: time,
+          tempat: stdTempat,
+          pertemuanKe: stdPertemuanKe,
+          sifatLayanan: stdSifatLayanan,
+        },
+        blokB: {
+          ...stdBlokB,
+          teknik: obsWawRefData.subJenis,
+        },
+        blokC: {
+          observasiWawancaraReferal: obsWawRefData,
+        },
+        observasiWawancaraReferal: obsWawRefData,
+        tindakLanjutPlan: stdBlokD,
+        aiContextualRecommendation: currentContextualAiText,
+      },
+      linkedViolationId: presetServiceData?.linkedViolationId,
+      linkedTicketId: presetServiceData?.linkedTicketId,
+    };
+  };
+
   // Handler for Final Save
   const handleFinalSubmit = () => {
-    if (selectedStudents.length === 0) {
+    if (selectedStudents.length === 0 && !isFormMediasi) {
       showToast('⚠️ Silakan pilih minimal 1 siswa / kelas di Langkah 2.', 'warning');
       setCurrentStep(2);
+      return;
+    }
+
+    if (activeRevisedFormKind && stdBlokB.jenisMasalah === 'Lainnya' && !stdBlokB.alasanMasalahLainnya.trim()) {
+      showToast('⚠️ Wajib isi 1 kalimat alasan saat memilih Jenis Masalah "Lainnya".', 'warning');
       return;
     }
 
@@ -1424,6 +2079,61 @@ export default function TambahLayananForm({
       onSaveService(record);
       setSavedSuccessService(record);
       showToast(`✅ Laporan Bimbingan Klasikal & RPL berhasil disimpan!`, 'success');
+      return;
+    }
+
+    if (isFormKonselingKelompok) {
+      if (kelompokParticipants.length === 0) {
+        showToast('⚠️ Tambahkan minimal 1 peserta di Daftar Peserta Kelompok.', 'warning');
+        return;
+      }
+      const record = buildKonselingKelompokRecord();
+      onSaveService(record);
+      setSavedSuccessService(record);
+      showToast(`✅ Laporan Konseling Kelompok berhasil disimpan!`, 'success');
+      return;
+    }
+
+    if (isFormMediasi) {
+      if (!mediasiData.pihak1Nama.trim() || !mediasiData.pihak2Nama.trim() || !mediasiData.titikKonflikUtama.trim()) {
+        showToast('⚠️ Lengkapi Pihak 1, Pihak 2, dan Titik Konflik Utama.', 'warning');
+        return;
+      }
+      if (mediasiData.statusMediasi === 'Sepakat' && !mediasiData.kesepakatanBersama?.trim()) {
+        showToast('⚠️ Status Sepakat mewajibkan pengisian Kesepakatan Bersama.', 'warning');
+        return;
+      }
+      if (
+        mediasiData.statusMediasi === 'Tidak Sepakat' &&
+        (!mediasiData.alasanTidakSepakat?.trim() || !mediasiData.rencanaBerikutnya?.trim())
+      ) {
+        showToast('⚠️ Status Tidak Sepakat mewajibkan Alasan & Rencana Berikutnya.', 'warning');
+        return;
+      }
+      const record = buildMediasiRecord();
+      onSaveService(record);
+      setSavedSuccessService(record);
+      showToast(`✅ Laporan Layanan Mediasi berhasil disimpan!`, 'success');
+      return;
+    }
+
+    if (isFormObservasiWawancaraReferal) {
+      if (obsWawRefData.subJenis === 'Referal' && !obsWawRefData.alasanDirujuk?.trim()) {
+        showToast('⚠️ Alasan Dirujuk wajib diisi untuk layanan Referal.', 'warning');
+        return;
+      }
+      if (obsWawRefData.subJenis === 'Observasi' && !obsWawRefData.hasilPengamatan?.trim()) {
+        showToast('⚠️ Hasil Pengamatan wajib diisi untuk layanan Observasi.', 'warning');
+        return;
+      }
+      if (obsWawRefData.subJenis === 'Wawancara' && !obsWawRefData.ringkasanJawaban?.trim()) {
+        showToast('⚠️ Ringkasan Jawaban wajib diisi untuk layanan Wawancara.', 'warning');
+        return;
+      }
+      const record = buildObservasiWawancaraReferalRecord();
+      onSaveService(record);
+      setSavedSuccessService(record);
+      showToast(`✅ Laporan ${obsWawRefData.subJenis} berhasil disimpan!`, 'success');
       return;
     }
 
@@ -1457,11 +2167,6 @@ export default function TambahLayananForm({
       finalDesc = bimbKelUseAi && bimbKelAiDinamika ? bimbKelAiDinamika : (bimbKelRawDinamika || `Dinamika kelompok bimbingan bersama ${selectedStudents.length} siswa.`);
       finalFollowUp = 'Pemantauan interaksi kelompok di kelas.';
       finalOutput = `Kelompok menunjukkan keterbukaan dan saling mendukung solusi bersama.`;
-    } else if (isFormKonselingKelompok) {
-      finalProblem = counselingTopic;
-      finalDesc = `${konsKelUseAi && konsKelAiSummary ? konsKelAiSummary : (konsKelRawSummary || `Konseling kelompok terkait ${counselingTopic}.`)}. Peran siswa: ${konsKelPeranSiswa || '-'}.`;
-      finalFollowUp = counselingFollowUp;
-      finalOutput = `Penyelesaian masalah kelompok dengan pendekatan empati antarteman.`;
     } else if (isFormHomeVisit) {
       finalProblem = `Home Visit: ${selectedStudents[0]?.name}`;
       finalDesc = `Alamat: ${homeVisitAlamat}. Pihak Ditemui: ${homeVisitYangDitemui}. Hasil: ${homeVisitUseAi && homeVisitAiHasil ? homeVisitAiHasil : (homeVisitRawHasil || 'Kunjungan rumah terlaksana.')}. Kesepakatan Ortu: ${homeVisitKesepakatanOrtu || '-'}.`;
@@ -1477,11 +2182,6 @@ export default function TambahLayananForm({
       finalDesc = `Peserta: ${konferensiPeserta.join(', ')}. Keputusan: ${konferensiUseAi && konferensiAiKeputusan ? konferensiAiKeputusan : (konferensiRawKeputusan || 'Telah dicapai mufakat penanganan kasus.')}.`;
       finalFollowUp = 'Pelaksanaan butir keputusan rapat kasus.';
       finalOutput = `Berita acara konferensi kasus telah disepakati seluruh pihak terkait.`;
-    } else if (isFormAlihTangan) {
-      finalProblem = `Alih Tangan Kasus ke ${alihTanganDirujukKe}`;
-      finalDesc = `Alasan Rujukan: ${alihTanganRawAlasan}. Surat Pengantar: ${alihTanganUseAi && alihTanganAiSurat ? alihTanganAiSurat : 'Telah diterbitkan surat rujukan resmi.'}.`;
-      finalFollowUp = 'Pemantauan berkala laporan dari pihak rujukan.';
-      finalOutput = `Siswa resmi dirujuk untuk mendapatkan penanganan profesional lanjutan.`;
     } else if (isFormCatatKasus) {
       finalProblem = catatKasusJenis;
       finalDesc = `Kronologi: ${catatKasusUseAi && catatKasusAiKronologi ? catatKasusAiKronologi : (catatKasusRawKronologi || catatKasusJenis)}. Poin: +${catatKasusPoin}. Sanksi/Pembinaan: ${catatKasusSanksi}.`;
@@ -1574,7 +2274,7 @@ export default function TambahLayananForm({
             </div>
             <div className="flex items-center justify-between border-b border-gray-200/60 pb-2">
               <span className="text-gray-500 font-bold">Tanggal:</span>
-              <span className="font-bold text-gray-700 text-right">{savedSuccessService.date} • {savedSuccessService.startTime} WIB</span>
+              <span className="font-bold text-gray-700 text-right">{formatCardDateTime(savedSuccessService.date, savedSuccessService.startTime)}</span>
             </div>
             <div className="flex items-center justify-between border-b border-gray-200/60 pb-2">
               <span className="text-gray-500 font-bold">Topik:</span>
@@ -1604,17 +2304,34 @@ export default function TambahLayananForm({
               <span>Lihat Riwayat Layanan</span>
             </button>
 
-            {/* 2. Download PDF Layanan Ini */}
+            {/* 2. Tombol Lihat PDF di Drive jika ada */}
+            {savedSuccessService.pdfUrl && (
+              <a
+                href={savedSuccessService.pdfUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full py-3 px-5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-2 border-emerald-300 rounded-2xl font-black text-xs sm:text-sm flex items-center justify-center gap-2.5 shadow-sm transition-all cursor-pointer active:scale-98"
+              >
+                <ExternalLink className="w-4 h-4 text-emerald-700" />
+                <span>Lihat PDF di Drive</span>
+              </a>
+            )}
+
+            {/* 3. Tombol [Generate Layanan] / [Download Ulang PDF] */}
             <button
               type="button"
-              onClick={() => {
-                generateServicePDF(savedSuccessService);
+              onClick={async () => {
+                const res = await generateServicePDF(savedSuccessService);
+                if (res?.success && res.pdfUrl) {
+                  setSavedSuccessService((prev) => (prev ? { ...prev, pdfUrl: res.pdfUrl } : null));
+                }
               }}
               className="w-full py-3.5 px-5 bg-white hover:bg-gray-50 text-[#00685f] border-2 border-[#00685f]/40 hover:border-[#00685f] rounded-2xl font-black text-xs sm:text-sm flex items-center justify-center gap-2.5 shadow-sm transition-all cursor-pointer active:scale-98"
             >
               <FileText className="w-4 h-4 text-[#00685f]" />
-              <span>Download PDF Layanan Ini</span>
+              <span>{savedSuccessService.pdfUrl ? 'Download Ulang PDF Layanan' : 'Generate Layanan (Auto-Save ke Drive)'}</span>
             </button>
+
 
             {/* 3. Input Layanan Lain */}
             <button
@@ -1809,27 +2526,23 @@ export default function TambahLayananForm({
           {(['Layanan Responsif', 'Layanan Dasar', 'Perencanaan Individual', 'Dukungan Sistem'] as const).map((groupName) => {
             const groupServices = filteredServices.filter((s) => s.group === groupName);
             if (groupServices.length === 0) return null;
+            const groupHex = BIDANG_HEX_COLORS[groupName];
 
             return (
               <div key={groupName} className="space-y-2.5">
                 <div className="flex items-center justify-between px-1">
                   <div className="flex items-center gap-2">
-                    <span className={`w-2.5 h-2.5 rounded-full ${
-                      groupName === 'Layanan Responsif'
-                        ? 'bg-amber-500'
-                        : groupName === 'Layanan Dasar'
-                        ? 'bg-teal-600'
-                        : groupName === 'Perencanaan Individual'
-                        ? 'bg-blue-600'
-                        : 'bg-purple-600'
-                    }`} />
-                    <h2 className="text-sm font-black text-[#0b1c30] uppercase tracking-wider">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{ backgroundColor: groupHex }}
+                    />
+                    <h2 className="text-xs sm:text-sm font-black text-[#0b1c30] uppercase tracking-wider">
                       {groupName} ({groupServices.length})
                     </h2>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div className="grid grid-cols-2 md:grid-cols-3 min-[1200px]:grid-cols-4 gap-2.5 sm:gap-3">
                   {groupServices.map((srv) => {
                     const isSelected = selectedService.type === srv.type;
                     const Icon = srv.icon;
@@ -1839,44 +2552,66 @@ export default function TambahLayananForm({
                         key={srv.type}
                         type="button"
                         onClick={() => handleSelectService(srv)}
-                        className={`p-4 rounded-2xl border-2 text-left transition-all cursor-pointer flex flex-col justify-between relative active:scale-98 ${
-                          isSelected
-                            ? 'bg-[#00685f] text-white border-[#00685f] shadow-md ring-4 ring-[#00685f]/20'
-                            : srv.accentColor
+                        style={{
+                          backgroundColor: isSelected ? groupHex : `${groupHex}10`,
+                          borderColor: isSelected ? groupHex : `${groupHex}40`,
+                          color: isSelected ? '#ffffff' : '#0b1c30',
+                        }}
+                        className={`p-3 sm:p-3.5 rounded-2xl border-2 text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 relative active:scale-98 ${
+                          isSelected ? 'shadow-md' : 'hover:shadow-2xs'
                         }`}
                       >
                         <div>
                           <div className="flex items-start justify-between gap-2">
-                            <div className={`p-2.5 rounded-xl ${
-                              isSelected ? 'bg-white/20 text-white' : 'bg-white shadow-2xs text-[#00685f]'
-                            }`}>
-                              <Icon className="w-5 h-5" />
+                            <div
+                              className="p-2 rounded-xl shrink-0"
+                              style={{
+                                backgroundColor: isSelected ? 'rgba(255,255,255,0.2)' : '#ffffff',
+                                color: isSelected ? '#ffffff' : groupHex,
+                              }}
+                            >
+                              <Icon className="w-4 h-4 sm:w-5 sm:h-5" />
                             </div>
 
                             {isSelected ? (
-                              <div className="w-6 h-6 rounded-full bg-white text-[#00685f] flex items-center justify-center shadow-xs">
-                                <Check className="w-4 h-4 stroke-[3]" />
+                              <div
+                                className="w-5 h-5 rounded-full bg-white flex items-center justify-center shadow-2xs shrink-0"
+                                style={{ color: groupHex }}
+                              >
+                                <Check className="w-3.5 h-3.5 stroke-[3]" />
                               </div>
                             ) : (
-                              <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-white/80 border border-current text-gray-600">
+                              <span
+                                className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-white/90 border shrink-0"
+                                style={{ borderColor: `${groupHex}40`, color: groupHex }}
+                              >
                                 {srv.defaultMode}
                               </span>
                             )}
                           </div>
 
-                          <h3 className={`text-sm font-black mt-3 leading-snug ${isSelected ? 'text-white' : 'text-[#0b1c30]'}`}>
+                          <h3
+                            className={`text-xs sm:text-sm font-black mt-2.5 leading-snug line-clamp-2 ${
+                              isSelected ? 'text-white' : 'text-[#0b1c30]'
+                            }`}
+                          >
                             {srv.label}
                           </h3>
-                          <p className={`text-xs mt-1 leading-relaxed line-clamp-2 ${isSelected ? 'text-teal-100' : 'text-gray-600'}`}>
-                            {srv.desc}
-                          </p>
                         </div>
 
-                        <div className="mt-3 pt-2.5 border-t border-black/5 flex items-center justify-between text-[11px] font-bold">
-                          <span className={isSelected ? 'text-teal-100' : 'text-gray-500'}>
-                            Mode: {srv.defaultMode}
+                        <div
+                          className="pt-2 border-t flex items-center justify-between text-[10px] sm:text-[11px] font-bold"
+                          style={{
+                            borderColor: isSelected ? 'rgba(255,255,255,0.25)' : `${groupHex}22`,
+                          }}
+                        >
+                          <span style={{ color: isSelected ? 'rgba(255,255,255,0.88)' : '#3d4947' }}>
+                            {srv.defaultMode}
                           </span>
-                          <span className={isSelected ? 'text-white font-extrabold' : 'text-[#00685f]'}>
+                          <span
+                            className="font-extrabold"
+                            style={{ color: isSelected ? '#ffffff' : groupHex }}
+                          >
                             {isSelected ? '✓ Terpilih' : 'Pilih →'}
                           </span>
                         </div>
@@ -2563,7 +3298,7 @@ export default function TambahLayananForm({
                         onClick={() => setSelectedStudents([])}
                         className="text-xs font-bold text-red-600 hover:underline"
                       >
-                        Hapus Semua
+                        Batal Pilih Semua
                       </button>
                     )}
                   </div>
@@ -2664,7 +3399,7 @@ export default function TambahLayananForm({
             <button
               type="button"
               onClick={() => {
-                if (selectedStudents.length === 0) {
+                if (selectedStudents.length === 0 && !isFormMediasi) {
                   showToast('⚠️ Silakan pilih minimal 1 siswa / kelas.', 'warning');
                   return;
                 }
@@ -2739,949 +3474,204 @@ export default function TambahLayananForm({
           )}
 
           {/* ========================================================= */}
-          {/* 1. FORM KONSELING INDIVIDUAL STANDAR BK (ACCORDION A-F)  */}
+          {/* 1. FORM KONSELING INDIVIDUAL (BLOK A-D TERSTANDAR)        */}
           {/* ========================================================= */}
           {isFormKonselingIndividual && (
             <div className="space-y-4">
-              {/* Info Header Banner */}
-              <div className="bg-white p-4 sm:p-5 rounded-2xl border border-[#bcc9c6]/40 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2 mb-1">
-                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-teal-100 text-teal-800">
-                      Standar Resmi BK • ABKIN
-                    </span>
-                    <span className="inline-flex items-center gap-1 text-[11px] font-extrabold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200">
-                      <Sparkles className="w-3 h-3 text-indigo-600" />
-                      Dibantu Meta AI ✨
-                    </span>
-                  </div>
-                  <h3 className="text-sm sm:text-base font-black text-[#0b1c30]">
-                    Laporan Konseling Individual - {studentDisplayText}
-                  </h3>
-                  <p className="text-xs text-gray-500 font-medium">
-                    Format resmi BK komprehensif. Bagian A terbuka otomatis, klik setiap bagian untuk mengisi.
-                  </p>
-                </div>
+              <StandardBlokAIdentitas
+                sasaranLabel={studentDisplayText}
+                sasaranSubLabel="Layanan Konseling Individual • Standar Kode Etik Kerahasiaan ABKIN"
+                counselorName={activeCounselorInfo.name}
+                counselorNip={activeCounselorInfo.nip}
+                date={date}
+                onDateChange={setDate}
+                time={time}
+                onTimeChange={setTime}
+                tempat={stdTempat || counselingTempat}
+                onTempatChange={(v) => {
+                  setStdTempat(v);
+                  setCounselingTempat(v);
+                }}
+                pertemuanKe={stdPertemuanKe}
+                onPertemuanKeChange={(n) => {
+                  setStdPertemuanKe(n);
+                  setCounselingPertemuanKe(n);
+                }}
+                sifatLayanan={stdSifatLayanan}
+                onSifatLayananChange={(sf) => {
+                  setStdSifatLayanan(sf);
+                  setCounselingSifat(sf === 'Baru' ? 'Sukarela' : 'Rujukan');
+                }}
+                extraBadge="Konseling Individual"
+              />
 
-                <div className="flex items-center gap-1.5 self-start sm:self-center">
-                  <span className="text-[11px] font-bold text-gray-400">Navigasi:</span>
-                  {(['A', 'B', 'C', 'D', 'E', 'F'] as const).map((sec) => (
-                    <button
-                      key={sec}
-                      type="button"
-                      onClick={() => setActiveAccordion(activeAccordion === sec ? null : sec)}
-                      className={`w-7 h-7 rounded-lg text-xs font-black transition-all cursor-pointer ${
-                        activeAccordion === sec
-                          ? 'bg-[#00685f] text-white shadow-xs scale-105'
-                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                      }`}
-                      title={`Buka Bagian ${sec}`}
-                    >
-                      {sec}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <StandardBlokBKonteks value={stdBlokB} onChange={setStdBlokB} />
 
-              {/* ----------------------------------------------------- */}
-              {/* ACCORDION BAGIAN A - IDENTITAS (OTOMATIS & TERBUKA)   */}
-              {/* ----------------------------------------------------- */}
-              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden transition-all">
-                <button
-                  type="button"
-                  onClick={() => setActiveAccordion(activeAccordion === 'A' ? null : 'A')}
-                  className="w-full p-4 sm:p-5 flex items-center justify-between text-left cursor-pointer hover:bg-gray-50/70 transition-colors"
-                >
+              {/* BLOK C: ISI KHAS KONSELING INDIVIDUAL */}
+              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
+                <div className="p-4 sm:p-5 border-b border-gray-100 flex items-center justify-between bg-[#f8faf9]/70">
                   <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-xl bg-teal-100 text-[#00685f] font-black flex items-center justify-center text-sm shadow-2xs">
-                      A
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
-                          Bagian A - Identitas
-                        </h4>
-                        <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-teal-50 text-teal-700 border border-teal-200">
-                          Otomatis
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-gray-500 mt-0.5 font-medium truncate max-w-xs sm:max-w-md">
-                        {selectedStudents[0]?.name || 'Belum dipilih'} ({selectedStudents[0]?.class || '-'}) • {counselingTempat} • Pertemuan Ke-{counselingPertemuanKe} ({counselingSifat})
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold text-gray-400 hidden sm:inline">
-                      {activeAccordion === 'A' ? 'Tutup' : 'Buka'}
-                    </span>
-                    <ChevronDown
-                      className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                        activeAccordion === 'A' ? 'rotate-180 text-[#00685f]' : ''
-                      }`}
-                    />
-                  </div>
-                </button>
-
-                {activeAccordion === 'A' && (
-                  <div className="p-4 sm:p-6 border-t border-gray-100 bg-[#f8faf9]/50 space-y-4 animate-in fade-in duration-150">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                      {/* 1. Nama Siswa (Konseli) */}
-                      <div className="p-3.5 bg-white rounded-xl border border-gray-200/80 shadow-2xs">
-                        <span className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
-                          Nama Siswa (Konseli):
-                        </span>
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2.5">
-                            <div className="w-8 h-8 rounded-full bg-teal-50 text-[#00685f] font-black flex items-center justify-center text-xs">
-                              {selectedStudents[0]?.name?.charAt(0) || 'S'}
-                            </div>
-                            <div>
-                              <p className="text-xs sm:text-sm font-black text-[#0b1c30]">
-                                {selectedStudents[0]?.name || 'Belum ada siswa terpilih'}
-                              </p>
-                              <p className="text-[11px] text-gray-500 font-semibold">
-                                Kelas {selectedStudents[0]?.class || '-'} • NIS: {selectedStudents[0]?.nis || '-'}
-                              </p>
-                            </div>
-                          </div>
-                          <span className="text-[10px] font-black text-teal-800 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-200">
-                            Terpilih ✓
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* 2. Guru BK / Konselor */}
-                      <div className="p-3.5 bg-white rounded-xl border border-gray-200/80 shadow-2xs">
-                        <span className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
-                          Guru BK / Konselor:
-                        </span>
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2.5">
-                            <div className="w-8 h-8 rounded-full bg-indigo-50 text-indigo-700 font-black flex items-center justify-center text-xs">
-                              BK
-                            </div>
-                            <div>
-                              <p className="text-xs sm:text-sm font-black text-[#0b1c30]">
-                                {activeCounselorInfo.name}
-                              </p>
-                              <p className="text-[11px] text-gray-500 font-semibold">
-                                NIP: {activeCounselorInfo.nip}
-                              </p>
-                            </div>
-                          </div>
-                          <span className="text-[10px] font-black text-indigo-800 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-200">
-                            Resmi ✓
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
-                      {/* Tanggal */}
-                      <div className="p-3 bg-white rounded-xl border border-gray-200/80">
-                        <label className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
-                          Tanggal Konseling:
-                        </label>
-                        <input
-                          type="date"
-                          value={date}
-                          onChange={(e) => setDate(e.target.value)}
-                          className="w-full bg-gray-50 border border-gray-200 rounded-lg p-2 text-xs font-black text-[#0b1c30] focus:outline-none focus:border-[#00685f]"
-                        />
-                      </div>
-
-                      {/* Jam */}
-                      <div className="p-3 bg-white rounded-xl border border-gray-200/80">
-                        <label className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
-                          Jam Mulai:
-                        </label>
-                        <input
-                          type="time"
-                          value={time}
-                          onChange={(e) => setTime(e.target.value)}
-                          className="w-full bg-gray-50 border border-gray-200 rounded-lg p-2 text-xs font-black text-[#0b1c30] focus:outline-none focus:border-[#00685f]"
-                        />
-                      </div>
-
-                      {/* Tempat */}
-                      <div className="p-3 bg-white rounded-xl border border-gray-200/80">
-                        <label className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
-                          Tempat Pelaksanaan:
-                        </label>
-                        <div className="grid grid-cols-2 gap-1.5">
-                          {(['Ruang BK', 'Kelas'] as const).map((tmp) => (
-                            <button
-                              key={tmp}
-                              type="button"
-                              onClick={() => setCounselingTempat(tmp)}
-                              className={`py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${
-                                counselingTempat === tmp
-                                  ? 'bg-[#00685f] text-white shadow-2xs'
-                                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                              }`}
-                            >
-                              {tmp}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Pertemuan Ke- & Sifat */}
-                      <div className="p-3 bg-white rounded-xl border border-gray-200/80">
-                        <label className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
-                          Pertemuan Ke- & Sifat:
-                        </label>
-                        <div className="flex items-center gap-2">
-                          <select
-                            value={counselingPertemuanKe}
-                            onChange={(e) => setCounselingPertemuanKe(Number(e.target.value))}
-                            className="bg-gray-50 border border-gray-200 rounded-lg p-2 text-xs font-black text-[#0b1c30] focus:outline-none focus:border-[#00685f]"
-                          >
-                            {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
-                              <option key={n} value={n}>
-                                Ke-{n}
-                              </option>
-                            ))}
-                          </select>
-                          <div className="flex rounded-lg bg-gray-100 p-0.5 border flex-1">
-                            {(['Sukarela', 'Rujukan'] as const).map((sf) => (
-                              <button
-                                key={sf}
-                                type="button"
-                                onClick={() => setCounselingSifat(sf)}
-                                className={`flex-1 py-1 rounded-md text-[11px] font-black transition-all cursor-pointer ${
-                                  counselingSifat === sf
-                                    ? 'bg-[#00685f] text-white shadow-2xs'
-                                    : 'text-gray-600'
-                                }`}
-                              >
-                                {sf}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex justify-end pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setActiveAccordion('B')}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-black rounded-xl cursor-pointer shadow-xs active:scale-95 transition-all"
-                      >
-                        <span>Lanjut ke Bagian B: Masalah</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* ----------------------------------------------------- */}
-              {/* ACCORDION BAGIAN B - MASALAH (TERTUTUP DEFAULT)      */}
-              {/* ----------------------------------------------------- */}
-              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden transition-all">
-                <button
-                  type="button"
-                  onClick={() => setActiveAccordion(activeAccordion === 'B' ? null : 'B')}
-                  className="w-full p-4 sm:p-5 flex items-center justify-between text-left cursor-pointer hover:bg-gray-50/70 transition-colors"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 font-black flex items-center justify-center text-sm shadow-2xs">
-                      B
-                    </div>
-                    <div>
-                      <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
-                        Bagian B - Masalah & Keluhan Siswa
-                      </h4>
-                      <p className="text-[11px] text-gray-500 mt-0.5 font-medium truncate max-w-xs sm:max-w-md">
-                        Topik: {counselingTopic} • Tingkat: {counselingTingkat}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold text-gray-400 hidden sm:inline">
-                      {activeAccordion === 'B' ? 'Tutup' : 'Buka'}
-                    </span>
-                    <ChevronDown
-                      className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                        activeAccordion === 'B' ? 'rotate-180 text-amber-700' : ''
-                      }`}
-                    />
-                  </div>
-                </button>
-
-                {activeAccordion === 'B' && (
-                  <div className="p-4 sm:p-6 border-t border-gray-100 bg-[#f8faf9]/50 space-y-4 animate-in fade-in duration-150">
-                    {/* Topik: 6 Tombol Pilih */}
-                    <div>
-                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                        Pilih Topik Masalah Utama (Klik 1):
-                      </label>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-                        {TOPIK_POPULER.map((item) => {
-                          const isSelected = counselingTopic === item.id;
-                          return (
-                            <button
-                              key={item.id}
-                              type="button"
-                              onClick={() => setCounselingTopic(item.id)}
-                              className={`p-3 rounded-xl border-2 text-left transition-all cursor-pointer ${
-                                isSelected
-                                  ? 'bg-[#00685f] text-white border-[#00685f] shadow-xs ring-2 ring-[#00685f]/20 font-black'
-                                  : 'bg-white hover:bg-gray-100 border-gray-200 text-gray-800'
-                              }`}
-                            >
-                              <p className="text-xs font-black">{item.label}</p>
-                              <p className={`text-[10px] truncate mt-0.5 ${isSelected ? 'text-teal-100' : 'text-gray-500'}`}>
-                                {item.desc}
-                              </p>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Tingkat Masalah */}
-                    <div>
-                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                        Tingkat Keparahan / Urgensi Masalah:
-                      </label>
-                      <div className="grid grid-cols-3 gap-2.5">
-                        {(['Ringan', 'Sedang', 'Berat'] as const).map((lvl) => {
-                          const isSelected = counselingTingkat === lvl;
-                          const activeClass =
-                            lvl === 'Ringan'
-                              ? 'bg-emerald-600 text-white border-emerald-600'
-                              : lvl === 'Sedang'
-                              ? 'bg-amber-600 text-white border-amber-600'
-                              : 'bg-red-600 text-white border-red-600';
-
-                          return (
-                            <button
-                              key={lvl}
-                              type="button"
-                              onClick={() => setCounselingTingkat(lvl)}
-                              className={`py-2.5 px-3 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
-                                isSelected ? `${activeClass} shadow-xs` : 'bg-white hover:bg-gray-100 border-gray-200 text-gray-700'
-                              }`}
-                            >
-                              {lvl}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Uraian Masalah + Rapikan dengan Meta AI */}
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
-                          Uraian Masalah / Cerita Singkat:
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const polished = polishTextWithMetaAi('konseling_individual', counselingRawStory, { topic: counselingTopic });
-                            setCounselingAiPolishedStory(polished);
-                            setCounselingUseAiStory(true);
-                            showToast('✨ Uraian masalah berhasil dirapikan dengan bahasa resmi BK!', 'success');
-                          }}
-                          className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-lg text-xs font-extrabold shadow-2xs transition-all cursor-pointer active:scale-95"
-                          title="Ubah cerita singkat jadi kalimat formal untuk laporan BK"
-                        >
-                          <Sparkles className="w-3.5 h-3.5" />
-                          <span>Rapikan dengan Meta AI</span>
-                        </button>
-                      </div>
-
-                      <textarea
-                        rows={3}
-                        value={counselingUseAiStory && counselingAiPolishedStory ? counselingAiPolishedStory : counselingRawStory}
-                        onChange={(e) => {
-                          if (counselingUseAiStory) {
-                            setCounselingAiPolishedStory(e.target.value);
-                          } else {
-                            setCounselingRawStory(e.target.value);
-                          }
-                        }}
-                        placeholder="Tulis poinnya saja, contoh: telat 3x, sering mengantuk di kelas karena main game sampai malam..."
-                        className="w-full p-3.5 bg-white border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:outline-none leading-relaxed"
-                      />
-
-                      {/* Toggle Versi Rapi Meta AI vs Tulisan Asli */}
-                      {counselingAiPolishedStory && (
-                        <div className="p-3 bg-indigo-50/80 border border-indigo-200 rounded-xl space-y-2">
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-extrabold text-indigo-900 flex items-center gap-1.5">
-                              <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-                              Pilihan Teks Laporan:
-                            </span>
-                            <div className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => setCounselingUseAiStory(false)}
-                                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-                                  !counselingUseAiStory ? 'bg-white text-gray-800 shadow-2xs font-black' : 'text-gray-500 hover:text-gray-900'
-                                }`}
-                              >
-                                Tulisan Asli
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setCounselingUseAiStory(true)}
-                                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-                                  counselingUseAiStory ? 'bg-indigo-600 text-white shadow-2xs font-black' : 'text-gray-500 hover:text-gray-900'
-                                }`}
-                              >
-                                Versi Rapi Meta AI ✓
-                              </button>
-                            </div>
-                          </div>
-                          <p className="text-xs text-indigo-950 font-medium italic leading-relaxed">
-                            "{counselingUseAiStory ? counselingAiPolishedStory : (counselingRawStory || 'Poin catatan konselor')}"
-                          </p>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Rekomendasi Cerdas Meta AI Khusus Topik Ini */}
-                    <div className="bg-gradient-to-r from-indigo-50 via-purple-50 to-teal-50 border border-indigo-200 rounded-xl p-3.5 space-y-1.5">
-                      <div className="flex items-center gap-2">
-                        <Sparkles className="w-4 h-4 text-indigo-600" />
-                        <span className="text-xs font-black text-indigo-950">
-                          Rekomendasi Cerdas Meta AI untuk Topik "{counselingTopic}":
-                        </span>
-                      </div>
-                      <p className="text-xs text-indigo-900 leading-relaxed font-semibold pl-6">
-                        {liveMetaAiRecommendation}
-                      </p>
-                    </div>
-
-                    <div className="flex justify-end pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setActiveAccordion('C')}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-black rounded-xl cursor-pointer shadow-xs active:scale-95 transition-all"
-                      >
-                        <span>Lanjut ke Bagian C: Proses</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* ----------------------------------------------------- */}
-              {/* ACCORDION BAGIAN C - PROSES (TERTUTUP DEFAULT)       */}
-              {/* ----------------------------------------------------- */}
-              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden transition-all">
-                <button
-                  type="button"
-                  onClick={() => setActiveAccordion(activeAccordion === 'C' ? null : 'C')}
-                  className="w-full p-4 sm:p-5 flex items-center justify-between text-left cursor-pointer hover:bg-gray-50/70 transition-colors"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-xl bg-blue-100 text-blue-800 font-black flex items-center justify-center text-sm shadow-2xs">
                       C
                     </div>
                     <div>
                       <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
-                        Bagian C - Proses & Dinamika Sesi
+                        Blok C - Isi Khas Konseling Individual
                       </h4>
-                      <p className="text-[11px] text-gray-500 mt-0.5 font-medium truncate max-w-xs sm:max-w-md">
-                        {counselingTeknik.length} Teknik Dipilih • {counselingDinamika ? 'Dinamika Terisi' : 'Dinamika Draft'}
+                      <p className="text-[11px] text-gray-500 font-medium">
+                        Uraian masalah, proses pendekatan, respon konseli, dan kategori capaian sesi.
                       </p>
                     </div>
                   </div>
+                </div>
 
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold text-gray-400 hidden sm:inline">
-                      {activeAccordion === 'C' ? 'Tutup' : 'Buka'}
-                    </span>
-                    <ChevronDown
-                      className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                        activeAccordion === 'C' ? 'rotate-180 text-blue-700' : ''
-                      }`}
+                <div className="p-4 sm:p-5 space-y-4">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                        Uraian Masalah / Cerita Konseli:
+                      </label>
+                      <button
+                        type="button"
+                        disabled={isPolishingBlokC}
+                        onClick={() =>
+                          handlePolishBlokCText(
+                            'individual',
+                            counselingUseAiStory && counselingAiPolishedStory
+                              ? counselingAiPolishedStory
+                              : counselingRawStory,
+                            (text) => {
+                              setCounselingAiPolishedStory(text);
+                              setCounselingUseAiStory(true);
+                            }
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg text-xs font-extrabold cursor-pointer disabled:opacity-60"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Rapikan dengan Meta AI</span>
+                      </button>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={
+                        counselingUseAiStory && counselingAiPolishedStory
+                          ? counselingAiPolishedStory
+                          : counselingRawStory
+                      }
+                      onChange={(e) => {
+                        if (counselingUseAiStory) setCounselingAiPolishedStory(e.target.value);
+                        else setCounselingRawStory(e.target.value);
+                      }}
+                      placeholder="Tuliskan inti cerita/keluhan konseli (contoh: sering begadang main game, mengantuk di kelas)..."
+                      className="w-full p-3 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
                     />
                   </div>
-                </button>
 
-                {activeAccordion === 'C' && (
-                  <div className="p-4 sm:p-6 border-t border-gray-100 bg-[#f8faf9]/50 space-y-4 animate-in fade-in duration-150">
-                    {/* Teknik Konseling Checklist */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div>
-                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                        Teknik & Pendekatan Konseling (Bisa Pilih Lebih dari 1):
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
+                        Proses &amp; Pendekatan Konseling:
                       </label>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {[
-                          'Solution-Focused Brief Counseling (SFBC)',
-                          'Mendengarkan Aktif (Active Listening)',
-                          'Refleksi Emosi & Pemikiran',
-                          'Klarifikasi & Eksplorasi Masalah',
-                          'Kontrak Perilaku (Behavior Contract)',
-                        ].map((tek) => {
-                          const isChecked = counselingTeknik.includes(tek);
-                          return (
-                            <button
-                              key={tek}
-                              type="button"
-                              onClick={() => handleToggleTeknik(tek)}
-                              className={`p-3 rounded-xl border text-left flex items-center gap-3 transition-all cursor-pointer ${
-                                isChecked
-                                  ? 'bg-blue-50/90 border-blue-400 text-blue-950 font-bold shadow-2xs'
-                                  : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-100'
-                              }`}
-                            >
-                              <div
-                                className={`w-5 h-5 rounded-md flex items-center justify-center transition-colors ${
-                                  isChecked ? 'bg-blue-600 text-white' : 'border border-gray-300 bg-white'
-                                }`}
-                              >
-                                {isChecked && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                              </div>
-                              <span className="text-xs leading-snug">{tek}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Dinamika Sesi + Tombol Bantu Tulis */}
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
-                          Dinamika Sesi Konseling:
-                        </label>
-                        <button
-                          type="button"
-                          onClick={handleBantuTulisDinamika}
-                          className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-lg text-xs font-extrabold shadow-2xs transition-all cursor-pointer active:scale-95"
-                        >
-                          <Sparkles className="w-3.5 h-3.5" />
-                          <span>Bantu Tulis ✨</span>
-                        </button>
-                      </div>
-
-                      <textarea
-                        rows={3}
-                        value={counselingDinamika}
-                        onChange={(e) => setCounselingDinamika(e.target.value)}
-                        placeholder="Tulis dinamika proses konseling, respon emosi siswa, keterbukaan saat diajak bicara, atau klik 'Bantu Tulis ✨'..."
-                        className="w-full p-3.5 bg-white border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:outline-none leading-relaxed"
+                      <input
+                        type="text"
+                        value={indivProsesPendekatan}
+                        onChange={(e) => setIndivProsesPendekatan(e.target.value)}
+                        placeholder="Contoh: SFBC, Active Listening, Behavior Contract"
+                        className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
                       />
                     </div>
-
-                    <div className="flex justify-end pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setActiveAccordion('D')}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-black rounded-xl cursor-pointer shadow-xs active:scale-95 transition-all"
-                      >
-                        <span>Lanjut ke Bagian D: Hasil</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* ----------------------------------------------------- */}
-              {/* ACCORDION BAGIAN D - HASIL (TERTUTUP DEFAULT)         */}
-              {/* ----------------------------------------------------- */}
-              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden transition-all">
-                <button
-                  type="button"
-                  onClick={() => setActiveAccordion(activeAccordion === 'D' ? null : 'D')}
-                  className="w-full p-4 sm:p-5 flex items-center justify-between text-left cursor-pointer hover:bg-gray-50/70 transition-colors"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-800 font-black flex items-center justify-center text-sm shadow-2xs">
-                      D
-                    </div>
                     <div>
-                      <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
-                        Bagian D - Hasil & Kesimpulan Konseling
-                      </h4>
-                      <p className="text-[11px] text-gray-500 mt-0.5 font-medium truncate max-w-xs sm:max-w-md">
-                        Hasil: {counselingHasilKategori}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold text-gray-400 hidden sm:inline">
-                      {activeAccordion === 'D' ? 'Tutup' : 'Buka'}
-                    </span>
-                    <ChevronDown
-                      className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                        activeAccordion === 'D' ? 'rotate-180 text-purple-700' : ''
-                      }`}
-                    />
-                  </div>
-                </button>
-
-                {activeAccordion === 'D' && (
-                  <div className="p-4 sm:p-6 border-t border-gray-100 bg-[#f8faf9]/50 space-y-4 animate-in fade-in duration-150">
-                    {/* Hasil: 5 Pilihan */}
-                    <div>
-                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                        Pencapaian Hasil Konseling:
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
+                        Respon Konseli Saat Sesi:
                       </label>
-                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                        {(['Paham Masalah', 'Temukan Solusi', 'Komitmen', 'Perlu Lanjut', 'Dirujuk'] as const).map((res) => {
-                          const isSelected =
-                            counselingHasilKategori === res ||
-                            (res === 'Komitmen' && counselingHasilKategori === 'Komitmen Perubahan');
-                          return (
-                            <button
-                              key={res}
-                              type="button"
-                              onClick={() => {
-                                setCounselingHasilKategori(res === 'Komitmen' ? 'Komitmen Perubahan' : res);
-                                if (!counselingKesimpulan) {
-                                  if (res === 'Temukan Solusi') {
-                                    setCounselingKesimpulan('Siswa mampu mengidentifikasi akar kendala dan merumuskan langkah solusi nyata.');
-                                  } else if (res === 'Komitmen') {
-                                    setCounselingKesimpulan('Siswa menyepakati kontrak komitmen perbaikan sikap dan disiplin diri.');
-                                  }
-                                }
-                              }}
-                              className={`p-2.5 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
-                                isSelected
-                                  ? 'bg-purple-700 text-white border-purple-700 shadow-xs'
-                                  : 'bg-white hover:bg-gray-100 border-gray-200 text-gray-700'
-                              }`}
-                            >
-                              {res}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Kesimpulan & Komitmen Siswa */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block">
-                          Kesimpulan Konselor:
-                        </label>
-                        <textarea
-                          rows={3}
-                          value={counselingKesimpulan}
-                          onChange={(e) => setCounselingKesimpulan(e.target.value)}
-                          placeholder="Contoh: Siswa menyadari bahwa sering begadang menurunkan performa belajar di kelas..."
-                          className="w-full p-3 bg-white border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs font-semibold text-[#0b1c30] focus:outline-none leading-relaxed"
-                        />
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block">
-                          Komitmen Siswa:
-                        </label>
-                        <textarea
-                          rows={3}
-                          value={counselingKomitmenSiswa}
-                          onChange={(e) => setCounselingKomitmenSiswa(e.target.value)}
-                          placeholder="Contoh: Berjanji membatasi waktu main game maksimal jam 21.00 dan tidur tepat waktu..."
-                          className="w-full p-3 bg-white border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs font-semibold text-[#0b1c30] focus:outline-none leading-relaxed"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="flex justify-end pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setActiveAccordion('E')}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-black rounded-xl cursor-pointer shadow-xs active:scale-95 transition-all"
-                      >
-                        <span>Lanjut ke Bagian E: Tindak Lanjut</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* ----------------------------------------------------- */}
-              {/* ACCORDION BAGIAN E - TINDAK LANJUT (TERTUTUP DEFAULT)  */}
-              {/* ----------------------------------------------------- */}
-              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden transition-all">
-                <button
-                  type="button"
-                  onClick={() => setActiveAccordion(activeAccordion === 'E' ? null : 'E')}
-                  className="w-full p-4 sm:p-5 flex items-center justify-between text-left cursor-pointer hover:bg-gray-50/70 transition-colors"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-800 font-black flex items-center justify-center text-sm shadow-2xs">
-                      E
-                    </div>
-                    <div>
-                      <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
-                        Bagian E - Tindak Lanjut & Evaluasi
-                      </h4>
-                      <p className="text-[11px] text-gray-500 mt-0.5 font-medium truncate max-w-xs sm:max-w-md">
-                        {counselingTindakLanjutMulti.length} Tindak Lanjut • Evaluasi: {counselingJadwalEvaluasi} • Status: {counselingStatusAkhir}
-                      </p>
+                      <input
+                        type="text"
+                        value={indivResponSiswa || counselingDinamika}
+                        onChange={(e) => {
+                          setIndivResponSiswa(e.target.value);
+                          setCounselingDinamika(e.target.value);
+                        }}
+                        placeholder="Contoh: Awalnya malu lalu terbuka dan bersedia berubah"
+                        className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                      />
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold text-gray-400 hidden sm:inline">
-                      {activeAccordion === 'E' ? 'Tutup' : 'Buka'}
-                    </span>
-                    <ChevronDown
-                      className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                        activeAccordion === 'E' ? 'rotate-180 text-emerald-700' : ''
-                      }`}
-                    />
-                  </div>
-                </button>
-
-                {activeAccordion === 'E' && (
-                  <div className="p-4 sm:p-6 border-t border-gray-100 bg-[#f8faf9]/50 space-y-4 animate-in fade-in duration-150">
-                    {/* Tindak Lanjut: Pilih Banyak / Checklist */}
-                    <div>
-                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                        Pilihan Tindak Lanjut (Pilih Banyak / Multi-Select):
-                      </label>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-                        {[
-                          'Pantau 1 Minggu',
-                          'Konseling Lanjutan',
-                          'Panggil Ortu',
-                          'Buat Surat Panggilan',
-                          'Kolaborasi Wali Kelas',
-                          'Alih Tangan',
-                          'Home Visit',
-                        ].map((item) => {
-                          const isChecked = counselingTindakLanjutMulti.includes(item);
-                          return (
-                            <button
-                              key={item}
-                              type="button"
-                              onClick={() => handleToggleTindakLanjutMulti(item)}
-                              className={`p-2.5 rounded-xl border text-left flex items-center gap-2.5 transition-all cursor-pointer ${
-                                isChecked
-                                  ? 'bg-emerald-50 border-emerald-500 text-emerald-950 font-black shadow-2xs'
-                                  : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-100'
-                              }`}
-                            >
-                              <div
-                                className={`w-4 h-4 rounded flex items-center justify-center ${
-                                  isChecked ? 'bg-emerald-600 text-white' : 'border border-gray-300 bg-white'
-                                }`}
-                              >
-                                {isChecked && <Check className="w-3 h-3 stroke-[3]" />}
-                              </div>
-                              <span className="text-xs truncate">{item}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
-                      {/* Jadwal Evaluasi (7 Hari Lagi) */}
-                      <div className="p-3.5 bg-white rounded-xl border border-gray-200/80">
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Jadwal Evaluasi (Otomatis 7 Hari Lagi):
-                        </label>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="date"
-                            value={counselingJadwalEvaluasi}
-                            onChange={(e) => setCounselingJadwalEvaluasi(e.target.value)}
-                            className="w-full bg-gray-50 border border-gray-200 rounded-lg p-2 text-xs font-black text-[#0b1c30] focus:outline-none focus:border-[#00685f]"
-                          />
+                  <div>
+                    <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
+                      Pencapaian Hasil Konseling:
+                    </label>
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                      {(
+                        [
+                          'Paham Masalah',
+                          'Temukan Solusi',
+                          'Komitmen Perubahan',
+                          'Perlu Lanjut',
+                          'Dirujuk',
+                        ] as const
+                      ).map((res) => {
+                        const selected = counselingHasilKategori === res;
+                        return (
                           <button
+                            key={res}
                             type="button"
-                            onClick={() => {
-                              const d = new Date();
-                              d.setDate(d.getDate() + 7);
-                              setCounselingJadwalEvaluasi(d.toISOString().slice(0, 10));
-                              showToast('Jadwal evaluasi disetel ke 7 hari lagi.', 'info');
-                            }}
-                            className="px-2.5 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer"
+                            onClick={() => setCounselingHasilKategori(res)}
+                            className={`p-2.5 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
+                              selected
+                                ? 'bg-[#00685f] text-white border-[#00685f] shadow-2xs'
+                                : 'bg-gray-50 text-[#0b1c30] border-gray-200 hover:bg-gray-100'
+                            }`}
                           >
-                            Reset 7 Hari
+                            {res === 'Komitmen Perubahan' ? 'Komitmen' : res}
                           </button>
-                        </div>
-                        <p className="text-[10px] text-gray-500 mt-1">
-                          *Pemantauan rutin perkembangan perilaku dan kepatuhan komitmen siswa.
-                        </p>
-                      </div>
-
-                      {/* Status Kasus/Layanan */}
-                      <div className="p-3.5 bg-white rounded-xl border border-gray-200/80">
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Status Penanganan Sesi:
-                        </label>
-                        <div className="grid grid-cols-3 gap-1.5 mt-1.5">
-                          {(['Selesai', 'Berlanjut', 'Dirujuk'] as const).map((st) => {
-                            const isSelected = counselingStatusAkhir === st;
-                            return (
-                              <button
-                                key={st}
-                                type="button"
-                                onClick={() => {
-                                  setCounselingStatusAkhir(st);
-                                  setStatus(st === 'Dirujuk' ? 'Selesai' : (st as any));
-                                }}
-                                className={`py-2 rounded-lg text-xs font-black transition-all cursor-pointer ${
-                                  isSelected
-                                    ? 'bg-[#00685f] text-white shadow-xs'
-                                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                }`}
-                              >
-                                {st}
-                              </button>
-                            );
-                          })}
-                        </div>
-                        <p className="text-[10px] text-gray-500 mt-2">
-                          {counselingStatusAkhir === 'Selesai'
-                            ? 'Kasus dinyatakan selesai dengan komitmen perbaikan.'
-                            : counselingStatusAkhir === 'Berlanjut'
-                            ? 'Akan diagendakan konseling lanjutan pertemuan berikutnya.'
-                            : 'Direkomendasikan alih tangan kasus ke tenaga spesialis.'}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex justify-end pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setActiveAccordion('F')}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-black rounded-xl cursor-pointer shadow-xs active:scale-95 transition-all"
-                      >
-                        <span>Lanjut ke Bagian F: Lembar Penutup</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
+                        );
+                      })}
                     </div>
                   </div>
-                )}
+
+                  <div
+                    onClick={() => setCounselingAgreedConfidentiality(!counselingAgreedConfidentiality)}
+                    className={`p-3 rounded-xl border flex items-center gap-2.5 cursor-pointer text-xs ${
+                      counselingAgreedConfidentiality
+                        ? 'bg-teal-50/70 border-teal-300 text-teal-950'
+                        : 'bg-gray-50 border-gray-200 text-gray-600'
+                    }`}
+                  >
+                    <ShieldCheck className="w-4 h-4 text-[#00685f] shrink-0" />
+                    <span className="font-bold">
+                      Asas Kerahasiaan ABKIN: Data sesi ini dijaga kerahasiaannya oleh {activeCounselorInfo.name}.
+                    </span>
+                  </div>
+                </div>
               </div>
 
-              {/* ----------------------------------------------------- */}
-              {/* ACCORDION BAGIAN F - PENUTUP (TERTUTUP DEFAULT)      */}
-              {/* ----------------------------------------------------- */}
-              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden transition-all">
+              <StandardBlokDTindakLanjut
+                value={stdBlokD}
+                onChange={setStdBlokD}
+                aiRecommendation={currentContextualAiText}
+                isGeneratingAi={isGeneratingStdAi}
+                onGenerateAiRecommendation={handleRefreshContextualAi}
+              />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <button
                   type="button"
-                  onClick={() => setActiveAccordion(activeAccordion === 'F' ? null : 'F')}
-                  className="w-full p-4 sm:p-5 flex items-center justify-between text-left cursor-pointer hover:bg-gray-50/70 transition-colors"
+                  onClick={handleFinalSubmit}
+                  className="w-full py-3.5 px-5 bg-gradient-to-r from-teal-700 to-[#00685f] hover:from-teal-800 hover:to-[#005049] text-white rounded-xl font-black text-sm flex items-center justify-center gap-2.5 shadow-md transition-all cursor-pointer active:scale-98"
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-xl bg-slate-100 text-slate-800 font-black flex items-center justify-center text-sm shadow-2xs">
-                      F
-                    </div>
-                    <div>
-                      <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
-                        Bagian F - Penutup & Lembar Pengesahan
-                      </h4>
-                      <p className="text-[11px] text-gray-500 mt-0.5 font-medium truncate max-w-xs sm:max-w-md">
-                        Jaminan Kerahasiaan ABKIN & Pengesahan Guru BK
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold text-gray-400 hidden sm:inline">
-                      {activeAccordion === 'F' ? 'Tutup' : 'Buka'}
-                    </span>
-                    <ChevronDown
-                      className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                        activeAccordion === 'F' ? 'rotate-180 text-slate-800' : ''
-                      }`}
-                    />
-                  </div>
+                  <CheckCircle2 className="w-5 h-5 text-white" />
+                  <span>Simpan Laporan Resmi</span>
                 </button>
-
-                {activeAccordion === 'F' && (
-                  <div className="p-4 sm:p-6 border-t border-gray-100 bg-[#f8faf9]/50 space-y-4 animate-in fade-in duration-150">
-                    {/* Checkbox Jaminan Kerahasiaan ABKIN */}
-                    <div
-                      onClick={() => setCounselingAgreedConfidentiality(!counselingAgreedConfidentiality)}
-                      className={`p-4 rounded-xl border-2 flex items-start gap-3.5 transition-all cursor-pointer ${
-                        counselingAgreedConfidentiality
-                          ? 'bg-teal-50/80 border-teal-500/70 text-teal-950'
-                          : 'bg-white border-gray-200 text-gray-700'
-                      }`}
-                    >
-                      <div
-                        className={`w-5 h-5 rounded mt-0.5 flex items-center justify-center transition-colors ${
-                          counselingAgreedConfidentiality ? 'bg-[#00685f] text-white' : 'border border-gray-300 bg-white'
-                        }`}
-                      >
-                        {counselingAgreedConfidentiality && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                      </div>
-                      <div className="space-y-0.5 flex-1">
-                        <div className="flex items-center gap-1.5 font-black text-xs sm:text-sm">
-                          <ShieldCheck className="w-4 h-4 text-[#00685f]" />
-                          <span>Pernyataan Kepatuhan Asas Kerahasiaan ABKIN</span>
-                        </div>
-                        <p className="text-xs leading-relaxed text-gray-600 font-medium">
-                          Saya menyatakan bahwa konseling ini diselenggarakan dengan menjunjung tinggi Asas Kerahasiaan Kode Etik Bimbingan & Konseling (ABKIN). Seluruh isi pembicaraan dilindungi dan hanya digunakan untuk kepentingan perkembangan positif konseli.
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Lembar Tanda Tangan Resmi Guru BK */}
-                    <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-200/90 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                      <div className="space-y-1">
-                        <span className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">
-                          Pengesahan Konselor Sekolah
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <PenTool className="w-4 h-4 text-[#00685f]" />
-                          <p className="text-sm font-black text-[#0b1c30]">
-                            {activeCounselorInfo.name}
-                          </p>
-                        </div>
-                        <p className="text-xs text-gray-500 font-semibold">
-                          NIP. {activeCounselorInfo.nip}
-                        </p>
-                      </div>
-
-                      <div className="p-3 bg-teal-50 border border-teal-200 rounded-xl text-right sm:min-w-[200px]">
-                        <span className="text-[10px] uppercase font-black text-teal-800 bg-white px-2 py-0.5 rounded border border-teal-200">
-                          Tervalidasi Digital
-                        </span>
-                        <p className="text-xs font-black text-[#0b1c30] mt-1">
-                          {date} • {time} WIB
-                        </p>
-                        <p className="text-[10px] text-gray-500 font-medium">
-                          {counselingTempat}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Tombol Aksi Langsung di Bagian F: [Simpan Laporan Resmi] [Download PDF] */}
-                    <div className="pt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <button
-                        type="button"
-                        onClick={handleFinalSubmit}
-                        className="w-full py-3.5 px-5 bg-gradient-to-r from-teal-700 to-[#00685f] hover:from-teal-800 hover:to-[#005049] text-white rounded-xl font-black text-sm flex items-center justify-center gap-2.5 shadow-lg shadow-teal-900/20 hover:shadow-xl transition-all cursor-pointer active:scale-98"
-                      >
-                        <CheckCircle2 className="w-5 h-5 text-white" />
-                        <span>Simpan Laporan Resmi</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleDownloadKonselingIndividualPdf}
-                        className="w-full py-3.5 px-5 bg-white hover:bg-teal-50 text-[#00685f] border-2 border-[#00685f] rounded-xl font-black text-sm flex items-center justify-center gap-2.5 shadow-xs transition-all cursor-pointer active:scale-98"
-                      >
-                        <Download className="w-4 h-4 text-[#00685f]" />
-                        <span>Download PDF Laporan Ini</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
+                <button
+                  type="button"
+                  onClick={handleDownloadKonselingIndividualPdf}
+                  className="w-full py-3.5 px-5 bg-white hover:bg-teal-50 text-[#00685f] border-2 border-[#00685f] rounded-xl font-black text-sm flex items-center justify-center gap-2.5 shadow-xs transition-all cursor-pointer active:scale-98"
+                >
+                  <Download className="w-4 h-4 text-[#00685f]" />
+                  <span>Download PDF Laporan Ini</span>
+                </button>
               </div>
             </div>
           )}
@@ -3691,521 +3681,228 @@ export default function TambahLayananForm({
           {/* ========================================================= */}
           {isBimbinganKlasikalOnly && (
             <div className="space-y-4">
-              {/* Header Banner Khusus Bimbingan Klasikal */}
-              <div className="p-4 sm:p-5 bg-gradient-to-r from-teal-50 via-emerald-50 to-white rounded-2xl border border-teal-200/80 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-[#00685f] text-white flex items-center justify-center font-black shadow-xs shrink-0">
-                    <BookOpen className="w-5 h-5 text-white" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-black text-[#00685f] uppercase tracking-wider">
-                        Bimbingan Klasikal
-                      </span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-purple-100 text-purple-800 flex items-center gap-1">
-                        <Sparkles className="w-3 h-3" /> Dibantu Meta AI ✨
-                      </span>
-                    </div>
-                    <h3 className="text-base sm:text-lg font-black text-[#0b1c30]">
-                      Laporan & RPL Kelas {selectedClass || '8A'}
-                    </h3>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-gray-600 bg-white/80 p-2 rounded-xl border border-teal-100">
-                  <span>📅 {date}</span>
-                  <span>•</span>
-                  <span>⏱️ Jam Ke-{klasikalJamKe}</span>
-                  <span>•</span>
-                  <span>👥 {klasikalHadir} Hadir ({klasikalTidakHadir} Absen)</span>
-                  <span>•</span>
-                  <span>📍 {klasikalTempat}</span>
+              {/* Peringatan Khas Klasikal (Wajib Jelas di Atas) */}
+              <div className="p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl flex items-start gap-3 shadow-2xs">
+                <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs sm:text-sm font-black text-amber-950">
+                    Ini layanan klasikal, interpretasi untuk dinamika kelas, bukan 1 siswa.
+                  </p>
+                  <p className="text-[11px] text-amber-800 font-medium mt-0.5">
+                    Evaluasi Bimbingan Klasikal menilai ketercapaian tujuan kelas, partisipasi kelas, kesesuaian metode, dan kesiapan tindak lanjut (tanpa skor keterbukaan/perilaku individual).
+                  </p>
                 </div>
               </div>
 
-              {/* ACCORDION CONTAINER */}
-              <div className="space-y-3">
-                {/* ------------------------------------------------------------- */}
-                {/* BAGIAN A: RPL (Rencana Pelaksanaan Layanan)                   */}
-                {/* ------------------------------------------------------------- */}
-                <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setActiveAccordionKlasikal(activeAccordionKlasikal === 'A' ? null : 'A')}
-                    className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-gray-50/70 transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs ${
-                        activeAccordionKlasikal === 'A' ? 'bg-[#00685f] text-white' : 'bg-gray-100 text-gray-700'
-                      }`}>
-                        A
-                      </span>
-                      <div>
-                        <h4 className="text-sm sm:text-base font-black text-[#0b1c30]">
-                          A. RPL (Rencana Pelaksanaan Layanan)
-                        </h4>
-                        <p className="text-xs text-gray-500 font-medium">
-                          Bidang bimbingan, topik/judul materi, dan rumusan tujuan layanan
-                        </p>
+              {/* BLOK A: IDENTITAS */}
+              <StandardBlokAIdentitas
+                sasaranLabel={`Kelas ${selectedClass || '8A'} (${klasikalHadir}/${klasikalTotalSiswa} Siswa)`}
+                sasaranSubLabel="Layanan Bimbingan Klasikal • Dinamika Rombongan Belajar"
+                counselorName={activeCounselorInfo.name}
+                counselorNip={activeCounselorInfo.nip}
+                date={date}
+                onDateChange={setDate}
+                time={time}
+                onTimeChange={setTime}
+                tempat={stdTempat || klasikalTempat}
+                onTempatChange={(v) => {
+                  setStdTempat(v);
+                  setKlasikalTempat(v);
+                }}
+                pertemuanKe={stdPertemuanKe}
+                onPertemuanKeChange={setStdPertemuanKe}
+                sifatLayanan={stdSifatLayanan}
+                onSifatLayananChange={setStdSifatLayanan}
+                extraBadge="Bimbingan Klasikal"
+              />
+
+              {/* BLOK B: KONTEKS TERSTANDAR */}
+              <StandardBlokBKonteks value={stdBlokB} onChange={setStdBlokB} />
+
+              {/* BLOK C: ISI KHAS BIMBINGAN KLASIKAL */}
+              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
+                <div className="p-4 sm:p-5 border-b border-gray-100 flex items-center justify-between bg-[#f8faf9]/70">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-800 font-black flex items-center justify-center text-sm">
+                      C
+                    </div>
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
+                        Blok C - Isi Khas Bimbingan Klasikal (Dinamika Kelas)
+                      </h4>
+                      <p className="text-[11px] text-gray-500 font-medium">
+                        Kelas, kehadiran rombel, topik klasikal, dinamika kelas, dan contoh respon siswa di kelas.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-4 sm:p-5 space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
+                        Kelas Sasaran:
+                      </label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {availableClasses.slice(0, 8).map((cls) => (
+                          <button
+                            key={cls}
+                            type="button"
+                            onClick={() => handleSelectKlasikalClass(cls)}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-black border transition-all cursor-pointer ${
+                              selectedClass === cls
+                                ? 'bg-[#00685f] text-white border-[#00685f]'
+                                : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
+                            }`}
+                          >
+                            {cls}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                    <ChevronDown className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                      activeAccordionKlasikal === 'A' ? 'rotate-180 text-[#00685f]' : ''
-                    }`} />
-                  </button>
 
-                  {activeAccordionKlasikal === 'A' && (
-                    <div className="p-4 sm:p-6 border-t border-gray-100 space-y-4 bg-white animate-in fade-in duration-150">
-                      {/* Bidang Bimbingan */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                          Bidang Bimbingan:
-                        </label>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                          {(['Pribadi', 'Sosial', 'Belajar', 'Karir'] as const).map((bid) => {
-                            const isSelected = klasikalBidang === bid;
-                            return (
-                              <button
-                                key={bid}
-                                type="button"
-                                onClick={() => setKlasikalBidang(bid)}
-                                className={`p-3 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
-                                  isSelected
-                                    ? 'bg-[#00685f] text-white border-[#00685f] shadow-xs ring-1 ring-[#00685f]'
-                                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
-                                }`}
-                              >
-                                Bidang {bid}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
+                    <div>
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
+                        Jumlah Siswa Hadir:
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={klasikalHadir}
+                        onChange={(e) => setKlasikalHadir(Number(e.target.value))}
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-black text-[#0b1c30]"
+                      />
+                    </div>
 
-                      {/* Topik / Judul Materi */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                          Topik / Judul Materi:
-                        </label>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
-                          {MATERI_KLASIKAL_OPTIONS.map((m) => {
-                            const isSelected = klasikalTopik === m;
-                            return (
-                              <button
-                                key={m}
-                                type="button"
-                                onClick={() => {
-                                  setKlasikalTopik(m);
-                                  setKlasikalMateri(m);
-                                }}
-                                className={`p-2.5 rounded-xl border text-center text-xs font-bold transition-all cursor-pointer ${
-                                  isSelected
-                                    ? 'bg-teal-50 border-[#00685f] text-[#00685f] font-black ring-1 ring-[#00685f]'
-                                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
-                                }`}
-                              >
-                                {m}
-                              </button>
-                            );
-                          })}
-                        </div>
-                        <input
-                          type="text"
-                          value={klasikalTopik}
-                          onChange={(e) => {
-                            setKlasikalTopik(e.target.value);
-                            setKlasikalMateri(e.target.value);
+                    <div>
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
+                        Total Siswa Rombel:
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={klasikalTotalSiswa}
+                        onChange={(e) => setKlasikalTotalSiswa(Number(e.target.value))}
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-black text-[#0b1c30]"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                        Topik Klasikal:
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleBuatkanTujuanDariTopik}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-extrabold cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Buatkan Tujuan RPL</span>
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {MATERI_KLASIKAL_OPTIONS.map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => {
+                            setKlasikalTopik(m);
+                            setKlasikalMateri(m);
                           }}
-                          placeholder="Ketik topik materi klasikal atau pilih tombol di atas..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Tujuan Layanan + Tombol AI */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
-                            Tujuan Layanan:
-                          </label>
-                          <button
-                            type="button"
-                            onClick={handleBuatkanTujuanDariTopik}
-                            className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-lg text-xs font-extrabold shadow-2xs transition-all cursor-pointer active:scale-95"
-                          >
-                            <Sparkles className="w-3.5 h-3.5" />
-                            <span>✨ Buatkan Tujuan dari Topik</span>
-                          </button>
-                        </div>
-                        <textarea
-                          rows={3}
-                          value={klasikalTujuan}
-                          onChange={(e) => setKlasikalTujuan(e.target.value)}
-                          placeholder="Tuliskan tujuan layanan (tahap pengenalan, akomodasi, dan tindakan)..."
-                          className="w-full p-3.5 bg-gray-50 border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* ------------------------------------------------------------- */}
-                {/* BAGIAN B: PELAKSANAAN                                         */}
-                {/* ------------------------------------------------------------- */}
-                <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setActiveAccordionKlasikal(activeAccordionKlasikal === 'B' ? null : 'B')}
-                    className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-gray-50/70 transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs ${
-                        activeAccordionKlasikal === 'B' ? 'bg-[#00685f] text-white' : 'bg-gray-100 text-gray-700'
-                      }`}>
-                        B
-                      </span>
-                      <div>
-                        <h4 className="text-sm sm:text-base font-black text-[#0b1c30]">
-                          B. Pelaksanaan
-                        </h4>
-                        <p className="text-xs text-gray-500 font-medium">
-                          Uraian materi yang disampaikan, metode bimbingan, dan media layanan
-                        </p>
-                      </div>
-                    </div>
-                    <ChevronDown className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                      activeAccordionKlasikal === 'B' ? 'rotate-180 text-[#00685f]' : ''
-                    }`} />
-                  </button>
-
-                  {activeAccordionKlasikal === 'B' && (
-                    <div className="p-4 sm:p-6 border-t border-gray-100 space-y-4 bg-white animate-in fade-in duration-150">
-                      {/* Materi yang Disampaikan + Tombol AI */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
-                            Materi yang Disampaikan:
-                          </label>
-                          <button
-                            type="button"
-                            onClick={handleBantuTulisMateriKlasikal}
-                            className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-teal-600 to-[#00685f] hover:from-teal-700 text-white rounded-lg text-xs font-extrabold shadow-2xs transition-all cursor-pointer active:scale-95"
-                          >
-                            <Sparkles className="w-3.5 h-3.5" />
-                            <span>✨ Bantu Tulis Materi</span>
-                          </button>
-                        </div>
-                        <textarea
-                          rows={4}
-                          value={klasikalMateriUraian}
-                          onChange={(e) => setKlasikalMateriUraian(e.target.value)}
-                          placeholder="Tuliskan uraian poin-poin materi yang dipaparkan kepada siswa di kelas..."
-                          className="w-full p-3.5 bg-gray-50 border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Metode Checklist */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                          Metode Bimbingan (Bisa pilih beberapa):
-                        </label>
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                          {[
-                            'Ceramah',
-                            'Diskusi Kelompok',
-                            'Role Play',
-                            'Games',
-                            'Studi Kasus',
-                            'Tanya Jawab'
-                          ].map((met) => {
-                            const isChecked = klasikalMetode.includes(met);
-                            return (
-                              <button
-                                key={met}
-                                type="button"
-                                onClick={() => handleToggleMetode(met)}
-                                className={`p-2.5 rounded-xl border flex items-center gap-2 text-xs font-bold text-left transition-all cursor-pointer ${
-                                  isChecked
-                                    ? 'bg-teal-50 border-[#00685f] text-[#00685f] font-black ring-1 ring-[#00685f]'
-                                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
-                                }`}
-                              >
-                                {isChecked ? (
-                                  <CheckSquare className="w-4 h-4 text-[#00685f] shrink-0" />
-                                ) : (
-                                  <Square className="w-4 h-4 text-gray-400 shrink-0" />
-                                )}
-                                <span>{met}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Media Checklist */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                          Media Layanan (Bisa pilih beberapa):
-                        </label>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                          {['PPT', 'Video', 'Lembar Kerja', 'Papan Tulis'].map((med) => {
-                            const isChecked = klasikalMedia.includes(med);
-                            return (
-                              <button
-                                key={med}
-                                type="button"
-                                onClick={() => handleToggleMedia(med)}
-                                className={`p-2.5 rounded-xl border flex items-center gap-2 text-xs font-bold text-left transition-all cursor-pointer ${
-                                  isChecked
-                                    ? 'bg-teal-50 border-[#00685f] text-[#00685f] font-black ring-1 ring-[#00685f]'
-                                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
-                                }`}
-                              >
-                                {isChecked ? (
-                                  <CheckSquare className="w-4 h-4 text-[#00685f] shrink-0" />
-                                ) : (
-                                  <Square className="w-4 h-4 text-gray-400 shrink-0" />
-                                )}
-                                <span>{med}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* ------------------------------------------------------------- */}
-                {/* BAGIAN C: EVALUASI (Laiseg, Laijapen, Laijapang)              */}
-                {/* ------------------------------------------------------------- */}
-                <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setActiveAccordionKlasikal(activeAccordionKlasikal === 'C' ? null : 'C')}
-                    className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-gray-50/70 transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs ${
-                        activeAccordionKlasikal === 'C' ? 'bg-[#00685f] text-white' : 'bg-gray-100 text-gray-700'
-                      }`}>
-                        C
-                      </span>
-                      <div>
-                        <h4 className="text-sm sm:text-base font-black text-[#0b1c30]">
-                          C. Evaluasi
-                        </h4>
-                        <p className="text-xs text-gray-500 font-medium">
-                          Laiseg (segera), Laijapen (jangka pendek), Laijapang (jangka panjang), & hasil
-                        </p>
-                      </div>
-                    </div>
-                    <ChevronDown className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                      activeAccordionKlasikal === 'C' ? 'rotate-180 text-[#00685f]' : ''
-                    }`} />
-                  </button>
-
-                  {activeAccordionKlasikal === 'C' && (
-                    <div className="p-4 sm:p-6 border-t border-gray-100 space-y-4 bg-white animate-in fade-in duration-150">
-                      {/* Laiseg */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Laiseg (Penilaian Segera):
-                        </label>
-                        <p className="text-[11px] text-gray-500 mb-1.5 font-medium">
-                          Apa yang dirasakan dan dipahami siswa saat layanan berlangsung hari ini?
-                        </p>
-                        <textarea
-                          rows={2}
-                          value={klasikalLaiseg}
-                          onChange={(e) => setKlasikalLaiseg(e.target.value)}
-                          placeholder="Contoh: Siswa aktif berdiskusi, antusias menyimak video, dan memahami dampak bullying..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Laijapen */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Laijapen (Penilaian Jangka Pendek):
-                        </label>
-                        <p className="text-[11px] text-gray-500 mb-1.5 font-medium">
-                          Perubahan sikap atau perilaku yang diharapkan dalam 1 minggu ke depan:
-                        </p>
-                        <textarea
-                          rows={2}
-                          value={klasikalLaijapen}
-                          onChange={(e) => setKlasikalLaijapen(e.target.value)}
-                          placeholder="Contoh: Menurunnya ejekan verbal di kelas dan siswa mempraktikkan manajemen waktu..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Laijapang */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Laijapang (Penilaian Jangka Panjang):
-                        </label>
-                        <p className="text-[11px] text-gray-500 mb-1.5 font-medium">
-                          Perubahan jangka panjang dan pembiasaan budaya positif di sekolah:
-                        </p>
-                        <textarea
-                          rows={2}
-                          value={klasikalLaijapang}
-                          onChange={(e) => setKlasikalLaijapang(e.target.value)}
-                          placeholder="Contoh: Terbentuknya lingkungan kelas yang saling menghormati dan motivasi belajar meningkat..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Hasil Evaluasi */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                          Ketercapaian Hasil Layanan:
-                        </label>
-                        <div className="grid grid-cols-3 gap-2">
-                          {(['Tercapai', 'Sebagian', 'Belum Tercapai'] as const).map((h) => {
-                            const isSelected = klasikalHasilEvaluasi === h;
-                            return (
-                              <button
-                                key={h}
-                                type="button"
-                                onClick={() => setKlasikalHasilEvaluasi(h)}
-                                className={`p-3 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
-                                  isSelected
-                                    ? h === 'Tercapai'
-                                      ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
-                                      : h === 'Sebagian'
-                                      ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
-                                      : 'bg-rose-600 text-white border-rose-600 shadow-xs'
-                                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
-                                }`}
-                              >
-                                {h}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* ------------------------------------------------------------- */}
-                {/* BAGIAN D: TINDAK LANJUT                                       */}
-                {/* ------------------------------------------------------------- */}
-                <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setActiveAccordionKlasikal(activeAccordionKlasikal === 'D' ? null : 'D')}
-                    className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-gray-50/70 transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs ${
-                        activeAccordionKlasikal === 'D' ? 'bg-[#00685f] text-white' : 'bg-gray-100 text-gray-700'
-                      }`}>
-                        D
-                      </span>
-                      <div>
-                        <h4 className="text-sm sm:text-base font-black text-[#0b1c30]">
-                          D. Tindak Lanjut
-                        </h4>
-                        <p className="text-xs text-gray-500 font-medium">
-                          Rekomendasi tindak lanjut, siswa yang butuh penanganan khusus, & pertemuan berikutnya
-                        </p>
-                      </div>
-                    </div>
-                    <ChevronDown className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                      activeAccordionKlasikal === 'D' ? 'rotate-180 text-[#00685f]' : ''
-                    }`} />
-                  </button>
-
-                  {activeAccordionKlasikal === 'D' && (
-                    <div className="p-4 sm:p-6 border-t border-gray-100 space-y-4 bg-white animate-in fade-in duration-150">
-                      {/* Checklist Tindak Lanjut */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                          Tindak Lanjut Pasca Layanan (Bisa pilih beberapa):
-                        </label>
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                          {[
-                            'Siswa perlu Konseling Individual',
-                            'Perlu Home Visit',
-                            'Lanjut Materi Berikutnya'
-                          ].map((item) => {
-                            const isChecked = klasikalTindakLanjutChecklist.includes(item);
-                            return (
-                              <button
-                                key={item}
-                                type="button"
-                                onClick={() => handleToggleKlasikalTindakLanjut(item)}
-                                className={`p-3 rounded-xl border flex items-center gap-2 text-xs font-bold text-left transition-all cursor-pointer ${
-                                  isChecked
-                                    ? 'bg-teal-50 border-[#00685f] text-[#00685f] font-black ring-1 ring-[#00685f]'
-                                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
-                                }`}
-                              >
-                                {isChecked ? (
-                                  <CheckSquare className="w-4 h-4 text-[#00685f] shrink-0" />
-                                ) : (
-                                  <Square className="w-4 h-4 text-gray-400 shrink-0" />
-                                )}
-                                <span>{item}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Nama Siswa yang Perlu Ditindaklanjuti */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Nama Siswa yang Perlu Ditindaklanjuti (Jika ada):
-                        </label>
-                        <input
-                          type="text"
-                          value={klasikalSiswaPerluLanjut}
-                          onChange={(e) => setKlasikalSiswaPerluLanjut(e.target.value)}
-                          placeholder="Contoh: Ahmad Nur Wahid (perlu konseling individual terkait fokus belajar)"
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Rencana Pertemuan Berikutnya */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Rencana Pertemuan Berikutnya:
-                        </label>
-                        <input
-                          type="text"
-                          value={klasikalRencanaBerikutnya}
-                          onChange={(e) => setKlasikalRencanaBerikutnya(e.target.value)}
-                          placeholder="Contoh: Pertemuan ke-2 materi Anti Bullying pada pekan depan (Selasa)"
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Tombol Aksi di Accordion D */}
-                      <div className="pt-3 border-t border-gray-100 flex flex-col sm:flex-row items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={handleFinalSubmit}
-                          className="w-full sm:flex-1 py-3.5 px-5 bg-gradient-to-r from-teal-600 to-[#00685f] hover:from-teal-700 hover:to-[#005049] text-white rounded-xl font-black text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-98"
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border cursor-pointer ${
+                            klasikalTopik === m
+                              ? 'bg-teal-50 border-[#00685f] text-[#00685f]'
+                              : 'bg-gray-50 border-gray-200 text-gray-600'
+                          }`}
                         >
-                          <CheckCircle2 className="w-5 h-5 text-white" />
-                          <span>Simpan Laporan Klasikal</span>
+                          {m}
                         </button>
-                        <button
-                          type="button"
-                          onClick={handleDownloadKlasikalPdf}
-                          className="w-full sm:w-auto py-3.5 px-5 bg-white hover:bg-teal-50 text-[#00685f] border-2 border-[#00685f] rounded-xl font-black text-sm flex items-center justify-center gap-2 shadow-xs transition-all cursor-pointer active:scale-98 shrink-0"
-                        >
-                          <Download className="w-4 h-4 text-[#00685f]" />
-                          <span>Download PDF RPL</span>
-                        </button>
-                      </div>
+                      ))}
                     </div>
-                  )}
+                    <input
+                      type="text"
+                      value={klasikalTopik}
+                      onChange={(e) => {
+                        setKlasikalTopik(e.target.value);
+                        setKlasikalMateri(e.target.value);
+                      }}
+                      placeholder="Tulis topik bimbingan klasikal..."
+                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
+                      Dinamika Kelas:
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['Aktif', 'Pasif', 'Gaduh'] as const).map((din) => (
+                        <button
+                          key={din}
+                          type="button"
+                          onClick={() => setKlasikalDinamikaKelas(din)}
+                          className={`py-2.5 px-3 rounded-xl border text-xs font-black transition-all cursor-pointer ${
+                            klasikalDinamikaKelas === din
+                              ? 'bg-[#00685f] text-white border-[#00685f] shadow-2xs'
+                              : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
+                          }`}
+                        >
+                          {din}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                        Contoh Respon Siswa di Kelas (1 kalimat):
+                      </label>
+                      <button
+                        type="button"
+                        disabled={isPolishingBlokC}
+                        onClick={() =>
+                          handlePolishBlokCText('klasikal', klasikalResponSiswa, setKlasikalResponSiswa)
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg text-xs font-extrabold cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Rapikan dengan Meta AI</span>
+                      </button>
+                    </div>
+                    <textarea
+                      rows={2}
+                      value={klasikalResponSiswa}
+                      onChange={(e) => setKlasikalResponSiswa(e.target.value)}
+                      placeholder="Contoh: Mayoritas siswa antusias berdiskusi studi kasus, namun 2 barisan belakang masih pasif."
+                      className="w-full p-3 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                    />
+                  </div>
                 </div>
+              </div>
+
+              {/* BLOK D: KESEPAKATAN & TINDAK LANJUT */}
+              <StandardBlokDTindakLanjut
+                value={stdBlokD}
+                onChange={setStdBlokD}
+                aiRecommendation={currentContextualAiText}
+                isGeneratingAi={isGeneratingStdAi}
+                onGenerateAiRecommendation={handleRefreshContextualAi}
+              />
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <button
+                  type="button"
+                  onClick={handleDownloadKlasikalPdf}
+                  className="w-full sm:w-auto py-3 px-5 bg-white hover:bg-teal-50 text-[#00685f] border-2 border-[#00685f] rounded-xl font-black text-xs sm:text-sm flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Download className="w-4 h-4 text-[#00685f]" />
+                  <span>Simpan & Download PDF RPL</span>
+                </button>
               </div>
             </div>
           )}
@@ -4395,513 +4092,759 @@ export default function TambahLayananForm({
           )}
 
           {/* ========================================================= */}
-          {/* 4. FORM KONSELING KELOMPOK                                */}
+          {/* 4A. FORM KONSELING KELOMPOK (BLOK A-D TERSTANDAR)         */}
           {/* ========================================================= */}
           {isFormKonselingKelompok && (
-            <div className="bg-white p-5 sm:p-6 rounded-2xl border border-[#bcc9c6]/40 shadow-xs space-y-4">
-              <div>
-                <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                  Topik Masalah Kelompok:
-                </label>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {TOPIK_POPULER.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setCounselingTopic(item.id)}
-                      className={`p-2.5 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
-                        counselingTopic === item.id ? 'bg-[#00685f] text-white border-[#00685f]' : 'bg-gray-50 border-gray-200 text-gray-700'
-                      }`}
+            <div className="space-y-4">
+              <StandardBlokAIdentitas
+                sasaranLabel={
+                  kelompokParticipants.length > 0
+                    ? `${kelompokParticipants.map((p) => p.nama).slice(0, 3).join(', ')}${kelompokParticipants.length > 3 ? ` +${kelompokParticipants.length - 3}` : ''} (${kelompokParticipants.length} Peserta)`
+                    : studentDisplayText
+                }
+                sasaranSubLabel="Layanan Konseling Kelompok • Format Terstandar"
+                counselorName={activeCounselorInfo.name}
+                counselorNip={activeCounselorInfo.nip}
+                date={date}
+                onDateChange={setDate}
+                time={time}
+                onTimeChange={setTime}
+                tempat={stdTempat}
+                onTempatChange={setStdTempat}
+                pertemuanKe={stdPertemuanKe}
+                onPertemuanKeChange={setStdPertemuanKe}
+                sifatLayanan={stdSifatLayanan}
+                onSifatLayananChange={setStdSifatLayanan}
+                extraBadge="Konseling Kelompok"
+              />
+
+              <StandardBlokBKonteks value={stdBlokB} onChange={setStdBlokB} />
+
+              {/* BLOK C KHAS KONSELING KELOMPOK */}
+              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
+                <div className="p-4 sm:p-5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2 bg-[#f8faf9]/70">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-800 font-black flex items-center justify-center text-sm">
+                      C
+                    </div>
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
+                        Blok C - Daftar Peserta & Ringkasan Kelompok
+                      </h4>
+                      <p className="text-[11px] text-gray-500 font-medium">
+                        Catat peran, keterbukaan (1-5), dan kesepakatan tiap siswa dalam kelompok.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={kelompokAddStudentId}
+                      onChange={(e) => setKelompokAddStudentId(e.target.value)}
+                      className="px-2.5 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-bold text-[#0b1c30]"
                     >
-                      {item.label}
+                      <option value="">-- Pilih siswa untuk ditambah --</option>
+                      {students.map((st) => (
+                        <option key={st.id} value={st.id}>
+                          {st.name} ({st.class})
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const found = students.find((s) => s.id === kelompokAddStudentId);
+                        const newParticipant: ServiceKelompokParticipant = found
+                          ? {
+                              id: `kp-${found.id}-${Date.now()}`,
+                              studentId: found.id,
+                              nama: found.name,
+                              kelas: found.class,
+                              peran: 'Aktif',
+                              keterbukaan: 3,
+                              kesepakatanSiswa: '',
+                            }
+                          : {
+                              id: `kp-${Date.now()}`,
+                              nama: `Peserta ${kelompokParticipants.length + 1}`,
+                              kelas: selectedClass || '-',
+                              peran: 'Aktif',
+                              keterbukaan: 3,
+                              kesepakatanSiswa: '',
+                            };
+                        setKelompokParticipants((prev) => [...prev, newParticipant]);
+                        if (found && !selectedStudents.some((s) => s.id === found.id)) {
+                          setSelectedStudents((prev) => [...prev, found]);
+                        }
+                        setKelompokAddStudentId('');
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-black cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>+ Tambah Siswa</span>
                     </button>
-                  ))}
+                  </div>
+                </div>
+
+                <div className="p-4 sm:p-5 space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {kelompokParticipants.map((p, idx) => (
+                      <div key={p.id} className="p-3.5 bg-[#f8faf9] rounded-xl border border-gray-200 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <input
+                            type="text"
+                            value={p.nama}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setKelompokParticipants((prev) =>
+                                prev.map((item, i) => (i === idx ? { ...item, nama: val } : item))
+                              );
+                            }}
+                            placeholder="Nama Siswa"
+                            className="flex-1 px-2.5 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-black text-[#0b1c30]"
+                          />
+                          <span className="text-[10px] font-bold px-2 py-0.5 bg-white border border-gray-200 rounded text-gray-600">
+                            {p.kelas || '-'}
+                          </span>
+                          {kelompokParticipants.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setKelompokParticipants((prev) => prev.filter((_, i) => i !== idx))
+                              }
+                              className="p-1 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                              title="Hapus peserta"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+
+                        <div>
+                          <span className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
+                            Peran Siswa:
+                          </span>
+                          <div className="grid grid-cols-4 gap-1">
+                            {(['Dominan', 'Aktif', 'Pendiam', 'Pasif'] as const).map((role) => (
+                              <button
+                                key={role}
+                                type="button"
+                                onClick={() =>
+                                  setKelompokParticipants((prev) =>
+                                    prev.map((item, i) => (i === idx ? { ...item, peran: role } : item))
+                                  )
+                                }
+                                className={`py-1 px-1.5 rounded-lg text-[11px] font-black border cursor-pointer ${
+                                  p.peran === role
+                                    ? 'bg-[#00685f] text-white border-[#00685f]'
+                                    : 'bg-white text-gray-700 border-gray-200'
+                                }`}
+                              >
+                                {role}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] uppercase font-bold text-gray-500">
+                              Keterbukaan Siswa:
+                            </span>
+                            <span className="text-[11px] font-black text-[#00685f]">{p.keterbukaan}/5</span>
+                          </div>
+                          <div className="grid grid-cols-5 gap-1">
+                            {[1, 2, 3, 4, 5].map((sc) => (
+                              <button
+                                key={sc}
+                                type="button"
+                                onClick={() =>
+                                  setKelompokParticipants((prev) =>
+                                    prev.map((item, i) => (i === idx ? { ...item, keterbukaan: sc } : item))
+                                  )
+                                }
+                                className={`py-1 rounded-lg text-xs font-black border cursor-pointer ${
+                                  p.keterbukaan === sc
+                                    ? 'bg-[#00685f] text-white border-[#00685f]'
+                                    : 'bg-white text-gray-700 border-gray-200'
+                                }`}
+                              >
+                                {sc}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <span className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
+                            Kesepakatan yang Disetujui Siswa Ini (1 kalimat):
+                          </span>
+                          <input
+                            type="text"
+                            value={p.kesepakatanSiswa}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setKelompokParticipants((prev) =>
+                                prev.map((item, i) =>
+                                  i === idx ? { ...item, kesepakatanSiswa: val } : item
+                                )
+                              );
+                            }}
+                            placeholder="Contoh: Berkomitmen mematikan game pukul 21.00 WIB."
+                            className="w-full px-2.5 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-semibold text-[#0b1c30]"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Ringkasan Kelompok (Proses + Komitmen Bersama) */}
+                  <div className="space-y-2 pt-2 border-t border-gray-100">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                        Ringkasan Proses Kelompok:
+                      </label>
+                      <button
+                        type="button"
+                        disabled={isPolishingBlokC}
+                        onClick={() =>
+                          handlePolishBlokCText(
+                            'kelompok',
+                            konsKelUseAi && konsKelAiSummary ? konsKelAiSummary : konsKelRawSummary,
+                            (text) => {
+                              setKonsKelAiSummary(text);
+                              setKonsKelUseAi(true);
+                            }
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg text-xs font-extrabold cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Rapikan dengan Meta AI</span>
+                      </button>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={konsKelUseAi && konsKelAiSummary ? konsKelAiSummary : konsKelRawSummary}
+                      onChange={(e) => {
+                        if (konsKelUseAi) setKonsKelAiSummary(e.target.value);
+                        else setKonsKelRawSummary(e.target.value);
+                      }}
+                      placeholder="Tuliskan alur proses dinamika konseling kelompok..."
+                      className="w-full p-3 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
+                      Kesepakatan Komitmen Bersama Kelompok:
+                    </label>
+                    <input
+                      type="text"
+                      value={kelompokKomitmenBersama}
+                      onChange={(e) => setKelompokKomitmenBersama(e.target.value)}
+                      placeholder="Contoh: Saling mengingatkan di kelas dan menjaga kerahasiaan kelompok."
+                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                    />
+                  </div>
                 </div>
               </div>
 
-              <div>
-                <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
-                  Peran Tiap Siswa (Siapa yang dominan, siapa yang pendiam):
-                </label>
-                <input
-                  type="text"
-                  value={konsKelPeranSiswa}
-                  onChange={(e) => setKonsKelPeranSiswa(e.target.value)}
-                  placeholder="Contoh: Siswa A dominan berbicara, Siswa B cenderung pendiam..."
-                  className="w-full px-3.5 py-2.5 bg-gray-50 border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-bold focus:bg-white focus:outline-none"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
-                    Ringkasan Konseling Kelompok:
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const polished = polishTextWithMetaAi('konseling_kelompok', konsKelRawSummary);
-                      setKonsKelAiSummary(polished);
-                      setKonsKelUseAi(true);
-                      showToast('✨ Ringkasan konseling kelompok dirapikan oleh Meta AI!', 'success');
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-lg text-xs font-extrabold shadow-2xs transition-all cursor-pointer active:scale-95"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Rapikan dengan Meta AI</span>
-                  </button>
-                </div>
-
-                <textarea
-                  rows={3}
-                  value={konsKelUseAi && konsKelAiSummary ? konsKelAiSummary : konsKelRawSummary}
-                  onChange={(e) => {
-                    if (konsKelUseAi) setKonsKelAiSummary(e.target.value);
-                    else setKonsKelRawSummary(e.target.value);
-                  }}
-                  placeholder="Tulis proses konseling dan kesepakatan komitmen bersama..."
-                  className="w-full p-3.5 bg-gray-50 border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                />
-              </div>
+              <StandardBlokDTindakLanjut
+                value={stdBlokD}
+                onChange={setStdBlokD}
+                aiRecommendation={currentContextualAiText}
+                isGeneratingAi={isGeneratingStdAi}
+                onGenerateAiRecommendation={handleRefreshContextualAi}
+              />
             </div>
           )}
 
           {/* ========================================================= */}
-          {/* 5. FORM HOME VISIT STANDAR BK (ACCORDION A - C)            */}
+          {/* 4B. FORM LAYANAN MEDIASI (BLOK A-D TERSTANDAR)            */}
           {/* ========================================================= */}
-          {isHomeVisitOnly && (
+          {isFormMediasi && (
             <div className="space-y-4">
-              {/* Header Banner Khusus Home Visit */}
-              <div className="p-4 sm:p-5 bg-gradient-to-r from-amber-50 via-teal-50 to-white rounded-2xl border border-teal-200/80 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-[#00685f] text-white flex items-center justify-center font-black shadow-xs shrink-0">
-                    <Home className="w-5 h-5 text-white" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-black text-[#00685f] uppercase tracking-wider">
-                        Home Visit (Kunjungan Rumah)
-                      </span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-purple-100 text-purple-800 flex items-center gap-1">
-                        <Sparkles className="w-3 h-3" /> Dibantu Meta AI ✨
-                      </span>
+              <StandardBlokAIdentitas
+                sasaranLabel={`${mediasiData.pihak1Nama || 'Pihak 1'} vs ${mediasiData.pihak2Nama || 'Pihak 2'}`}
+                sasaranSubLabel="Layanan Mediasi Konflik • Pemulihan Relasi Kedua Pihak"
+                counselorName={activeCounselorInfo.name}
+                counselorNip={activeCounselorInfo.nip}
+                date={date}
+                onDateChange={setDate}
+                time={time}
+                onTimeChange={setTime}
+                tempat={stdTempat}
+                onTempatChange={setStdTempat}
+                pertemuanKe={stdPertemuanKe}
+                onPertemuanKeChange={setStdPertemuanKe}
+                sifatLayanan={stdSifatLayanan}
+                onSifatLayananChange={setStdSifatLayanan}
+                extraBadge="Mediasi"
+              />
+
+              <StandardBlokBKonteks value={stdBlokB} onChange={setStdBlokB} />
+
+              {/* BLOK C KHAS MEDIASI */}
+              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
+                <div className="p-4 sm:p-5 border-b border-gray-100 flex items-center justify-between bg-[#f8faf9]/70">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-800 font-black flex items-center justify-center text-sm">
+                      C
                     </div>
-                    <h3 className="text-base sm:text-lg font-black text-[#0b1c30]">
-                      Laporan Kunjungan: {selectedStudents[0]?.name || 'Siswa'} ({selectedStudents[0]?.class || 'Kelas'})
-                    </h3>
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
+                        Blok C - Isi Khas Mediasi (Berimbang Dua Pihak)
+                      </h4>
+                      <p className="text-[11px] text-gray-500 font-medium">
+                        Catat identitas, versi masing-masing pihak, titik konflik, dan status kesepakatan.
+                      </p>
+                    </div>
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-gray-600 bg-white/80 p-2 rounded-xl border border-teal-100">
-                  <span>📅 {homeVisitTanggal || date}</span>
-                  <span>•</span>
-                  <span>⏱️ {homeVisitJamBerangkat}</span>
-                  <span>•</span>
-                  <span>👥 {homeVisitPetugas}</span>
-                  <span>•</span>
-                  <span>🎯 {homeVisitTujuan}</span>
+                <div className="p-4 sm:p-5 space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="p-3.5 bg-[#f8faf9] rounded-xl border border-gray-200 space-y-2">
+                      <label className="text-xs font-black text-[#0b1c30] block">Pihak 1 (Nama):</label>
+                      <input
+                        type="text"
+                        value={mediasiData.pihak1Nama}
+                        onChange={(e) => setMediasiData({ ...mediasiData, pihak1Nama: e.target.value })}
+                        placeholder="Ketik nama Pihak 1"
+                        className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs font-bold text-[#0b1c30]"
+                      />
+                      <label className="text-[11px] font-bold text-gray-600 block">Versi Pihak 1 (1 kalimat):</label>
+                      <textarea
+                        rows={2}
+                        value={mediasiData.versiPihak1}
+                        onChange={(e) => setMediasiData({ ...mediasiData, versiPihak1: e.target.value })}
+                        placeholder="Ringkasan sudut pandang Pihak 1..."
+                        className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-semibold text-[#0b1c30]"
+                      />
+                    </div>
+
+                    <div className="p-3.5 bg-[#f8faf9] rounded-xl border border-gray-200 space-y-2">
+                      <label className="text-xs font-black text-[#0b1c30] block">Pihak 2 (Nama):</label>
+                      <input
+                        type="text"
+                        value={mediasiData.pihak2Nama}
+                        onChange={(e) => setMediasiData({ ...mediasiData, pihak2Nama: e.target.value })}
+                        placeholder="Ketik nama Pihak 2"
+                        className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs font-bold text-[#0b1c30]"
+                      />
+                      <label className="text-[11px] font-bold text-gray-600 block">Versi Pihak 2 (1 kalimat):</label>
+                      <textarea
+                        rows={2}
+                        value={mediasiData.versiPihak2}
+                        onChange={(e) => setMediasiData({ ...mediasiData, versiPihak2: e.target.value })}
+                        placeholder="Ringkasan sudut pandang Pihak 2..."
+                        className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-semibold text-[#0b1c30]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                        Titik Konflik Utama (1 kalimat):
+                      </label>
+                      <button
+                        type="button"
+                        disabled={isPolishingBlokC}
+                        onClick={() =>
+                          handlePolishBlokCText('mediasi', mediasiData.titikKonflikUtama, (txt) =>
+                            setMediasiData({ ...mediasiData, titikKonflikUtama: txt })
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg text-xs font-extrabold cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Rapikan dengan Meta AI</span>
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={mediasiData.titikKonflikUtama}
+                      onChange={(e) => setMediasiData({ ...mediasiData, titikKonflikUtama: e.target.value })}
+                      placeholder="Contoh: Salah paham komentar di grup kelas yang memicu saling ejek."
+                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
+                      Status Mediasi:
+                    </label>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      {(['Sepakat', 'Tidak Sepakat'] as const).map((st) => (
+                        <button
+                          key={st}
+                          type="button"
+                          onClick={() => setMediasiData({ ...mediasiData, statusMediasi: st })}
+                          className={`py-2.5 px-4 rounded-xl border text-xs sm:text-sm font-black cursor-pointer transition-all ${
+                            mediasiData.statusMediasi === st
+                              ? st === 'Sepakat'
+                                ? 'bg-[#00685f] text-white border-[#00685f]'
+                                : 'bg-rose-600 text-white border-rose-600'
+                              : 'bg-gray-50 text-gray-700 border-gray-200'
+                          }`}
+                        >
+                          {st}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {mediasiData.statusMediasi === 'Sepakat' ? (
+                    <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl space-y-1.5">
+                      <label className="text-xs font-black text-emerald-950 block">
+                        Kesepakatan Bersama (WAJIB — apa yang disepakati & siapa melakukan apa):
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={mediasiData.kesepakatanBersama || ''}
+                        onChange={(e) => setMediasiData({ ...mediasiData, kesepakatanBersama: e.target.value })}
+                        placeholder="Contoh: Pihak 1 menghapus unggahan & meminta maaf; Pihak 2 tidak membalas komentar negatif dan keduanya berinteraksi normal."
+                        className="w-full p-2.5 bg-white border border-emerald-300 rounded-lg text-xs font-semibold text-[#0b1c30]"
+                      />
+                    </div>
+                  ) : (
+                    <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl space-y-2.5">
+                      <div>
+                        <label className="text-xs font-black text-rose-950 block mb-1">
+                          Alasan Tidak Sepakat (WAJIB):
+                        </label>
+                        <input
+                          type="text"
+                          value={mediasiData.alasanTidakSepakat || ''}
+                          onChange={(e) => setMediasiData({ ...mediasiData, alasanTidakSepakat: e.target.value })}
+                          placeholder="Contoh: Pihak 1 belum bersedia mengakui kesalahan dan emosi masih tinggi."
+                          className="w-full px-3 py-2 bg-white border border-rose-300 rounded-lg text-xs font-semibold text-[#0b1c30]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-black text-rose-950 block mb-1">
+                          Rencana Berikutnya (WAJIB — misal panggil wali kelas / mediasi ulang):
+                        </label>
+                        <input
+                          type="text"
+                          value={mediasiData.rencanaBerikutnya || ''}
+                          onChange={(e) => setMediasiData({ ...mediasiData, rencanaBerikutnya: e.target.value })}
+                          placeholder="Contoh: Libatkan Wali Kelas 8A untuk mediasi ulang 3 hari lagi."
+                          className="w-full px-3 py-2 bg-white border border-rose-300 rounded-lg text-xs font-semibold text-[#0b1c30]"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {/* ACCORDION CONTAINER */}
-              <div className="space-y-3">
-                {/* ------------------------------------------------------------- */}
-                {/* BAGIAN A: PELAKSANAAN                                         */}
-                {/* ------------------------------------------------------------- */}
-                <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setActiveAccordionHomeVisit(activeAccordionHomeVisit === 'A' ? null : 'A')}
-                    className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-gray-50/70 transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs ${
-                        activeAccordionHomeVisit === 'A' ? 'bg-[#00685f] text-white' : 'bg-gray-100 text-gray-700'
-                      }`}>
-                        A
-                      </span>
-                      <div>
-                        <h4 className="text-sm sm:text-base font-black text-[#0b1c30]">
-                          A. Pelaksanaan Kunjungan
-                        </h4>
-                        <p className="text-xs text-gray-500 font-medium">
-                          Pihak yang ditemui, situasi rumah tinggal, dan uraian hasil pembicaraan
-                        </p>
-                      </div>
+              <StandardBlokDTindakLanjut
+                value={stdBlokD}
+                onChange={setStdBlokD}
+                aiRecommendation={currentContextualAiText}
+                isGeneratingAi={isGeneratingStdAi}
+                onGenerateAiRecommendation={handleRefreshContextualAi}
+              />
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* 5. FORM HOME VISIT (BLOK A-D TERSTANDAR)                   */}
+          {/* ========================================================= */}
+          {isHomeVisitOnly && (
+            <div className="space-y-4">
+              <StandardBlokAIdentitas
+                sasaranLabel={studentDisplayText}
+                sasaranSubLabel={`Kunjungan Rumah (Home Visit) • ${homeVisitAlamat || 'Alamat Siswa'}`}
+                counselorName={activeCounselorInfo.name}
+                counselorNip={activeCounselorInfo.nip}
+                date={date}
+                onDateChange={(v) => {
+                  setDate(v);
+                  setHomeVisitTanggal(v);
+                }}
+                time={time}
+                onTimeChange={setTime}
+                tempat={stdTempat || homeVisitAlamat || 'Rumah Siswa'}
+                onTempatChange={(v) => {
+                  setStdTempat(v);
+                  setHomeVisitAlamat(v);
+                }}
+                pertemuanKe={stdPertemuanKe}
+                onPertemuanKeChange={setStdPertemuanKe}
+                sifatLayanan={stdSifatLayanan}
+                onSifatLayananChange={setStdSifatLayanan}
+                extraBadge="Home Visit"
+              />
+
+              <StandardBlokBKonteks value={stdBlokB} onChange={setStdBlokB} />
+
+              {/* BLOK C: ISI KHAS HOME VISIT */}
+              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
+                <div className="p-4 sm:p-5 border-b border-gray-100 flex items-center justify-between bg-[#f8faf9]/70">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-teal-100 text-[#00685f] font-black flex items-center justify-center text-sm shadow-2xs">
+                      C
                     </div>
-                    <ChevronDown className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                      activeAccordionHomeVisit === 'A' ? 'rotate-180 text-[#00685f]' : ''
-                    }`} />
-                  </button>
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
+                        Blok C - Isi Khas Kunjungan Rumah (Home Visit)
+                      </h4>
+                      <p className="text-[11px] text-gray-500 font-medium">
+                        Pihak yang ditemui, alamat, kontak orang tua, kondisi rumah, hasil pembicaraan, status kunjungan, &amp; dokumentasi.
+                      </p>
+                    </div>
+                  </div>
+                </div>
 
-                  {activeAccordionHomeVisit === 'A' && (
-                    <div className="p-4 sm:p-6 border-t border-gray-100 space-y-4 bg-white animate-in fade-in duration-150">
-                      {/* Siapa yang Ditemui */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                          Siapa yang Ditemui di Rumah:
-                        </label>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                          {(['Ayah', 'Ibu', 'Wali', 'Lainnya'] as const).map((p) => {
-                            const isSelected = homeVisitYangDitemui === p;
-                            return (
-                              <button
-                                key={p}
-                                type="button"
-                                onClick={() => setHomeVisitYangDitemui(p)}
-                                className={`p-3 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
-                                  isSelected
-                                    ? 'bg-[#00685f] text-white border-[#00685f] shadow-xs'
-                                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
-                                }`}
-                              >
-                                {p}
-                              </button>
-                            );
-                          })}
-                        </div>
-                        {homeVisitYangDitemui === 'Lainnya' && (
-                          <div className="mt-2">
-                            <input
-                              type="text"
-                              value={homeVisitYangDitemuiLainnya}
-                              onChange={(e) => setHomeVisitYangDitemuiLainnya(e.target.value)}
-                              placeholder="Ketik hubungan keluarga (contoh: Kakek, Paman, Kakak Kandung)..."
-                              className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold focus:outline-none focus:ring-2 focus:ring-[#00685f]"
-                            />
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Kondisi Rumah */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Kondisi Lingkungan & Suasana Rumah:
-                        </label>
-                        <textarea
-                          rows={2}
-                          value={homeVisitKondisiRumah}
-                          onChange={(e) => setHomeVisitKondisiRumah(e.target.value)}
-                          placeholder="Tulis gambaran singkat tempat tinggal, suasana keluarga, ketersediaan fasilitas belajar siswa..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Hasil Pembicaraan + Tombol AI */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
-                            Hasil Pembicaraan:
-                          </label>
+                <div className="p-4 sm:p-5 space-y-4">
+                  {/* Siapa yang Ditemui */}
+                  <div>
+                    <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
+                      Siapa yang Ditemui di Rumah:
+                    </label>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {(['Ayah', 'Ibu', 'Wali', 'Lainnya'] as const).map((p) => {
+                        const isSelected = homeVisitYangDitemui === p;
+                        return (
                           <button
+                            key={p}
                             type="button"
-                            onClick={handleBantuRapikanHasilHomeVisit}
-                            className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-lg text-xs font-extrabold shadow-2xs transition-all cursor-pointer active:scale-95"
+                            onClick={() => setHomeVisitYangDitemui(p)}
+                            className={`p-2.5 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#00685f] text-white border-[#00685f] shadow-2xs'
+                                : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
+                            }`}
                           >
-                            <Sparkles className="w-3.5 h-3.5" />
-                            <span>✨ Bantu Rapikan Hasil Pembicaraan</span>
+                            {p}
                           </button>
-                        </div>
-
-                        <textarea
-                          rows={4}
-                          value={homeVisitUseAi && homeVisitAiHasil ? homeVisitAiHasil : homeVisitRawHasil}
-                          onChange={(e) => {
-                            if (homeVisitUseAi) setHomeVisitAiHasil(e.target.value);
-                            else setHomeVisitRawHasil(e.target.value);
-                          }}
-                          placeholder="Tuliskan poin dialog dengan orang tua/wali, alasan siswa tidak masuk/bermasalah, dan penjelasan keluarga..."
-                          className="w-full p-3.5 bg-gray-50 border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
+                        );
+                      })}
                     </div>
-                  )}
-                </div>
+                    {homeVisitYangDitemui === 'Lainnya' && (
+                      <input
+                        type="text"
+                        value={homeVisitYangDitemuiLainnya}
+                        onChange={(e) => setHomeVisitYangDitemuiLainnya(e.target.value)}
+                        placeholder="Ketik hubungan keluarga (contoh: Kakek, Paman, Kakak Kandung)..."
+                        className="mt-2 w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs font-bold focus:outline-none focus:border-[#00685f]"
+                      />
+                    )}
+                  </div>
 
-                {/* ------------------------------------------------------------- */}
-                {/* BAGIAN B: KESEPAKATAN                                         */}
-                {/* ------------------------------------------------------------- */}
-                <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setActiveAccordionHomeVisit(activeAccordionHomeVisit === 'B' ? null : 'B')}
-                    className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-gray-50/70 transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs ${
-                        activeAccordionHomeVisit === 'B' ? 'bg-[#00685f] text-white' : 'bg-gray-100 text-gray-700'
-                      }`}>
-                        B
-                      </span>
-                      <div>
-                        <h4 className="text-sm sm:text-base font-black text-[#0b1c30]">
-                          B. Kesepakatan & Komitmen
-                        </h4>
-                        <p className="text-xs text-gray-500 font-medium">
-                          Poin kesepakatan bersama, komitmen orang tua, siswa, dan pihak sekolah
-                        </p>
-                      </div>
+                  {/* Alamat, Nama Ortu, No HP */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-[11px] font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
+                        Alamat Rumah:
+                      </label>
+                      <input
+                        type="text"
+                        value={homeVisitAlamat}
+                        onChange={(e) => {
+                          setHomeVisitAlamat(e.target.value);
+                          setStdTempat(e.target.value);
+                        }}
+                        placeholder="Alamat kunjungan..."
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                      />
                     </div>
-                    <ChevronDown className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                      activeAccordionHomeVisit === 'B' ? 'rotate-180 text-[#00685f]' : ''
-                    }`} />
-                  </button>
-
-                  {activeAccordionHomeVisit === 'B' && (
-                    <div className="p-4 sm:p-6 border-t border-gray-100 space-y-4 bg-white animate-in fade-in duration-150">
-                      {/* Kesepakatan dengan Orang Tua */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Kesepakatan dengan Orang Tua:
-                        </label>
-                        <textarea
-                          rows={2}
-                          value={homeVisitKesepakatanOrtu}
-                          onChange={(e) => setHomeVisitKesepakatanOrtu(e.target.value)}
-                          placeholder="Contoh: Orang tua memastikan anak tidur sebelum jam 22.00, mengontrol penggunaan HP, dan mengantar anak ke sekolah..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Komitmen Orang Tua */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Komitmen Orang Tua:
-                        </label>
-                        <input
-                          type="text"
-                          value={homeVisitKomitmenOrtu}
-                          onChange={(e) => setHomeVisitKomitmenOrtu(e.target.value)}
-                          placeholder="Contoh: Bersedia memantau kepulangan anak dan aktif berkoordinasi dengan wali kelas/BK..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Komitmen Siswa */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Komitmen Siswa:
-                        </label>
-                        <input
-                          type="text"
-                          value={homeVisitKomitmenSiswa}
-                          onChange={(e) => setHomeVisitKomitmenSiswa(e.target.value)}
-                          placeholder="Contoh: Berjanji masuk sekolah tepat waktu, tidak membolos, dan menyelesaikan tugas..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Komitmen Sekolah */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Komitmen Sekolah:
-                        </label>
-                        <input
-                          type="text"
-                          value={homeVisitKomitmenSekolah}
-                          onChange={(e) => setHomeVisitKomitmenSekolah(e.target.value)}
-                          placeholder="Contoh: Guru BK dan wali kelas memberikan bimbingan berkala dan melaporkan perkembangan berkala..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
+                    <div>
+                      <label className="text-[11px] font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
+                        Nama Orang Tua / Wali:
+                      </label>
+                      <input
+                        type="text"
+                        value={homeVisitNamaOrtu}
+                        onChange={(e) => {
+                          setHomeVisitNamaOrtu(e.target.value);
+                          setHomeVisitTtdOrtu(e.target.value);
+                        }}
+                        placeholder="Nama orang tua..."
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                      />
                     </div>
-                  )}
-                </div>
-
-                {/* ------------------------------------------------------------- */}
-                {/* BAGIAN C: BUKTI & PENUTUP                                     */}
-                {/* ------------------------------------------------------------- */}
-                <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setActiveAccordionHomeVisit(activeAccordionHomeVisit === 'C' ? null : 'C')}
-                    className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-gray-50/70 transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs ${
-                        activeAccordionHomeVisit === 'C' ? 'bg-[#00685f] text-white' : 'bg-gray-100 text-gray-700'
-                      }`}>
-                        C
-                      </span>
-                      <div>
-                        <h4 className="text-sm sm:text-base font-black text-[#0b1c30]">
-                          C. Bukti & Penutup
-                        </h4>
-                        <p className="text-xs text-gray-500 font-medium">
-                          Dokumentasi foto, penandatangan, status kunjungan, & tindak lanjut
-                        </p>
-                      </div>
+                    <div>
+                      <label className="text-[11px] font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
+                        No. HP Orang Tua:
+                      </label>
+                      <input
+                        type="text"
+                        value={homeVisitNoHpOrtu}
+                        onChange={(e) => setHomeVisitNoHpOrtu(e.target.value)}
+                        placeholder="08xx-xxxx-xxxx"
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                      />
                     </div>
-                    <ChevronDown className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${
-                      activeAccordionHomeVisit === 'C' ? 'rotate-180 text-[#00685f]' : ''
-                    }`} />
-                  </button>
+                  </div>
 
-                  {activeAccordionHomeVisit === 'C' && (
-                    <div className="p-4 sm:p-6 border-t border-gray-100 space-y-4 bg-white animate-in fade-in duration-150">
-                      {/* Upload Foto Bukti (Opsional) */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
-                          Upload Foto Bukti Kunjungan (Opsional):
-                        </label>
-                        {homeVisitFotoBukti ? (
-                          <div className="p-3 bg-gray-50 border-2 border-teal-200 rounded-xl flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-3">
-                              <img
-                                src={homeVisitFotoBukti}
-                                alt="Dokumentasi Home Visit"
-                                className="w-16 h-16 object-cover rounded-lg border border-gray-200"
-                              />
-                              <div>
-                                <p className="text-xs font-black text-[#0b1c30]">{homeVisitFotoName || 'foto_kunjungan.jpg'}</p>
-                                <p className="text-[10px] text-teal-700 font-bold">✓ Foto dokumentasi siap dilampirkan di PDF</p>
-                              </div>
-                            </div>
+                  {/* Kondisi Rumah Singkat */}
+                  <div>
+                    <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
+                      Kondisi Rumah &amp; Lingkungan Singkat (1 kalimat):
+                    </label>
+                    <input
+                      type="text"
+                      value={homeVisitKondisiRumah}
+                      onChange={(e) => setHomeVisitKondisiRumah(e.target.value)}
+                      placeholder="Contoh: Rumah layak huni, suasana tenang, siswa tinggal bersama nenek saat orang tua bekerja."
+                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                    />
+                  </div>
+
+                  {/* Hasil Pembicaraan + AI Polish */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                        Hasil Pembicaraan:
+                      </label>
+                      <button
+                        type="button"
+                        disabled={isPolishingBlokC}
+                        onClick={() =>
+                          handlePolishBlokCText(
+                            'home-visit',
+                            homeVisitUseAi && homeVisitAiHasil ? homeVisitAiHasil : homeVisitRawHasil,
+                            (text) => {
+                              setHomeVisitAiHasil(text);
+                              setHomeVisitUseAi(true);
+                            }
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg text-xs font-extrabold cursor-pointer disabled:opacity-60"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Rapikan dengan Meta AI</span>
+                      </button>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={homeVisitUseAi && homeVisitAiHasil ? homeVisitAiHasil : homeVisitRawHasil}
+                      onChange={(e) => {
+                        if (homeVisitUseAi) setHomeVisitAiHasil(e.target.value);
+                        else setHomeVisitRawHasil(e.target.value);
+                      }}
+                      placeholder="Tuliskan pokok dialog dengan orang tua/wali dan faktor penyebab dari lingkungan keluarga..."
+                      className="w-full p-3 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                    />
+                  </div>
+
+                  {/* Kesepakatan Orang Tua & Status Kunjungan */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
+                        Kesepakatan dengan Orang Tua:
+                      </label>
+                      <input
+                        type="text"
+                        value={homeVisitKesepakatanOrtu}
+                        onChange={(e) => setHomeVisitKesepakatanOrtu(e.target.value)}
+                        placeholder="Contoh: Orang tua mengawasi jam tidur & mengantar anak tepat waktu."
+                        className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30] focus:bg-white focus:outline-none focus:border-[#00685f]"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
+                        Status Kunjungan:
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {(['Berhasil Ditemui', 'Rumah Kosong', 'Ditolak'] as const).map((st) => {
+                          const isSelected = homeVisitStatus === st;
+                          return (
                             <button
+                              key={st}
                               type="button"
-                              onClick={() => {
-                                setHomeVisitFotoBukti(null);
-                                setHomeVisitFotoName('');
-                              }}
-                              className="px-3 py-1.5 bg-rose-50 text-rose-700 hover:bg-rose-100 rounded-lg text-xs font-bold border border-rose-200 cursor-pointer"
+                              onClick={() => setHomeVisitStatus(st)}
+                              className={`py-2 px-2 rounded-xl border-2 text-center text-[11px] font-black transition-all cursor-pointer ${
+                                isSelected
+                                  ? st === 'Berhasil Ditemui'
+                                    ? 'bg-emerald-600 text-white border-emerald-600'
+                                    : st === 'Rumah Kosong'
+                                      ? 'bg-amber-600 text-white border-amber-600'
+                                      : 'bg-rose-600 text-white border-rose-600'
+                                  : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
+                              }`}
                             >
-                              Hapus Foto
+                              {st}
                             </button>
-                          </div>
-                        ) : (
-                          <label className="border-2 border-dashed border-gray-300 hover:border-[#00685f] rounded-xl p-4 flex flex-col items-center justify-center gap-2 cursor-pointer bg-gray-50/70 hover:bg-teal-50/30 transition-all">
-                            <div className="p-2.5 rounded-full bg-teal-100 text-[#00685f]">
-                              <Camera className="w-5 h-5" />
-                            </div>
-                            <span className="text-xs font-bold text-gray-700">
-                              Klik untuk Ambil Foto / Upload Dokumen Bukti (Maks. 5 MB)
-                            </span>
-                            <span className="text-[10px] text-gray-400">Format: JPG, PNG, WEBP</span>
-                            <input
-                              type="file"
-                              accept="image/*"
-                              onChange={handleHomeVisitPhotoUpload}
-                              className="hidden"
-                            />
-                          </label>
-                        )}
-                      </div>
-
-                      {/* Nama Orang Tua yang Menandatangani */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Nama Orang Tua yang Menandatangani Berita Acara:
-                        </label>
-                        <input
-                          type="text"
-                          value={homeVisitTtdOrtu}
-                          onChange={(e) => setHomeVisitTtdOrtu(e.target.value)}
-                          placeholder="Nama lengkap orang tua / wali..."
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Status Kunjungan */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                          Status Kunjungan:
-                        </label>
-                        <div className="grid grid-cols-3 gap-2">
-                          {(['Berhasil Ditemui', 'Rumah Kosong', 'Ditolak'] as const).map((st) => {
-                            const isSelected = homeVisitStatus === st;
-                            return (
-                              <button
-                                key={st}
-                                type="button"
-                                onClick={() => setHomeVisitStatus(st)}
-                                className={`p-3 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
-                                  isSelected
-                                    ? st === 'Berhasil Ditemui'
-                                      ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
-                                      : st === 'Rumah Kosong'
-                                      ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
-                                      : 'bg-rose-600 text-white border-rose-600 shadow-xs'
-                                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
-                                }`}
-                              >
-                                {st}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Tindak Lanjut Checklist */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                          Tindak Lanjut Pasca Kunjungan (Bisa pilih beberapa):
-                        </label>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          {[
-                            'Pantau 1 Minggu',
-                            'Konseling Lanjutan',
-                            'Rapat Kasus',
-                            'Buat Surat Panggilan Kedua'
-                          ].map((item) => {
-                            const isChecked = homeVisitTindakLanjut.includes(item);
-                            return (
-                              <button
-                                key={item}
-                                type="button"
-                                onClick={() => handleToggleHomeVisitTindakLanjut(item)}
-                                className={`p-2.5 rounded-xl border flex items-center gap-2 text-xs font-bold text-left transition-all cursor-pointer ${
-                                  isChecked
-                                    ? 'bg-teal-50 border-[#00685f] text-[#00685f] font-black ring-1 ring-[#00685f]'
-                                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700'
-                                }`}
-                              >
-                                {isChecked ? (
-                                  <CheckSquare className="w-4 h-4 text-[#00685f] shrink-0" />
-                                ) : (
-                                  <Square className="w-4 h-4 text-gray-400 shrink-0" />
-                                )}
-                                <span>{item}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Jadwal Pantau Berikutnya */}
-                      <div>
-                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1">
-                          Jadwal Pantau Berikutnya:
-                        </label>
-                        <input
-                          type="date"
-                          value={homeVisitJadwalPantau}
-                          onChange={(e) => setHomeVisitJadwalPantau(e.target.value)}
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Tombol Aksi di Accordion C */}
-                      <div className="pt-3 border-t border-gray-100 flex flex-col sm:flex-row items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={handleFinalSubmit}
-                          className="w-full sm:flex-1 py-3.5 px-5 bg-gradient-to-r from-teal-600 to-[#00685f] hover:from-teal-700 hover:to-[#005049] text-white rounded-xl font-black text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-98"
-                        >
-                          <CheckCircle2 className="w-5 h-5 text-white" />
-                          <span>Simpan Laporan Home Visit</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleDownloadHomeVisitPdf}
-                          className="w-full sm:w-auto py-3.5 px-5 bg-white hover:bg-teal-50 text-[#00685f] border-2 border-[#00685f] rounded-xl font-black text-sm flex items-center justify-center gap-2 shadow-xs transition-all cursor-pointer active:scale-98 shrink-0"
-                        >
-                          <Download className="w-4 h-4 text-[#00685f]" />
-                          <span>Download PDF</span>
-                        </button>
+                          );
+                        })}
                       </div>
                     </div>
-                  )}
+                  </div>
+
+                  {/* Upload Foto Bukti (Opsional) */}
+                  <div>
+                    <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-1.5">
+                      Foto Bukti Kunjungan (Opsional):
+                    </label>
+                    {homeVisitFotoBukti ? (
+                      <div className="p-3 bg-gray-50 border border-teal-200 rounded-xl flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <img
+                            src={homeVisitFotoBukti}
+                            alt="Dokumentasi Home Visit"
+                            className="w-14 h-14 object-cover rounded-lg border border-gray-200"
+                          />
+                          <div>
+                            <p className="text-xs font-black text-[#0b1c30]">{homeVisitFotoName || 'foto_kunjungan.jpg'}</p>
+                            <p className="text-[10px] text-teal-700 font-bold">✓ Foto siap dilampirkan</p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setHomeVisitFotoBukti(null);
+                            setHomeVisitFotoName('');
+                          }}
+                          className="px-3 py-1.5 bg-rose-50 text-rose-700 hover:bg-rose-100 rounded-lg text-xs font-bold border border-rose-200 cursor-pointer"
+                        >
+                          Hapus
+                        </button>
+                      </div>
+                    ) : (
+                      <label className="border-2 border-dashed border-gray-300 hover:border-[#00685f] rounded-xl p-3 flex items-center justify-center gap-2 cursor-pointer bg-gray-50/70 hover:bg-teal-50/30 transition-all text-xs font-bold text-gray-700">
+                        <Camera className="w-4 h-4 text-[#00685f]" />
+                        <span>Ambil / Upload Foto Bukti Kunjungan (Maks. 5 MB)</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleHomeVisitPhotoUpload}
+                          className="hidden"
+                        />
+                      </label>
+                    )}
+                  </div>
                 </div>
+              </div>
+
+              <StandardBlokDTindakLanjut
+                value={stdBlokD}
+                onChange={setStdBlokD}
+                aiRecommendation={currentContextualAiText}
+                isGeneratingAi={isGeneratingStdAi}
+                onGenerateAiRecommendation={handleRefreshContextualAi}
+              />
+
+              <div className="flex flex-col sm:flex-row items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleFinalSubmit}
+                  className="w-full sm:flex-1 py-3.5 px-5 bg-gradient-to-r from-teal-600 to-[#00685f] hover:from-teal-700 hover:to-[#005049] text-white rounded-xl font-black text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-98"
+                >
+                  <CheckCircle2 className="w-5 h-5 text-white" />
+                  <span>Simpan Laporan Home Visit</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadHomeVisitPdf}
+                  className="w-full sm:w-auto py-3.5 px-5 bg-white hover:bg-teal-50 text-[#00685f] border-2 border-[#00685f] rounded-xl font-black text-sm flex items-center justify-center gap-2 shadow-xs transition-all cursor-pointer active:scale-98 shrink-0"
+                >
+                  <Download className="w-4 h-4 text-[#00685f]" />
+                  <span>Download PDF</span>
+                </button>
               </div>
             </div>
           )}
@@ -5058,61 +5001,295 @@ export default function TambahLayananForm({
           )}
 
           {/* ========================================================= */}
-          {/* 8. FORM ALIH TANGAN KASUS                                 */}
           {/* ========================================================= */}
-          {isFormAlihTangan && (
-            <div className="bg-white p-5 sm:p-6 rounded-2xl border border-[#bcc9c6]/40 shadow-xs space-y-4">
-              <div>
-                <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
-                  Dirujuk Ke (Lembaga / Pihak Ahli):
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(['Psikolog', 'Pihak Luar', 'Guru BK Lain'] as const).map((pihak) => (
-                    <button
-                      key={pihak}
-                      type="button"
-                      onClick={() => setAlihTanganDirujukKe(pihak)}
-                      className={`p-3 rounded-xl border-2 text-center text-xs font-black transition-all cursor-pointer ${
-                        alihTanganDirujukKe === pihak ? 'bg-[#00685f] text-white border-[#00685f]' : 'bg-gray-50 border-gray-200 text-gray-700'
-                      }`}
-                    >
-                      {pihak}
-                    </button>
-                  ))}
+          {/* 8. FORM OBSERVASI / WAWANCARA + REFERAL (BLOK A-D STANDAR)*/}
+          {/* ========================================================= */}
+          {isFormObservasiWawancaraReferal && (
+            <div className="space-y-4">
+              <StandardBlokAIdentitas
+                sasaranLabel={studentDisplayText}
+                sasaranSubLabel={`Layanan ${obsWawRefData.subJenis} • Asesmen & Rujukan Terstandar`}
+                counselorName={activeCounselorInfo.name}
+                counselorNip={activeCounselorInfo.nip}
+                date={date}
+                onDateChange={setDate}
+                time={time}
+                onTimeChange={setTime}
+                tempat={stdTempat}
+                onTempatChange={setStdTempat}
+                pertemuanKe={stdPertemuanKe}
+                onPertemuanKeChange={setStdPertemuanKe}
+                sifatLayanan={stdSifatLayanan}
+                onSifatLayananChange={setStdSifatLayanan}
+                extraBadge={obsWawRefData.subJenis}
+              />
+
+              <StandardBlokBKonteks value={stdBlokB} onChange={setStdBlokB} />
+
+              {/* BLOK C KHAS OBSERVASI / WAWANCARA / REFERAL */}
+              <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 shadow-xs overflow-hidden">
+                <div className="p-4 sm:p-5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3 bg-[#f8faf9]/70">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-800 font-black flex items-center justify-center text-sm">
+                      C
+                    </div>
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-black text-[#0b1c30]">
+                        Blok C - Isi Khas Observasi / Wawancara / Referal
+                      </h4>
+                      <p className="text-[11px] text-gray-500 font-medium">
+                        Pilih sub-jenis tindakan agar bidang pengumpulan data atau rujukan sesuai konteks.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-4 sm:p-5 space-y-4">
+                  {/* Segmented Sub-Jenis Tabs */}
+                  <div className="grid grid-cols-3 gap-2 p-1.5 bg-gray-100 rounded-2xl">
+                    {(['Observasi', 'Wawancara', 'Referal'] as const).map((sub) => (
+                      <button
+                        key={sub}
+                        type="button"
+                        onClick={() => {
+                          setObsWawRefData({ ...obsWawRefData, subJenis: sub });
+                          setStdBlokB((prev) => ({ ...prev, teknik: sub }));
+                        }}
+                        className={`py-2 px-3 rounded-xl text-xs sm:text-sm font-black transition-all cursor-pointer ${
+                          obsWawRefData.subJenis === sub
+                            ? 'bg-[#00685f] text-white shadow-xs'
+                            : 'text-[#3d4947] hover:bg-gray-200/70'
+                        }`}
+                      >
+                        {sub}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* SUB-MODE 1: OBSERVASI */}
+                  {obsWawRefData.subJenis === 'Observasi' && (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div>
+                          <label className="text-xs font-black text-[#0b1c30] block mb-1">Yang Diamati:</label>
+                          <input
+                            type="text"
+                            value={obsWawRefData.yangDiamati || ''}
+                            onChange={(e) => setObsWawRefData({ ...obsWawRefData, yangDiamati: e.target.value })}
+                            placeholder="Contoh: Fokus belajar & interaksi dengan teman sebangku"
+                            className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30]"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-black text-[#0b1c30] block mb-1">Tempat Observasi:</label>
+                          <input
+                            type="text"
+                            value={obsWawRefData.tempat || ''}
+                            onChange={(e) => setObsWawRefData({ ...obsWawRefData, tempat: e.target.value })}
+                            placeholder="Contoh: Ruang Kelas 8A / Lapangan"
+                            className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30]"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-black text-[#0b1c30] block mb-1">Durasi:</label>
+                          <input
+                            type="text"
+                            value={obsWawRefData.durasi || ''}
+                            onChange={(e) => setObsWawRefData({ ...obsWawRefData, durasi: e.target.value })}
+                            placeholder="Contoh: 25 menit"
+                            className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30]"
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                            Hasil Pengamatan (1-2 kalimat):
+                          </label>
+                          <button
+                            type="button"
+                            disabled={isPolishingBlokC}
+                            onClick={() =>
+                              handlePolishBlokCText('observasi-wawancara-referal', obsWawRefData.hasilPengamatan || '', (txt) =>
+                                setObsWawRefData({ ...obsWawRefData, hasilPengamatan: txt })
+                              )
+                            }
+                            className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg text-xs font-extrabold cursor-pointer"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>Rapikan dengan Meta AI</span>
+                          </button>
+                        </div>
+                        <textarea
+                          rows={2}
+                          value={obsWawRefData.hasilPengamatan || ''}
+                          onChange={(e) => setObsWawRefData({ ...obsWawRefData, hasilPengamatan: e.target.value })}
+                          placeholder="Tuliskan fakta perilaku objektif yang teramati selama durasi pengamatan..."
+                          className="w-full p-3 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30]"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SUB-MODE 2: WAWANCARA */}
+                  {obsWawRefData.subJenis === 'Wawancara' && (
+                    <div className="space-y-3">
+                      <div>
+                        <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
+                          Siapa yang Diwawancarai:
+                        </label>
+                        <div className="grid grid-cols-3 gap-2">
+                          {(['Siswa', 'Guru', 'Orang Tua'] as const).map((target) => (
+                            <button
+                              key={target}
+                              type="button"
+                              onClick={() => setObsWawRefData({ ...obsWawRefData, diwawancarai: target })}
+                              className={`py-2 px-3 rounded-xl border text-xs font-black cursor-pointer ${
+                                obsWawRefData.diwawancarai === target
+                                  ? 'bg-[#00685f] text-white border-[#00685f]'
+                                  : 'bg-gray-50 text-gray-700 border-gray-200'
+                              }`}
+                            >
+                              {target}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="text-xs font-black text-[#0b1c30] block mb-1">Pertanyaan Kunci:</label>
+                        <input
+                          type="text"
+                          value={obsWawRefData.pertanyaanKunci || ''}
+                          onChange={(e) => setObsWawRefData({ ...obsWawRefData, pertanyaanKunci: e.target.value })}
+                          placeholder="Contoh: Apa pemicu utama siswa sering absen di jam pelajaran pertama?"
+                          className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs font-semibold text-[#0b1c30]"
+                        />
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                            Ringkasan Jawaban:
+                          </label>
+                          <button
+                            type="button"
+                            disabled={isPolishingBlokC}
+                            onClick={() =>
+                              handlePolishBlokCText('observasi-wawancara-referal', obsWawRefData.ringkasanJawaban || '', (txt) =>
+                                setObsWawRefData({ ...obsWawRefData, ringkasanJawaban: txt })
+                              )
+                            }
+                            className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg text-xs font-extrabold cursor-pointer"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>Rapikan dengan Meta AI</span>
+                          </button>
+                        </div>
+                        <textarea
+                          rows={2}
+                          value={obsWawRefData.ringkasanJawaban || ''}
+                          onChange={(e) => setObsWawRefData({ ...obsWawRefData, ringkasanJawaban: e.target.value })}
+                          placeholder="Tuliskan inti jawaban narasumber secara objektif..."
+                          className="w-full p-3 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30]"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SUB-MODE 3: REFERAL */}
+                  {obsWawRefData.subJenis === 'Referal' && (
+                    <div className="space-y-3">
+                      <div className="p-3 bg-teal-50 border border-teal-200 rounded-xl flex items-center gap-2 text-xs font-black text-teal-900">
+                        <Info className="w-4 h-4 text-[#00685f] shrink-0" />
+                        <span>Rujukan ini adalah tindakan profesional, bukan kegagalan.</span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
+                            Dirujuk ke:
+                          </label>
+                          <div className="grid grid-cols-3 gap-2">
+                            {(['Psikolog', 'Puskesmas', 'Pihak Luar'] as const).map((tujuan) => (
+                              <button
+                                key={tujuan}
+                                type="button"
+                                onClick={() => setObsWawRefData({ ...obsWawRefData, dirujukKe: tujuan })}
+                                className={`py-2 px-2 rounded-xl border text-xs font-black cursor-pointer ${
+                                  obsWawRefData.dirujukKe === tujuan
+                                    ? 'bg-[#00685f] text-white border-[#00685f]'
+                                    : 'bg-gray-50 text-gray-700 border-gray-200'
+                                }`}
+                              >
+                                {tujuan}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider block mb-2">
+                            Status Rujukan:
+                          </label>
+                          <div className="grid grid-cols-3 gap-2">
+                            {(['Menunggu', 'Sudah Ditemui', 'Selesai'] as const).map((stRef) => (
+                              <button
+                                key={stRef}
+                                type="button"
+                                onClick={() => setObsWawRefData({ ...obsWawRefData, statusRujukan: stRef })}
+                                className={`py-2 px-2 rounded-xl border text-xs font-black cursor-pointer ${
+                                  obsWawRefData.statusRujukan === stRef
+                                    ? 'bg-[#00685f] text-white border-[#00685f]'
+                                    : 'bg-gray-50 text-gray-700 border-gray-200'
+                                }`}
+                              >
+                                {stRef}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
+                            Alasan Dirujuk (WAJIB):
+                          </label>
+                          <button
+                            type="button"
+                            disabled={isPolishingBlokC}
+                            onClick={() =>
+                              handlePolishBlokCText('observasi-wawancara-referal', obsWawRefData.alasanDirujuk || '', (txt) =>
+                                setObsWawRefData({ ...obsWawRefData, alasanDirujuk: txt })
+                              )
+                            }
+                            className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg text-xs font-extrabold cursor-pointer"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>Rapikan dengan Meta AI</span>
+                          </button>
+                        </div>
+                        <textarea
+                          rows={3}
+                          value={obsWawRefData.alasanDirujuk || ''}
+                          onChange={(e) => setObsWawRefData({ ...obsWawRefData, alasanDirujuk: e.target.value })}
+                          placeholder="Tuliskan alasan klinis/objektif perlunya penanganan ahli eksternal..."
+                          className="w-full p-3 bg-gray-50 border border-gray-300 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30]"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-black text-[#0b1c30] uppercase tracking-wider">
-                    Alasan Rujukan:
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const polished = polishTextWithMetaAi('alih_tangan', alihTanganRawAlasan);
-                      setAlihTanganAiSurat(polished);
-                      setAlihTanganUseAi(true);
-                      showToast('✨ Format surat pengantar rujukan dibuatkan Meta AI!', 'success');
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-lg text-xs font-extrabold shadow-2xs transition-all cursor-pointer active:scale-95"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Buatkan Surat Pengantar dengan Meta AI</span>
-                  </button>
-                </div>
-
-                <textarea
-                  rows={3}
-                  value={alihTanganUseAi && alihTanganAiSurat ? alihTanganAiSurat : alihTanganRawAlasan}
-                  onChange={(e) => {
-                    if (alihTanganUseAi) setAlihTanganAiSurat(e.target.value);
-                    else setAlihTanganRawAlasan(e.target.value);
-                  }}
-                  placeholder="Tulis alasan objektif mengapa kasus membutuhkan penanganan ahli luar..."
-                  className="w-full p-3.5 bg-gray-50 border-2 border-gray-200 focus:border-[#00685f] rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:bg-white focus:outline-none"
-                />
-              </div>
+              <StandardBlokDTindakLanjut
+                value={stdBlokD}
+                onChange={setStdBlokD}
+                aiRecommendation={currentContextualAiText}
+                isGeneratingAi={isGeneratingStdAi}
+                onGenerateAiRecommendation={handleRefreshContextualAi}
+              />
             </div>
           )}
 
@@ -5272,7 +5449,13 @@ export default function TambahLayananForm({
           {/* ========================================================================= */}
           {/* KOTAK REKOMENDASI CERDAS META AI ✨ (Dinamis Berubah Sesuai Topik/Cerita)   */}
           {/* ========================================================================= */}
-          {!isFormAbsen && !isFormKonselingIndividual && !isBimbinganKlasikalOnly && !isHomeVisitOnly && (
+          {!isFormAbsen &&
+            !isFormKonselingIndividual &&
+            !isBimbinganKlasikalOnly &&
+            !isHomeVisitOnly &&
+            !isFormKonselingKelompok &&
+            !isFormMediasi &&
+            !isFormObservasiWawancaraReferal && (
             <div className="bg-gradient-to-br from-indigo-50/90 via-purple-50/70 to-teal-50/80 border-2 border-indigo-200/80 rounded-2xl p-4 sm:p-5 shadow-xs space-y-2">
               <div className="flex items-center gap-2">
                 <div className="p-1.5 rounded-lg bg-indigo-600 text-white shadow-2xs">

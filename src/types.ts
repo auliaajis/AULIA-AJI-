@@ -11,7 +11,36 @@ export interface Student {
   avatarUrl?: string;
   initials: string;
   schoolId?: string;
+  schoolName?: string;
   counselorId?: string;
+  isLegacyUnmigrated?: boolean;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
+}
+
+export interface SchoolDocument {
+  id: string;
+  schoolId: string;
+  schoolName: string;
+  schoolAddress: string;
+  npsn?: string;
+  principalName?: string;
+  principalNip?: string;
+  koordinatorBkName?: string;
+  koordinatorBkNip?: string;
+  governmentName?: string;
+  departmentName?: string;
+  jenjang?: string;
+  statusSekolah?: string;
+  akreditasi?: string;
+  tahunAjaran?: string;
+  semester?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  createdBy?: string;
+  isActive?: boolean;
 }
 
 export interface ViolationCategory {
@@ -35,11 +64,31 @@ export interface ViolationRecord {
   notes: string;
   handledBy?: 'Belum Ditangani' | 'Wali Kelas' | 'Guru BK' | 'Wali Kelas & Guru BK';
   handlingProgress?: string; // Penanganan sejauh apa
+  restitutionStatus?: RestitutionStatusType;
+  restitutionAgreement?: string; // Isi Kesepakatan
+  restitutionDeadline?: string; // Deadline
+  restitutionSupervisor?: string; // Nama Pemantau
+  restitutionCompletedDate?: string; // Tanggal Selesai
   proofPhotoUrl?: string;
   proofPhotoName?: string;
+  pdfUrl?: string;
+  driveFileId?: string;
+  pdfFileName?: string;
+  pdfGeneratedAt?: any;
   schoolId?: string;
+  schoolName?: string;
   counselorId?: string;
+  isLegacyUnmigrated?: boolean;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
 }
+
+// Aliases for multi-school collection mappings
+export type CaseRecord = ViolationRecord;
+
+export type RestitutionStatusType = 'Baru Dicatat' | 'Sudah Konseling' | 'Proses Restitusi' | 'Selesai / Dipantau';
 
 export type BKComponentType =
   | 'Layanan Dasar'
@@ -71,6 +120,7 @@ export type BKServiceType =
   | 'Layanan Mediasi'
   | 'Layanan Konsultasi'
   | 'Alih Tangan Kasus (Referral)'
+  | 'Observasi & Wawancara'
   // Pilar 4: Layanan Dukungan Sistem
   | 'Kolaborasi Guru & Wali Kelas'
   | 'Kemitraan (Puskesmas/Psikolog/Mitra)'
@@ -79,6 +129,100 @@ export type BKServiceType =
   | 'Evaluasi & Supervisi Program';
 
 export type BidangBimbinganType = 'Pribadi' | 'Sosial' | 'Belajar' | 'Karier' | 'Karir' | 'Lintas Bidang' | 'Non-Bidang (Dukungan Sistem)';
+
+export interface ServiceKelompokParticipant {
+  id: string;
+  studentId?: string;
+  nama: string;
+  kelas?: string;
+  peran: 'Dominan' | 'Aktif' | 'Pendiam' | 'Pasif';
+  keterbukaan: number; // 1-5
+  kesepakatanSiswa: string;
+}
+
+export interface ServiceMediasiDetails {
+  pihak1Nama: string;
+  pihak2Nama: string;
+  versiPihak1: string;
+  versiPihak2: string;
+  titikKonflikUtama: string;
+  statusMediasi: 'Sepakat' | 'Tidak Sepakat';
+  kesepakatanBersama?: string;
+  alasanTidakSepakat?: string;
+  rencanaBerikutnya?: string;
+}
+
+export interface ServiceKlasikalDetails {
+  kelas: string;
+  jumlahHadir: number;
+  totalSiswa: number;
+  topikKlasikal: string;
+  dinamikaKelas: 'Aktif' | 'Pasif' | 'Gaduh' | 'Campuran';
+  responSiswa: string;
+}
+
+export interface ServiceObservasiWawancaraReferalDetails {
+  subJenis: 'Observasi' | 'Wawancara' | 'Referal';
+  yangDiamati?: string;
+  tempat?: string;
+  durasi?: string;
+  hasilPengamatan?: string;
+  diwawancarai?: 'Siswa' | 'Guru' | 'Orang Tua';
+  pertanyaanKunci?: string;
+  ringkasanJawaban?: string;
+  alasanDirujuk?: string;
+  dirujukKe?: 'Psikolog' | 'Puskesmas' | 'Pihak Luar';
+  statusRujukan?: 'Menunggu' | 'Sudah Ditemui' | 'Selesai';
+}
+
+export interface ServiceStandardBlokA {
+  tanggal?: string;
+  jam?: string;
+  tempat?: string;
+  pertemuanKe?: number;
+  sifatLayanan?: 'Baru' | 'Lanjutan' | 'Sukarela' | 'Rujukan';
+}
+
+export interface ServiceStandardBlokB {
+  jenisMasalah: EvaluationJenisMasalah;
+  alasanMasalahLainnya?: string;
+  tujuanLayanan: EvaluationTujuanType;
+  teknik: EvaluationTeknikType;
+  baseline: ServiceEvaluationBaseline;
+  layananKeBerapa?: number;
+}
+
+export interface ServiceStandardBlokD {
+  kesepakatan: string;
+  tindakLanjutApa: string;
+  tindakLanjutTanggal: string;
+  penanggungJawab: string;
+  statusTindakLanjut: EvaluationFollowUpStatus;
+}
+
+export interface ServiceIndividualDetails {
+  uraianMasalah: string;
+  prosesPendekatan: string;
+  responSiswa: string;
+  teknikPendekatan?: string[];
+  hasilKategori?: 'Paham Masalah' | 'Temukan Solusi' | 'Komitmen Perubahan' | 'Perlu Lanjut' | 'Dirujuk';
+  jaminanKerahasiaan?: boolean;
+}
+
+export interface ServiceHomeVisitDetails {
+  yangDitemui: 'Ayah' | 'Ibu' | 'Wali' | 'Lainnya';
+  yangDitemuiLainnya?: string;
+  namaOrtu?: string;
+  noHpOrtu?: string;
+  alamat?: string;
+  kondisiRumahSingkat: string;
+  hasilPembicaraan: string;
+  kesepakatanOrtu: string;
+  statusKunjungan?: 'Berhasil Ditemui' | 'Rumah Kosong' | 'Ditolak';
+  fotoBukti?: string;
+  fotoBuktiUrl?: string;
+  fotoName?: string;
+}
 
 export interface ServiceSpecificDetails {
   // Pilar 1: Layanan Dasar
@@ -116,6 +260,30 @@ export interface ServiceSpecificDetails {
   bentukKegiatan?: string; // Rapat Koordinasi, Workshop MGBK, dsb.
   mitraTerlibat?: string; // Pihak/Mitra yang terlibat
   dokumenOutput?: string; // Notulen, MoU, RPL, Laporan
+
+  // Template Standar Blok A/B/C/D (Semua 7 Layanan Terstandar)
+  blokA?: ServiceStandardBlokA;
+  blokB?: ServiceStandardBlokB;
+  blokC?: {
+    individual?: ServiceIndividualDetails;
+    homeVisit?: ServiceHomeVisitDetails;
+    kelompokParticipants?: ServiceKelompokParticipant[];
+    kelompokRingkasanProses?: string;
+    kelompokKomitmenBersama?: string;
+    mediasi?: ServiceMediasiDetails;
+    klasikal?: ServiceKlasikalDetails;
+    observasiWawancaraReferal?: ServiceObservasiWawancaraReferalDetails;
+  };
+  individual?: ServiceIndividualDetails;
+  homeVisit?: ServiceHomeVisitDetails;
+  kelompokParticipants?: ServiceKelompokParticipant[];
+  kelompokRingkasanProses?: string;
+  kelompokKomitmenBersama?: string;
+  mediasi?: ServiceMediasiDetails;
+  klasikal?: ServiceKlasikalDetails;
+  observasiWawancaraReferal?: ServiceObservasiWawancaraReferalDetails;
+  tindakLanjutPlan?: ServiceStandardBlokD;
+  aiContextualRecommendation?: string;
 }
 
 export interface CounselingService {
@@ -141,12 +309,23 @@ export interface CounselingService {
   driveFileId?: string;
   driveViewUrl?: string;
   driveThumbnailUrl?: string;
+  pdfUrl?: string;
+  pdfFileName?: string;
+  pdfGeneratedAt?: any;
   counselorId?: string;
   counselorName?: string;
   schoolId?: string;
+  schoolName?: string;
   linkedViolationId?: string;
   linkedTicketId?: string;
+  isLegacyUnmigrated?: boolean;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
 }
+
+export type CounselingRecord = CounselingService;
 
 export interface PresetServiceData {
   studentIds?: string[];
@@ -187,6 +366,10 @@ export interface ActivityLog {
   timestamp: Date;
   schoolId?: string;
   counselorId?: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
 }
 
 export interface StudentAttendance {
@@ -205,6 +388,10 @@ export interface ClassAttendanceRecord {
   updatedAt: string;
   submittedBy: string; // Counselor name
   schoolId?: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
 }
 
 export interface Counselor {
@@ -229,6 +416,8 @@ export interface Counselor {
   schoolName?: string;
 }
 
+export type UserRecord = Counselor;
+
 export interface BKJournalEntry {
   id: string;
   date: string; // YYYY-MM-DD
@@ -244,6 +433,11 @@ export interface BKJournalEntry {
   proofPhotoUrl?: string;
   proofPhotoName?: string;
   absentStudents?: string;
+  schoolId?: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
 }
 
 export interface ParentAttendanceDetails {
@@ -284,6 +478,11 @@ export interface ParentSummon {
   status: 'Terkirim' | 'Hadir' | 'Batal' | 'Penjadwalan Ulang';
   createdAt: string;
   attendanceDetails?: ParentAttendanceDetails;
+  schoolId?: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
 }
 
 export interface HomeVisitRecord {
@@ -310,6 +509,11 @@ export interface HomeVisitRecord {
   counselorName: string;
   counselorId: string;
   createdAt: string;
+  schoolId?: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
 }
 
 export interface StudentAchievement {
@@ -325,6 +529,11 @@ export interface StudentAchievement {
   category: string;
   recordedBy: string;
   extraNotes?: string;
+  schoolId?: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
 }
 
 export interface SuratPerjanjianRecord {
@@ -349,6 +558,9 @@ export interface SuratPerjanjianRecord {
   witnessHomeroomTeacher?: string;
   counselorName: string;
   createdAt: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
 }
 
 export interface KontrakPerilakuRecord {
@@ -373,6 +585,9 @@ export interface KontrakPerilakuRecord {
   witnessHomeroomTeacher?: string;
   counselorName: string;
   createdAt: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
 }
 
 export interface JurnalPembinaanDisiplinRecord {
@@ -392,6 +607,9 @@ export interface JurnalPembinaanDisiplinRecord {
   counselorName: string;
   status: 'Proses Pembinaan' | 'Selesai / Teratasi';
   createdAt: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
 }
 
 export interface KomitmenRtlRecord {
@@ -409,6 +627,9 @@ export interface KomitmenRtlRecord {
   reviewDate?: string;
   counselorName: string;
   createdAt: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
 }
 
 export interface StickyNote {
@@ -454,6 +675,350 @@ export interface ParentSummonTemplate {
   createdAt?: string;
   updatedAt?: string;
 }
+
+export type EvaluationBidangType =
+  | 'Layanan Dasar'
+  | 'Layanan Responsif'
+  | 'Perencanaan Individual'
+  | 'Dukungan Sistem'
+  | string;
+
+export type EvaluationFollowUpStatus =
+  | 'Belum Dikerjakan'
+  | 'Sedang Berjalan'
+  | 'Selesai'
+  | 'Tidak Berhasil'
+  | 'Sudah Ditindaklanjuti'
+  | 'Masih Berjalan'
+  | 'Perlu Rujukan';
+
+export type EvaluationJenisMasalah =
+  | 'Terlambat'
+  | 'Bolos'
+  | 'Konflik Teman'
+  | 'Motivasi Belajar Rendah'
+  | 'Kecemasan'
+  | 'Keluarga'
+  | 'Disiplin'
+  | 'Perencanaan Karir'
+  | 'Lainnya'
+  | string;
+
+export type EvaluationTeknikType =
+  | 'Konseling Individual'
+  | 'Konseling Kelompok'
+  | 'Bimbingan Klasikal'
+  | 'Mediasi'
+  | 'Observasi'
+  | 'Wawancara'
+  | 'Home Visit'
+  | 'Referal'
+  | string;
+
+export type EvaluationTujuanType =
+  | 'Memahami Masalah'
+  | 'Mengubah Perilaku'
+  | 'Memberi Dukungan'
+  | 'Merencanakan Masa Depan'
+  | 'Menyelesaikan Konflik'
+  | string;
+
+export interface EvaluationEvidenceFile {
+  name: string;
+  dataUrl: string;
+  type?: string;
+  sizeLabel?: string;
+}
+
+export interface ServiceEvaluationBaseline {
+  keparahan: number; // 1-5
+  frekuensi: number; // 1-5
+  motivasiAwal: number; // 1-5
+  baselineDariIngatan: true;
+  skorKondisiAwal?: number; // 1-5 normalized positive composite
+}
+
+export interface ServiceEvaluation6Scores {
+  ketercapaianTujuan: number; // 1-5
+  perubahanPerilaku: number; // 1-5
+  keterlibatanSiswa: number; // 1-5
+  keterbukaanSiswa: number; // 1-5
+  kesesuaianTeknik: number; // 1-5
+  kesiapanTindakLanjut: number; // 1-5
+  totalSkor: number; // 6-30
+  rataRata: number; // 1.0 - 5.0
+  kategori: string;
+}
+
+export interface ServiceEvaluationAiAnalysis {
+  interpretasiKontekstual: string;
+  kekuatanSpesifik: string;
+  areaPerbaikanSpesifik: string;
+  rekomendasiTindakLanjut: {
+    apa: string;
+    kapan: string;
+    siapa: string;
+    teknik: string;
+    ringkasan: string;
+  };
+  generatedAt?: string;
+}
+
+export interface ServiceEvaluationFollowUpCheck {
+  skorPerubahanSekarang: number; // 1-5
+  masalahBerulang: boolean;
+  delta: number; // Follow-up - Baseline
+  checkedAt: string;
+  catatan?: string;
+}
+
+export interface ProgramBidangEvaluationItem {
+  bidang: EvaluationBidangType;
+  totalServices: number;
+  evaluatedCount?: number;
+  unevaluatedCount?: number;
+  totalStudentsUnique: number;
+  inPeriodCount: number;
+  outsidePeriodCount: number;
+  target: number | null;
+  realisasi: number;
+  nilai: number;
+  rata6Skor?: number;
+  kondisiAwal: string;
+  kondisiSetelah: string;
+  activityTitles: string[];
+}
+
+export interface ProgramProblemMetricItem {
+  jenisMasalah: string;
+  totalEvaluasi: number;
+  rataRataSkor: number;
+  rataRataBaseline: number;
+  rataRataDelta: number | null;
+  persenSelesai: number;
+  teknikDominan: string;
+}
+
+export interface ProgramTechniqueMetricItem {
+  teknik: string;
+  totalEvaluasi: number;
+  rataRataSkor: number;
+  persenSelesai: number;
+}
+
+export interface ProgramAiPerProblemItem {
+  jenisMasalah: string;
+  ringkasanEvaluasi: string;
+  rekomendasiStrategis: string;
+}
+
+export type CaseFinalStatus =
+  | 'Tuntas'
+  | 'Masih Berproses'
+  | 'Dirujuk ke Psikolog / Pihak Luar'
+  | 'Tidak Tertangani';
+
+export type CaseUnresolvedReason =
+  | 'Siswa Pindah'
+  | 'Orang Tua Menolak'
+  | 'Di Luar Kewenangan BK'
+  | string;
+
+export type NeedDeterminationMethod =
+  | 'Angket Siswa'
+  | 'Observasi Wali Kelas'
+  | 'Data Tahun Lalu'
+  | 'Perkiraan Guru BK'
+  | string;
+
+export type FokusUtamaTahunan =
+  | 'Mengurangi Bolos'
+  | 'Menangani Konflik Teman'
+  | 'Meningkatkan Motivasi Belajar'
+  | 'Mengurangi Kecemasan';
+
+export interface RencanaTahunanData {
+  tahunAjaran: string;
+  jamPerMinggu: number;
+  jumlahKelas: number;
+  fokusUtama: FokusUtamaTahunan;
+  mingguEfektif: number; // 36 (52 - 14 libur/ujian)
+  pertemuanPerKelas: number; // jam * 36
+  totalKlasikal: number; // pertemuan * jumlahKelas
+  perSemester: number; // floor(totalKlasikal / 2)
+  targetRealistis90: number; // floor(totalKlasikal * 0.9)
+  targetLayananDasar: number;
+  targetLayananResponsif: number;
+  targetPerencanaanIndividual: number;
+  targetDukunganSistem: number;
+  totalTarget: number;
+  isOverloaded: boolean;
+  aiNote: string;
+  updatedAt?: string;
+}
+
+export interface InitialProgramNeedPlan {
+  kebutuhanUtama: string[]; // 1-2 items
+  caraMenentukan: NeedDeterminationMethod;
+  catatanAwal?: string;
+  updatedAt?: string;
+}
+
+export interface ProgramStakeholderVoices {
+  suaraSiswa?: string;
+  suaraWaliKelas?: string;
+  suaraKepsekOrtu?: string;
+}
+
+export interface CounselorSemesterReflection {
+  teknikBerhasil?: string;
+  teknikGagalDiubah?: string;
+  kendalaTerbesar?:
+    | 'Waktu'
+    | 'Beban Mengajar'
+    | 'Dukungan Wali Kelas'
+    | 'Ruang Konseling'
+    | 'Jadwal Bentrok'
+    | 'Banyak Layanan Belum Dievaluasi'
+    | 'Lainnya'
+    | string;
+  kendalaPenjelas?: string;
+}
+
+export interface NextSemesterImprovementPlan {
+  lanjutkan: string;
+  hentikan: string;
+  ubah: string;
+  butuhDukungan: string;
+}
+
+export interface CaseStatusSummary {
+  totalKasus: number;
+  tuntas: number;
+  masihBerproses: number;
+  dirujuk: number;
+  tidakTertangani: number;
+}
+
+export interface ProgramEvaluation {
+  id: string;
+  serviceId: string;
+  bidang: EvaluationBidangType;
+  namaProgram: string;
+  kelas: string;
+  target: number | null;
+  realisasi: number;
+  kondisiAwal: string;
+  kondisiSetelah: string;
+  hasil: string;
+  kendala: string;
+  tindakLanjut: string;
+  tanggalTindakLanjut: string;
+  penanggungJawabTindakLanjut?: string;
+  statusTindakLanjut: EvaluationFollowUpStatus;
+  nilai: number;
+  feedbackSiswaNilai: number;
+  feedbackSiswaKomentar: string;
+  feedbackWaliNama: string;
+  feedbackWaliKomentar: string;
+  buktiFoto: (EvaluationEvidenceFile | string)[];
+  tanggal: string;
+  createdBy: string;
+  evaluationScope?: 'program' | 'layanan' | 'kebutuhan-awal' | 'rencana-tahunan';
+
+  // Evaluasi Layanan structured context + baseline + 6 scores + 14-day follow-up + AI
+  jenisMasalah?: EvaluationJenisMasalah;
+  alasanMasalahLainnya?: string;
+  teknikDipakai?: EvaluationTeknikType;
+  tujuanLayanan?: EvaluationTujuanType;
+  baseline?: ServiceEvaluationBaseline;
+  baselineDariIngatan?: boolean;
+  scores6?: ServiceEvaluation6Scores;
+  isKlasikalEvaluation?: boolean;
+  layananKeBerapa?: number;
+  aiAnalysis?: ServiceEvaluationAiAnalysis;
+  followUpCheck?: ServiceEvaluationFollowUpCheck;
+
+  // Lapisan 3: Status Akhir Kasus pada Evaluasi Layanan (dapat diubah kapan saja)
+  statusAkhirKasus?: CaseFinalStatus;
+  alasanTidakTertangani?: CaseUnresolvedReason;
+
+  // Rencana Program Tahunan (Kalkulasi AI, Tanpa Asesmen Awal) + Lapisan Evaluasi
+  rencanaTahunan?: RencanaTahunanData;
+  kebutuhanAwal?: InitialProgramNeedPlan;
+  suaraStakeholder?: ProgramStakeholderVoices;
+  refleksiKonselor?: CounselorSemesterReflection;
+  rencanaPerbaikan?: NextSemesterImprovementPlan;
+
+  // Evaluasi Program aggregated strictly from Evaluasi Layanan
+  bidangList?: ProgramBidangEvaluationItem[];
+  programMetrics?: {
+    totalServicesInPeriod: number;
+    servicesTerlaksana?: number;
+    servicesDibatalkan?: number;
+    servicesTerjadwal?: number;
+    evaluatedServicesCount: number;
+    unevaluatedServicesCount: number;
+    rataRataDeltaFollowUp: number | null;
+    followUpCheckedCount: number;
+    pendingFollowUpCount: number;
+    persenTindakLanjutSelesai: number;
+    byJenisMasalah: ProgramProblemMetricItem[];
+    byTeknik: ProgramTechniqueMetricItem[];
+    caseSummary?: CaseStatusSummary;
+  };
+  aiProgramPerMasalah?: ProgramAiPerProblemItem[];
+  aiCompletenessNotice?: string;
+  aiPerbandinganKebutuhan?: string;
+  aiEvaluasiStakeholder?: string;
+  aiInterpretasiKasus?: string;
+  aiEvaluasiRefleksi?: string;
+
+  aggregatedSummary?: {
+    totalServices: number;
+    totalStudentsServed: number;
+    totalServicesRead?: number;
+    inPeriodCount?: number;
+    outsidePeriodCount?: number;
+    unclassifiedCount?: number;
+    syncedAt?: string;
+    activityTitles: string[];
+  };
+  jenisLayanan?: string;
+  guruBk?: string;
+  semester?: 'Ganjil' | 'Genap';
+  tahunAjaran?: string;
+  schoolId?: string;
+  schoolName?: string;
+  counselorId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deletedReason?: string;
+}
+
+export type ServiceEvaluation = ProgramEvaluation;
+
+export interface HapusLogEntry {
+  id: string;
+  idSiswa?: string;
+  recordId: string;
+  localKey: string;
+  entityType: string;
+  nama: string;
+  kelas?: string;
+  tanggalHapus: string;
+  oleh: string;
+  alasan: string;
+  schoolId?: string;
+  restoredAt?: string;
+  permanentlyDeleted?: boolean;
+}
+
+
+
 
 
 

@@ -21,13 +21,17 @@ import {
 import { Student, Counselor, HomeVisitRecord, BidangBimbinganType } from '../types';
 import { BIDANG_BIMBINGAN_OPTIONS } from '../utils/bkKomprehensif';
 import { getSchoolConfig, downloadHomeVisitPDF, downloadRekapHomeVisitPDF } from '../utils/pdfGenerator';
+import { formatCardDate, formatCardDateTime } from '../utils/dateFormatter';
 import { triggerBackgroundAutoSync } from '../utils/googleSync';
-import { registerDeletedId } from '../utils/deletionTracker';
+import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
 import { autoPushToJournal } from '../utils/journalAutoLink';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { saveBulkToFirestore, saveSchoolData, loadSchoolData, softDeleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { getActiveSchoolId, getValidatedSchoolIdentity, buildSchoolStamp } from '../utils/schoolConfig';
 import { filterHomeVisits } from '../utils/accessControl';
 import GoogleDrivePhotoUploader from './GoogleDrivePhotoUploader';
 import { initialHomeVisits } from '../data/mockData';
+import { showToast } from '../utils/toast';
+import { isValidDeleteId, safeFilterSingleDelete, generateUniqueId } from '../utils/safeDelete';
 
 interface SignaturePadProps {
   label: string;
@@ -170,20 +174,30 @@ interface HomeVisitViewProps {
 export default function HomeVisitView({ students, activeCounselor }: HomeVisitViewProps) {
   const isInitialMount = useRef(true);
 
-  // Core states
+  // Core states (seed once per school; never resurrect deleted visits)
   const [visits, setVisits] = useState<HomeVisitRecord[]>(() => {
-    const loaded = loadSchoolData<HomeVisitRecord[]>('bk_home_visits', initialHomeVisits);
-    if (!loaded || loaded.length === 0) {
-      saveSchoolData('bk_home_visits', initialHomeVisits);
-      return initialHomeVisits;
+    const schoolId = activeCounselor?.schoolId || getActiveSchoolId();
+    const seedFlag = `bk_hv_seeded_${schoolId}`;
+    const alreadySeeded = typeof localStorage !== 'undefined' && localStorage.getItem(seedFlag) === 'true';
+    const deletedSet = new Set(getDeletedIds());
+    const loaded = loadSchoolData<HomeVisitRecord[]>('bk_home_visits', []);
+    if (Array.isArray(loaded) && loaded.length > 0) {
+      return loaded.filter((v) => v && v.isDeleted !== true && !deletedSet.has(String(v.id)));
     }
-    return loaded;
+    if (!alreadySeeded) {
+      const initialClean = initialHomeVisits.filter((v) => v && !deletedSet.has(String(v.id)));
+      saveSchoolData('bk_home_visits', initialClean);
+      if (typeof localStorage !== 'undefined') localStorage.setItem(seedFlag, 'true');
+      return initialClean;
+    }
+    return [];
   });
 
   // Navigation / Modal States
   const [showAddForm, setShowAddForm] = useState(false);
   const [selectedVisit, setSelectedVisit] = useState<HomeVisitRecord | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [pendingDeleteVisitId, setPendingDeleteVisitId] = useState<string | null>(null);
 
   // Form states
   const [studentSearch, setStudentSearch] = useState('');
@@ -223,10 +237,11 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
   useEffect(() => {
     const handleRealtimeUpdate = (e: any) => {
       if (e.detail?.key === 'bk_home_visits') {
+        const deletedSet = new Set(getDeletedIds());
         if (Array.isArray(e.detail.data)) {
-          setVisits(e.detail.data);
+          setVisits(e.detail.data.filter((v: any) => v && v.isDeleted !== true && !deletedSet.has(String(v.id))));
         } else {
-          setVisits(loadSchoolData('bk_home_visits', []));
+          setVisits(loadSchoolData<HomeVisitRecord[]>('bk_home_visits', []).filter((v) => v && v.isDeleted !== true && !deletedSet.has(String(v.id))));
         }
       }
     };
@@ -273,17 +288,24 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
   // Submit form handler
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return;
+    }
     if (!selectedStudent) {
-      alert('Silakan pilih siswa target terlebih dahulu.');
+      showToast('Silakan pilih siswa target terlebih dahulu.', 'error');
       return;
     }
 
     const year = new Date(visitDate).getFullYear();
     const randomNumber = Math.floor(100 + Math.random() * 900);
     const reportNumber = `HV-${year}-${randomNumber}`;
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
 
     const newRecord: HomeVisitRecord = {
-      id: `hv-${Date.now()}`,
+      ...stamp,
+      id: generateUniqueId('hv'),
       reportNumber,
       date: visitDate,
       bidangBimbingan,
@@ -304,11 +326,11 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
       counselorSignature,
       counselorName: activeCounselor.name,
       counselorId: activeCounselor.id,
-      createdAt: new Date().toISOString()
+      createdAt: stamp.createdAt
     };
 
     setVisits((prev) => [newRecord, ...prev]);
-    saveToFirestore('bk_home_visits', newRecord);
+    saveToFirestore('bk_home_visits', newRecord, schoolValidation.schoolId);
     
     // Add activity log to local store for dashboard
     const today = new Date();
@@ -383,14 +405,34 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
 
   const handleDeleteVisit = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (confirm('Apakah Anda yakin ingin menghapus arsip bukti Home Visit ini?')) {
-      registerDeletedId(id);
-      deleteFromFirestore('bk_home_visits', id);
-      setVisits(visits.filter((v) => v.id !== id));
-      if (selectedVisit?.id === id) {
-        setSelectedVisit(null);
-      }
+    setPendingDeleteVisitId(id);
+  };
+
+  const executeDeleteVisit = async (id: string) => {
+    setPendingDeleteVisitId(null);
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID Home Visit tidak valid, hapus dibatalkan', 'error');
+      return;
     }
+    const res = safeFilterSingleDelete(visits, id);
+    if (!res.ok) return;
+    const target = res.removed;
+    setVisits((prev) => {
+      const next = safeFilterSingleDelete(prev, id);
+      return next.ok ? next.next : prev;
+    });
+    if (selectedVisit?.id === id) {
+      setSelectedVisit(null);
+    }
+    registerDeletedId(id);
+    await softDeleteFromFirestore('bk_home_visits', target || id, {
+      deletedBy: activeCounselor?.name || 'Guru BK',
+      deletedReason: 'Dihapus dari menu Home Visit',
+      entityType: 'Home Visit',
+      nama: target?.studentName || id,
+      kelas: target?.studentClass || '',
+    });
+    showToast('Arsip Home Visit dihapus', 'info');
   };
 
   // Filtered visits for main listing
@@ -790,7 +832,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                         </span>
                       </div>
                       <span className="text-[9px] text-gray-400 font-bold">
-                        {v.date}
+                        {formatCardDate(v.date)}
                       </span>
                     </div>
 
@@ -925,7 +967,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
                 <div className="grid grid-cols-3 gap-3 border-b border-gray-100 pb-3">
                   <div>
                     <span className="text-gray-400 font-extrabold block uppercase text-[9px] tracking-wide">Tanggal Kunjungan:</span>
-                    <span className="font-bold text-gray-800 block mt-1">{selectedVisit.date}</span>
+                    <span className="font-bold text-gray-800 block mt-1">{formatCardDate(selectedVisit.date)}</span>
                   </div>
                   <div>
                     <span className="text-gray-400 font-extrabold block uppercase text-[9px] tracking-wide">Bidang Bimbingan:</span>
@@ -1049,7 +1091,42 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
           </div>
         </div>
       )}
-
+      {pendingDeleteVisitId && (() => {
+        const targetVisit = visits.find((v) => v.id === pendingDeleteVisitId);
+        return (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus Home Visit</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+                  Hapus arsip Home Visit {targetVisit?.studentName || 'ini'} saja? Data Home Visit lain tidak akan terhapus.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteVisitId(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => executeDeleteVisit(pendingDeleteVisitId)}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Ya, Hapus 1 Ini Saja
+              </button>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
     </div>
   );
 }

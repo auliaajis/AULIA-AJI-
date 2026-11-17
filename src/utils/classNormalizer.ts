@@ -51,3 +51,69 @@ export function getNormalizedClassKey(className: string): string {
   
   return clean;
 }
+
+export function parseClassRank(className: string): {
+  grade: number;
+  suffix: string;
+  label: string;
+  normalizedKey: string;
+} {
+  const key = getNormalizedClassKey(className);
+  if (!key) {
+    return { grade: 999, suffix: '', label: '-', normalizedKey: '' };
+  }
+  const match = key.match(/^(\d+)(.*)$/);
+  if (match) {
+    const grade = parseInt(match[1], 10);
+    const suffix = (match[2] || '').toUpperCase();
+    return {
+      grade: Number.isNaN(grade) ? 999 : grade,
+      suffix,
+      label: `${grade}${suffix}`,
+      normalizedKey: key,
+    };
+  }
+  const cleanLabel = String(className || '')
+    .replace(/^kelas\s+/i, '')
+    .replace(/^kls\s+/i, '')
+    .trim()
+    .toUpperCase();
+  return {
+    grade: 999,
+    suffix: cleanLabel,
+    label: cleanLabel || '-',
+    normalizedKey: key,
+  };
+}
+
+export function formatShortClassLabel(className: string): string {
+  return parseClassRank(className).label;
+}
+
+export function compareClassNames(a: string, b: string): number {
+  const ra = parseClassRank(a);
+  const rb = parseClassRank(b);
+  if (ra.grade !== rb.grade) {
+    return ra.grade - rb.grade;
+  }
+  return ra.suffix.localeCompare(rb.suffix, 'id', { numeric: true, sensitivity: 'base' });
+}
+
+export function compareStudentNamesAZ(
+  a: { name?: string },
+  b: { name?: string }
+): number {
+  const na = String(a?.name || '').trim();
+  const nb = String(b?.name || '').trim();
+  return na.localeCompare(nb, 'id', { sensitivity: 'base' });
+}
+
+export function compareStudentsByClassAndName(
+  a: { class?: string; name?: string },
+  b: { class?: string; name?: string }
+): number {
+  const clsCmp = compareClassNames(a?.class || '', b?.class || '');
+  if (clsCmp !== 0) return clsCmp;
+  return compareStudentNamesAZ(a, b);
+}
+

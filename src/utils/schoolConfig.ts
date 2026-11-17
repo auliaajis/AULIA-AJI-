@@ -1,9 +1,10 @@
 import { safeSetItem, safeGetItem, safeRemoveItem, sanitizeLogsArray, sanitizeViolationsArray, compactAttendanceHistory } from './storageQuota';
-import { CANONICAL_AULIA_STUDENTS } from '../data/canonicalStudents';
 
 export interface SchoolConfig {
   schoolId?: string;
   schoolName: string;
+  namaSekolah?: string;
+  kecamatan?: string;
   schoolAddress: string;
   principalName: string;
   principalNip: string;
@@ -34,6 +35,8 @@ export interface SchoolConfig {
 export const DEFAULT_SCHOOL_CONFIG: SchoolConfig = {
   schoolId: 'sch_20320123',
   schoolName: 'SMP N 2 Susukan',
+  namaSekolah: 'SMP Negeri 2 Susukan',
+  kecamatan: 'Susukan',
   schoolAddress: 'Jl. Kyai Hasan Anwar No. 16, Susukan, Kec. Susukan, Kab. Semarang, Jawa Tengah 50777',
   principalName: 'Agus Setiawan, S.Pd. Fis',
   principalNip: '19680831 199103 1 007',
@@ -55,6 +58,19 @@ export const DEFAULT_SCHOOL_CONFIG: SchoolConfig = {
   tppkKontakPengaduan: 'Hotline SAPA 129 / Pengaduan Sekolah: 0812-3456-7890',
   tppkSkPenetapan: 'SK/TPPK-SMP2SSK/2024/01',
 };
+
+export function getKopSuratSchoolName(cfg?: Partial<SchoolConfig> | null): string {
+  if (!cfg) return 'SMP Negeri 2 Susukan';
+  const explicitOfficial = String(cfg.namaSekolah || '').trim();
+  if (explicitOfficial) return explicitOfficial;
+  const rawName = String(cfg.schoolName || '').trim();
+  if (!rawName) return 'SMP Negeri 2 Susukan';
+  const low = rawName.toLowerCase();
+  if (low === 'smp n 2 susukan' || low === 'smpn 2 susukan' || low === 'smp negeri 2 susukan') {
+    return 'SMP Negeri 2 Susukan';
+  }
+  return rawName;
+}
 
 // Preset Logo Data URLs (High-Resolution Official Emblems for Kop Surat)
 export const PRESET_LOGOS = {
@@ -84,9 +100,12 @@ export function sanitizeSchoolId(input: string): string {
   if (
     clean === '20320123' ||
     clean === 'sch_20320123' ||
+    clean === 'smpn2susukan' ||
+    clean === 'smpn_2_susukan' ||
     clean.includes('smp_negeri_2_susukan') ||
     clean.includes('smp_n_2_susukan') ||
-    clean.includes('uptd_spf_smp_negeri_2_susuka')
+    clean.includes('uptd_spf_smp_negeri_2_susuka') ||
+    (clean.includes('susukan') && (clean.includes('2') || clean.includes('negeri')))
   ) {
     return 'sch_20320123';
   }
@@ -97,8 +116,8 @@ export function generateSchoolIdFromConfig(cfg: Partial<SchoolConfig>): string {
   if (cfg.npsn && cfg.npsn.replace(/[^0-9a-zA-Z]/g, '').trim() === '20320123') {
     return 'sch_20320123';
   }
-  const sName = (cfg.schoolName || '').toLowerCase();
-  if (sName.includes('smp n 2 susukan') || sName.includes('smp negeri 2 susukan')) {
+  const sName = (cfg.schoolName || cfg.namaSekolah || '').toLowerCase();
+  if (sName.includes('smp n 2 susukan') || sName.includes('smpn 2 susukan') || sName.includes('smp negeri 2 susukan')) {
     return 'sch_20320123';
   }
   if (cfg.npsn && cfg.npsn.replace(/[^0-9a-zA-Z]/g, '').length >= 4) {
@@ -136,6 +155,113 @@ export function setActiveSchoolId(schoolId: string): void {
   localStorage.setItem('bk_active_school_id', cleanId);
 }
 
+export function extractRecordSchoolId(item: any): string {
+  if (!item || typeof item !== 'object') return '';
+  const raw = item.schoolId ?? item.sekolahId ?? '';
+  return String(raw || '').trim();
+}
+
+export function isLegacyUnassignedRecord(item: any): boolean {
+  if (!item || typeof item !== 'object') return false;
+  return extractRecordSchoolId(item) === '';
+}
+
+export function matchesSchoolOrLegacy(item: any, targetSchoolId?: string): boolean {
+  if (!item || typeof item !== 'object') return false;
+  const raw = extractRecordSchoolId(item);
+  // 2 syarat: tampilkan jika schoolId kosong/null/tidak ada (data lama) ATAU sama dengan schoolId user
+  if (!raw) return true;
+  const currentId = sanitizeSchoolId(targetSchoolId || getActiveSchoolId());
+  return sanitizeSchoolId(raw) === currentId;
+}
+
+export function belongsToOtherSchool(item: any, targetSchoolId?: string): boolean {
+  if (!item || typeof item !== 'object') return false;
+  const raw = extractRecordSchoolId(item);
+  if (!raw) return false;
+  const currentId = sanitizeSchoolId(targetSchoolId || getActiveSchoolId());
+  return sanitizeSchoolId(raw) !== currentId;
+}
+
+export function hasConfiguredSchool(counselor?: { schoolId?: string; schoolName?: string; namaSekolah?: string; sekolahId?: string } | null): boolean {
+  if (typeof localStorage === 'undefined') return true;
+  const activeId = (localStorage.getItem('bk_active_school_id') || '').trim();
+  const cSchoolId = String(counselor?.schoolId || counselor?.sekolahId || '').trim();
+  const cSchoolName = String(counselor?.schoolName || counselor?.namaSekolah || '').trim();
+
+  if (counselor) {
+    if (!cSchoolId && !cSchoolName) return false;
+    if (cSchoolName === 'Sekolah Terdaftar') return false;
+  }
+
+  const resolvedId = cSchoolId || activeId;
+  if (!resolvedId) return false;
+  const cfg = getSchoolConfig(resolvedId);
+  const resolvedName = cSchoolName || String(cfg.schoolName || '').trim();
+  if (!resolvedName || resolvedName === 'Sekolah Terdaftar') return false;
+  return true;
+}
+
+export interface ValidatedSchoolIdentity {
+  ok: boolean;
+  schoolId: string;
+  schoolName: string;
+  npsn: string;
+  errorMessage?: string;
+}
+
+export function getValidatedSchoolIdentity(
+  counselor?: { schoolId?: string; schoolName?: string; namaSekolah?: string; sekolahId?: string; schoolNpsn?: string } | null
+): ValidatedSchoolIdentity {
+  if (!hasConfiguredSchool(counselor)) {
+    return {
+      ok: false,
+      schoolId: '',
+      schoolName: '',
+      npsn: '',
+      errorMessage: 'Gagal: Sekolah belum diatur'
+    };
+  }
+  const rawId = String(counselor?.schoolId || counselor?.sekolahId || getActiveSchoolId() || '').trim();
+  const schoolId = sanitizeSchoolId(rawId);
+  const cfg = getSchoolConfig(schoolId);
+  const schoolName = String(
+    counselor?.schoolName ||
+    counselor?.namaSekolah ||
+    cfg.schoolName ||
+    (schoolId === 'sch_20320123' ? 'SMP N 2 Susukan' : '')
+  ).trim();
+  const npsn = String(counselor?.schoolNpsn || cfg.npsn || (schoolId === 'sch_20320123' ? '20320123' : '')).trim();
+
+  if (!schoolId || !schoolName) {
+    return {
+      ok: false,
+      schoolId: '',
+      schoolName: '',
+      npsn: '',
+      errorMessage: 'Gagal: Sekolah belum diatur'
+    };
+  }
+  return { ok: true, schoolId, schoolName, npsn };
+}
+
+export function buildSchoolStamp(
+  identity: ValidatedSchoolIdentity,
+  authorName?: string,
+  existingCreatedAt?: string
+): Record<string, any> {
+  const createdAt = existingCreatedAt || new Date().toISOString();
+  return {
+    schoolId: identity.schoolId,
+    sekolahId: identity.schoolId,
+    schoolName: identity.schoolName,
+    namaSekolah: identity.schoolName,
+    ...(identity.npsn ? { npsn: identity.npsn } : {}),
+    createdAt,
+    ...(authorName ? { createdBy: authorName, dibuatOleh: authorName } : {})
+  };
+}
+
 export function getSchoolStorageKey(baseKey: string, schoolId?: string): string {
   const sId = schoolId ? sanitizeSchoolId(schoolId) : getActiveSchoolId();
   return `${baseKey}_${sId}`;
@@ -147,6 +273,20 @@ export function loadSchoolData<T>(baseKey: string, fallback: T, schoolId?: strin
   const partitionedKey = `${baseKey}_${sId}`;
 
   const isExplicitlyCleared = safeGetItem(`bk_cleared_${sId}`) === 'true';
+  let deletedIdsSet = new Set<string>();
+  try {
+    const rawDel = JSON.parse(localStorage.getItem('bk_deleted_ids') || '[]');
+    if (Array.isArray(rawDel)) {
+      deletedIdsSet = new Set(rawDel.map((id: any) => String(id).trim()).filter(Boolean));
+    }
+  } catch (e) {}
+
+  const isNotSoftDeleted = (item: any): boolean => {
+    if (!item || typeof item !== 'object') return false;
+    if (item.isDeleted === true) return false;
+    if (item.id && deletedIdsSet.has(String(item.id).trim())) return false;
+    return true;
+  };
 
   const savedPartitioned = safeGetItem(partitionedKey);
   if (savedPartitioned !== null) {
@@ -156,16 +296,16 @@ export function loadSchoolData<T>(baseKey: string, fallback: T, schoolId?: strin
         if (parsed.length === 0) {
           return [] as unknown as T;
         }
-        let sanitized = parsed.filter((item: any) => {
-          if (!item || typeof item !== 'object') return false;
-          // Filter out records stamped with a different school ID
-          if (item.schoolId && sanitizeSchoolId(item.schoolId) !== sId) {
-            return false;
-          }
-          return true;
+        const sanitized = parsed.filter((item: any) => {
+          if (!isNotSoftDeleted(item)) return false;
+          // Aturan 2 syarat: tampilkan jika schoolId === sId ATAU schoolId kosong/null/tidak ada (data lama)
+          return matchesSchoolOrLegacy(item, sId);
         });
         return sanitized as unknown as T;
       } else if (parsed !== null && parsed !== undefined) {
+        if (typeof parsed === 'object' && parsed.isDeleted === true) {
+          return fallback;
+        }
         return parsed;
       }
     } catch (e) {}
@@ -175,23 +315,22 @@ export function loadSchoolData<T>(baseKey: string, fallback: T, schoolId?: strin
     return (Array.isArray(fallback) ? [] : fallback) as unknown as T;
   }
 
-  // Fallback to unpartitioned legacy storage if partitioned key is empty ONLY for canonical school sch_20320123
+  // Fallback to unpartitioned legacy storage for ANY school (data lama sebelum multi-sekolah)
   const savedBase = safeGetItem(baseKey);
   if (savedBase !== null) {
     try {
       const parsed = JSON.parse(savedBase);
       if (Array.isArray(parsed)) {
-        if (sId === 'sch_20320123') {
-          saveSchoolData(baseKey, parsed, sId);
-          safeRemoveItem(baseKey); // Clean up obsolete legacy key to free space
-          return parsed as unknown as T;
-        }
-        return fallback;
+        const cleanLegacy = parsed.filter((item: any) => isNotSoftDeleted(item) && matchesSchoolOrLegacy(item, sId));
+        return cleanLegacy as unknown as T;
       }
     } catch (e) {}
   }
 
-  // Return provided fallback
+  // Return filtered fallback
+  if (Array.isArray(fallback)) {
+    return (fallback as any[]).filter(isNotSoftDeleted) as unknown as T;
+  }
   return fallback;
 }
 
@@ -200,19 +339,22 @@ export function saveSchoolData<T>(baseKey: string, data: T, schoolId?: string): 
   const sId = schoolId ? sanitizeSchoolId(schoolId) : getActiveSchoolId();
   const partitionedKey = `${baseKey}_${sId}`;
 
-  // Automatically stamp schoolId on array items to guarantee origin identification
-  let preparedData: any = data;
-  if (Array.isArray(data)) {
-    preparedData = data.map((item: any) => {
-      if (item && typeof item === 'object') {
-        return {
-          ...item,
-          schoolId: item.schoolId ? sanitizeSchoolId(item.schoolId) : sId
-        };
-      }
-      return item;
-    });
-  }
+  // Jangan menimpa data lama yang belum memiliki schoolId di cache lokal — biarkan status aslinya terbaca untuk Audit & Migrasi manual
+  const preparedData: any = Array.isArray(data)
+    ? data.map((item: any) => {
+        if (item && typeof item === 'object') {
+          const existingId = extractRecordSchoolId(item);
+          if (!existingId) {
+            return {
+              ...item,
+              isLegacyUnmigrated: true
+            };
+          }
+          return item;
+        }
+        return item;
+      })
+    : data;
 
   // Automatically cap and sanitize payloads to prevent quota bloat
   let payload: any = preparedData;
@@ -340,6 +482,36 @@ export function getSchoolConfig(forSchoolId?: string): SchoolConfig {
   return { ...DEFAULT_SCHOOL_CONFIG, schoolId: targetId };
 }
 
+/**
+ * Daftarkan sekolah lain ke daftar sekolah lokal tanpa mengubah sekolah yang sedang aktif.
+ * Digunakan oleh listener global `account_requests` / `schools` agar akun sekolah lain
+ * tidak membajak identitas `bk_active_school_id` atau `bk_school_config` pengguna saat ini.
+ */
+export function registerSchoolConfigWithoutActivating(config: SchoolConfig): void {
+  if (typeof localStorage === 'undefined' || !config?.schoolName) return;
+
+  const schoolId = config.schoolId ? sanitizeSchoolId(config.schoolId) : generateSchoolIdFromConfig(config);
+  // Jangan timpa konfigurasi kanonik SMP N 2 Susukan dengan stub minimal dari request akun
+  if (schoolId === 'sch_20320123' && localStorage.getItem('bk_school_config_sch_20320123')) {
+    return;
+  }
+
+  const updatedConfig: SchoolConfig = {
+    ...config,
+    schoolId,
+    updatedAt: config.updatedAt || new Date().toISOString()
+  };
+
+  if (!localStorage.getItem(`bk_school_config_${schoolId}`)) {
+    safeSetItem(`bk_school_config_${schoolId}`, JSON.stringify(updatedConfig));
+  }
+
+  const currentSchools = getRegisteredSchools();
+  if (!currentSchools.some(s => s.schoolId === schoolId || (config.npsn && s.npsn === config.npsn))) {
+    saveRegisteredSchools([...currentSchools, updatedConfig]);
+  }
+}
+
 export function saveSchoolConfig(config: SchoolConfig): void {
   if (typeof localStorage === 'undefined') return;
 
@@ -347,6 +519,7 @@ export function saveSchoolConfig(config: SchoolConfig): void {
   const updatedConfig: SchoolConfig = {
     ...config,
     schoolId,
+    namaSekolah: config.namaSekolah || (schoolId === 'sch_20320123' && config.schoolName === 'SMP N 2 Susukan' ? 'SMP Negeri 2 Susukan' : config.schoolName),
     updatedAt: new Date().toISOString()
   };
 
@@ -398,6 +571,7 @@ export function switchSchoolWorkspace(targetSchool: Partial<SchoolConfig> & { sc
 
 export function resetSchoolConfigToDefault(): void {
   if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem('bk_manual_school_override');
     setActiveSchoolId('sch_20320123');
     saveSchoolConfig(DEFAULT_SCHOOL_CONFIG);
     localStorage.removeItem('bk_custom_school_logo');
@@ -406,3 +580,80 @@ export function resetSchoolConfigToDefault(): void {
     window.dispatchEvent(new Event('bk_school_config_updated'));
   }
 }
+
+export const IDENTITY_CACHE_VERSION = 'v2026_11_18_smpn2_susukan';
+
+export function markManualSchoolIdentitySaved(): void {
+  if (typeof localStorage !== 'undefined') {
+    safeSetItem('bk_manual_school_override', 'true');
+  }
+}
+
+/**
+ * Perbaikan cache identitas lokal terversi:
+ * Memulihkan identitas Aulia Aji Sasongko / SMP N 2 Susukan apabila sebelumnya
+ * sempat tertimpa oleh sekolah lain (mis. SMA NEGERI 1 KROYA) dari listener global,
+ * kecuali jika user sendiri secara eksplisit menyimpan perubahan di Pengaturan atau
+ * login dengan akun non-Aulia milik sekolah lain.
+ */
+export function enforceCanonicalSchoolCacheRepair(): void {
+  if (typeof localStorage === 'undefined') return;
+
+  const activeCounselorId = (localStorage.getItem('bk_active_counselor_id') || '').trim();
+  const isDefaultOrAulia = !activeCounselorId || activeCounselorId === 'c1' || activeCounselorId === 'admin';
+  const hasManualOverride = localStorage.getItem('bk_manual_school_override') === 'true';
+  const currentActiveId = localStorage.getItem('bk_active_school_id') || '';
+  const rawCfg = localStorage.getItem('bk_school_config');
+
+  let parsedCfg: any = null;
+  if (rawCfg) {
+    try {
+      parsedCfg = JSON.parse(rawCfg);
+    } catch {}
+  }
+
+  const detectedName = String(parsedCfg?.schoolName || '').toLowerCase();
+  const looksHijackedBySma =
+    detectedName.includes('kroya') ||
+    (isDefaultOrAulia && !hasManualOverride && currentActiveId && sanitizeSchoolId(currentActiveId) !== 'sch_20320123') ||
+    (isDefaultOrAulia && !hasManualOverride && detectedName && !detectedName.includes('susukan'));
+
+  const alreadyVersioned = localStorage.getItem('bk_identity_cache_version') === IDENTITY_CACHE_VERSION;
+
+  if (looksHijackedBySma || (!alreadyVersioned && isDefaultOrAulia && !hasManualOverride)) {
+    const existingCanonicalRaw = localStorage.getItem('bk_school_config_sch_20320123');
+    let existingCanonical: Partial<SchoolConfig> = {};
+    if (existingCanonicalRaw) {
+      try {
+        existingCanonical = JSON.parse(existingCanonicalRaw) || {};
+      } catch {}
+    }
+
+    const cleanSchoolName =
+      existingCanonical.schoolName && !String(existingCanonical.schoolName).toLowerCase().includes('kroya')
+        ? existingCanonical.schoolName
+        : 'SMP N 2 Susukan';
+
+    const repairedConfig: SchoolConfig = {
+      ...DEFAULT_SCHOOL_CONFIG,
+      ...existingCanonical,
+      schoolId: 'sch_20320123',
+      schoolName: cleanSchoolName,
+      namaSekolah: existingCanonical.namaSekolah || (cleanSchoolName === 'SMP N 2 Susukan' ? 'SMP Negeri 2 Susukan' : cleanSchoolName),
+      kecamatan: existingCanonical.kecamatan || 'Susukan',
+      npsn: existingCanonical.npsn || '20320123',
+      jenjang: existingCanonical.jenjang && String(existingCanonical.jenjang).toUpperCase() !== 'SMA' ? existingCanonical.jenjang : 'SMP',
+      koordinatorBkName: existingCanonical.koordinatorBkName || 'Aulia Aji Sasongko, S.Pd.',
+      koordinatorBkNip: existingCanonical.koordinatorBkNip || 'NIP. 19931231 202221 1 002',
+    };
+
+    safeSetItem('bk_active_school_id', 'sch_20320123');
+    safeSetItem('bk_school_config', JSON.stringify(repairedConfig));
+    safeSetItem('bk_school_config_sch_20320123', JSON.stringify(repairedConfig));
+  }
+
+  if (!alreadyVersioned) {
+    safeSetItem('bk_identity_cache_version', IDENTITY_CACHE_VERSION);
+  }
+}
+

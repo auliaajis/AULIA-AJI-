@@ -33,10 +33,12 @@ import {
   Share2
 } from 'lucide-react';
 import { downloadParentSummonPDF, downloadParentAttendancePDF, formatIndonesianDate } from '../utils/pdfGenerator';
-import { registerDeletedId } from '../utils/deletionTracker';
+import { formatCardDate, formatCardTime } from '../utils/dateFormatter';
+import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
 import { autoPushToJournal } from '../utils/journalAutoLink';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { saveBulkToFirestore, saveSchoolData, loadSchoolData, softDeleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
 import { showToast } from '../utils/toast';
+import { isValidDeleteId, safeFilterSingleDelete, generateUniqueId } from '../utils/safeDelete';
 import { 
   getParentSummonTemplates, 
   saveParentSummonTemplates, 
@@ -44,7 +46,7 @@ import {
   formatSummonWaMessage, 
   createWhatsAppLink 
 } from '../utils/summonTemplates';
-import { getSchoolConfig } from '../utils/schoolConfig';
+import { getSchoolConfig, getValidatedSchoolIdentity, buildSchoolStamp } from '../utils/schoolConfig';
 
 export interface AttendancePreset {
   id: string;
@@ -120,7 +122,7 @@ export function createAttendanceWaSummary(summon: ParentSummon, counselor: Couns
     `Yth. Bapak/Ibu *${att.attendeeName || summon.parentName}* (${att.attendeeRelation || 'Wali Murid'}),\n\n` +
     `Terima kasih telah hadir dan bermusyawarah di Ruang Bimbingan dan Konseling (BK) ${config.schoolName} pada:\n` +
     `📅 Hari/Tanggal : ${dateStr}\n` +
-    `⏰ Waktu         : ${att.actualTime || summon.summonTime || '09:00'} WIB\n` +
+    `⏰ Waktu         : ${formatCardTime(att.actualTime || summon.summonTime || '09:00')}\n` +
     `👤 Peserta Didik : *${summon.studentName}* (Kelas ${summon.studentClass})\n\n` +
     `*📋 Ringkasan Hasil Pertemuan:* \n` +
     `• Pokok Bahasan : ${att.issuesDiscussed || summon.agenda}\n` +
@@ -322,13 +324,24 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
   
   // Summons State
   const [summons, setSummons] = useState<ParentSummon[]>(() => {
-    return loadSchoolData('bk_parent_summons', []);
+    const deletedSet = new Set(getDeletedIds());
+    return loadSchoolData<ParentSummon[]>('bk_parent_summons', []).filter(
+      (s) => s && s.isDeleted !== true && !deletedSet.has(String(s.id))
+    );
   });
 
   // Templates State
   const [templates, setTemplates] = useState<ParentSummonTemplate[]>(() => {
-    return getParentSummonTemplates();
+    const deletedSet = new Set(getDeletedIds());
+    return getParentSummonTemplates().filter(
+      (t: any) => t && t.isDeleted !== true && !deletedSet.has(String(t.id))
+    );
   });
+  const [pendingConfirmAction, setPendingConfirmAction] = useState<{
+    kind: 'summon' | 'template' | 'reset-templates';
+    id?: string;
+    label: string;
+  } | null>(null);
   const [selectedTemplateCategory, setSelectedTemplateCategory] = useState<string>('Semua');
   const [templateSearchQuery, setTemplateSearchQuery] = useState<string>('');
   
@@ -411,17 +424,18 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
     const handleRealtimeUpdate = (e: any) => {
       const key = e.detail?.key;
       const data = e.detail?.data;
+      const deletedSet = new Set(getDeletedIds());
       if (key === 'bk_parent_summons') {
         if (Array.isArray(data)) {
-          setSummons(data);
+          setSummons(data.filter((s: any) => s && s.isDeleted !== true && !deletedSet.has(String(s.id))));
         } else {
-          setSummons(loadSchoolData('bk_parent_summons', []));
+          setSummons(loadSchoolData<ParentSummon[]>('bk_parent_summons', []).filter((s) => s && s.isDeleted !== true && !deletedSet.has(String(s.id))));
         }
       } else if (key === 'bk_parent_summon_templates') {
         if (Array.isArray(data)) {
-          setTemplates(data);
+          setTemplates(data.filter((t: any) => t && t.isDeleted !== true && !deletedSet.has(String(t.id))));
         } else {
-          setTemplates(loadSchoolData('bk_parent_summon_templates', []));
+          setTemplates(loadSchoolData<ParentSummonTemplate[]>('bk_parent_summon_templates', []).filter((t: any) => t && t.isDeleted !== true && !deletedSet.has(String(t.id))));
         }
       }
     };
@@ -537,7 +551,7 @@ _{NAMA_SEKOLAH}_`);
   const handleSaveTemplateForm = (e: React.FormEvent) => {
     e.preventDefault();
     if (!tplFormTitle.trim() || !tplFormAgenda.trim()) {
-      alert('Judul templat dan agenda resmi wajib diisi.');
+      showToast('Judul templat dan agenda resmi wajib diisi.', 'error');
       return;
     }
 
@@ -559,11 +573,11 @@ _{NAMA_SEKOLAH}_`);
         return t;
       });
       updateTemplates(updated);
-      alert('Templat surat dan pesan berhasil diperbarui!');
+      showToast('Templat surat dan pesan berhasil diperbarui!', 'success');
     } else {
       // Create new
       const newTpl: ParentSummonTemplate = {
-        id: `tpl-custom-${Date.now()}`,
+        id: generateUniqueId('tpl-custom'),
         title: tplFormTitle.trim(),
         category: tplFormCategory,
         agenda: tplFormAgenda.trim(),
@@ -574,43 +588,42 @@ _{NAMA_SEKOLAH}_`);
         createdAt: new Date().toISOString()
       };
       updateTemplates([newTpl, ...templates]);
-      alert('Templat baru berhasil ditambahkan!');
+      showToast('Templat baru berhasil ditambahkan!', 'success');
     }
 
     setShowTemplateModal(false);
   };
 
   const handleDeleteTemplate = (id: string, title: string) => {
-    if (confirm(`Apakah Anda yakin ingin menghapus templat "${title}"?`)) {
-      registerDeletedId(id);
-      deleteFromFirestore('bk_parent_summon_templates', id);
-      const filtered = templates.filter(t => t.id !== id);
-      updateTemplates(filtered);
-    }
+    setPendingConfirmAction({
+      kind: 'template',
+      id,
+      label: `Hapus templat "${title}" saja? Templat lain tidak akan terhapus.`,
+    });
   };
 
   const handleResetTemplatesToDefault = () => {
-    if (confirm('Kembalikan seluruh daftar templat ke setelan bawaan standar BK? Templat kustom Anda mungkin akan terhapus.')) {
-      updateTemplates(DEFAULT_SUMMON_TEMPLATES);
-      alert('Daftar templat berhasil dikembalikan ke standar bawaan.');
-    }
+    setPendingConfirmAction({
+      kind: 'reset-templates',
+      label: 'Kembalikan seluruh daftar templat ke setelan bawaan standar BK? Templat kustom Anda mungkin akan terganti.',
+    });
   };
 
   // Save current Drafting Form as New Reusable Template
   const handleSaveDraftAsTemplate = (e: React.FormEvent) => {
     e.preventDefault();
     if (!saveAsTplTitle.trim()) {
-      alert('Nama templat wajib diisi.');
+      showToast('Nama templat wajib diisi.', 'error');
       return;
     }
     const currentAgendaText = agenda === 'Lainnya' ? customAgenda : agenda;
     if (!currentAgendaText.trim()) {
-      alert('Agenda surat tidak boleh kosong.');
+      showToast('Agenda surat tidak boleh kosong.', 'error');
       return;
     }
 
     const newTpl: ParentSummonTemplate = {
-      id: `tpl-saved-${Date.now()}`,
+      id: generateUniqueId('tpl-saved'),
       title: saveAsTplTitle.trim(),
       category: saveAsTplCategory,
       agenda: currentAgendaText.trim(),
@@ -623,7 +636,7 @@ _{NAMA_SEKOLAH}_`);
     updateTemplates([newTpl, ...templates]);
     setShowSaveAsTemplateModal(false);
     setSaveAsTplTitle('');
-    alert(`🎉 Sukses! Isian ini telah disimpan sebagai templat baru "${newTpl.title}".`);
+    showToast(`Isian ini disimpan sebagai templat baru "${newTpl.title}".`, 'success');
   };
 
   // Filtered Student Suggestions for Autocomplete
@@ -660,23 +673,31 @@ _{NAMA_SEKOLAH}_`);
     e.preventDefault();
     const student = students.find(s => s.id === selectedStudentId);
     if (!student) {
-      alert('Silakan pilih siswa target terlebih dahulu.');
+      showToast('Silakan pilih siswa target terlebih dahulu.', 'error');
       return;
     }
 
     if (!parentName.trim()) {
-      alert('Nama orang tua / wali murid tidak boleh kosong.');
+      showToast('Nama orang tua / wali murid tidak boleh kosong.', 'error');
       return;
     }
 
     const finalAgenda = agenda === 'Lainnya' ? customAgenda : agenda;
     if (!finalAgenda.trim()) {
-      alert('Agenda panggilan tidak boleh kosong.');
+      showToast('Agenda panggilan tidak boleh kosong.', 'error');
       return;
     }
 
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return;
+    }
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
+
     const newSummon: ParentSummon = {
-      id: `ps-${Date.now()}`,
+      ...stamp,
+      id: generateUniqueId('ps'),
       letterNumber: letterNumber || generateLetterNumber(summons.length),
       date: letterDate,
       bidangBimbingan,
@@ -691,11 +712,11 @@ _{NAMA_SEKOLAH}_`);
       agenda: finalAgenda.trim(),
       counselorId: activeCounselor.id,
       status: 'Terkirim',
-      createdAt: new Date().toISOString(),
+      createdAt: stamp.createdAt,
     };
 
     setSummons([newSummon, ...summons]);
-    saveToFirestore('bk_parent_summons', newSummon);
+    saveToFirestore('bk_parent_summons', newSummon, schoolValidation.schoolId);
 
     // Push to Daily Journal automatically
     autoPushToJournal({
@@ -720,7 +741,7 @@ _{NAMA_SEKOLAH}_`);
     setCustomAgenda('');
     setStudentSearchQuery('');
     
-    alert(`Surat Panggilan Orang Tua untuk ${student.name} berhasil dibuat dan diunduh.`);
+    showToast(`Surat Panggilan Orang Tua untuk ${student.name} berhasil dibuat dan diunduh.`, 'success');
     setActiveTab('daftar');
   };
 
@@ -738,16 +759,11 @@ _{NAMA_SEKOLAH}_`);
 
   // Handle delete
   const handleDeleteSummon = (id: string, name: string) => {
-    if (confirm(`Apakah Anda yakin ingin menghapus catatan surat panggilan untuk ${name}?`)) {
-      registerDeletedId(id);
-      deleteFromFirestore('bk_parent_summons', id);
-      setSummons(prev => {
-        const next = prev.filter(s => s.id !== id);
-        saveSchoolData('bk_parent_summons', next);
-        return next;
-      });
-      showToast(`Catatan surat panggilan ${name} berhasil dihapus.`, 'info');
-    }
+    setPendingConfirmAction({
+      kind: 'summon',
+      id,
+      label: `Hapus surat panggilan untuk ${name} saja? Panggilan orang tua lain tidak akan terhapus.`,
+    });
   };
 
   // Open Attendance Modal
@@ -859,10 +875,17 @@ _{NAMA_SEKOLAH}_`);
       return;
     }
 
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return;
+    }
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
     const newId = `ps-direct-${Date.now()}`;
     const letterNo = generateLetterNumber(summons.length);
 
     const newSummon: ParentSummon = {
+      ...stamp,
       id: newId,
       letterNumber: letterNo,
       date: attActualDate,
@@ -878,7 +901,7 @@ _{NAMA_SEKOLAH}_`);
       agenda: attIssues,
       counselorId: activeCounselor.id,
       status: 'Hadir',
-      createdAt: new Date().toISOString(),
+      createdAt: stamp.createdAt,
       attendanceDetails: {
         actualDate: attActualDate,
         actualTime: attActualTime,
@@ -900,10 +923,10 @@ _{NAMA_SEKOLAH}_`);
 
     setSummons(prev => {
       const next = [newSummon, ...prev];
-      saveSchoolData('bk_parent_summons', next);
+      saveSchoolData('bk_parent_summons', next, schoolValidation.schoolId);
       return next;
     });
-    saveToFirestore('bk_parent_summons', newSummon);
+    saveToFirestore('bk_parent_summons', newSummon, schoolValidation.schoolId);
 
     autoPushToJournal({
       sourceType: 'summon_visit',
@@ -2191,14 +2214,14 @@ _{NAMA_SEKOLAH}_`);
                           <span className="text-gray-400 font-medium block">HARI/TANGGAL</span>
                           <span className="text-gray-800 flex items-center gap-1">
                             <Calendar className="w-3.5 h-3.5 text-[#00685f]" />
-                            <span className="truncate">{formatIndonesianDate(summon.summonDate).split(',')[1]?.trim() || summon.summonDate}</span>
+                            <span className="truncate">{formatCardDate(summon.summonDate)}</span>
                           </span>
                         </div>
                         <div className="space-y-1">
                           <span className="text-gray-400 font-medium block">WAKTU</span>
                           <span className="text-gray-800 flex items-center gap-1">
                             <Clock className="w-3.5 h-3.5 text-[#00685f]" />
-                            <span>{summon.summonTime} WIB</span>
+                            <span>{formatCardTime(summon.summonTime)}</span>
                           </span>
                         </div>
                         <div className="col-span-2 space-y-0.5 pt-1">
@@ -2989,6 +3012,85 @@ _{NAMA_SEKOLAH}_`);
               </div>
 
             </form>
+          </div>
+        </div>
+      )}
+
+      {pendingConfirmAction && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Tindakan</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">{pendingConfirmAction.label}</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingConfirmAction(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const act = pendingConfirmAction;
+                  setPendingConfirmAction(null);
+                  if (act.kind === 'summon') {
+                    if (!isValidDeleteId(act.id)) {
+                      showToast('Gagal: ID panggilan tidak valid, hapus dibatalkan', 'error');
+                      return;
+                    }
+                    const res = safeFilterSingleDelete(summons, act.id!);
+                    if (!res.ok) return;
+                    const target = res.removed;
+                    setSummons((prev) => {
+                      const check = safeFilterSingleDelete(prev, act.id!);
+                      if (!check.ok) return prev;
+                      saveSchoolData('bk_parent_summons', check.next);
+                      return check.next;
+                    });
+                    registerDeletedId(act.id!);
+                    await softDeleteFromFirestore('bk_parent_summons', target || act.id!, {
+                      deletedBy: activeCounselor?.name || 'Guru BK',
+                      deletedReason: 'Dihapus dari Panggilan Orang Tua',
+                      entityType: 'Panggilan Ortu',
+                      nama: target?.studentName || act.id!,
+                      kelas: target?.studentClass || '',
+                    });
+                    showToast('Catatan surat panggilan dihapus', 'info');
+                  } else if (act.kind === 'template') {
+                    if (!isValidDeleteId(act.id)) {
+                      showToast('Gagal: ID templat tidak valid, hapus dibatalkan', 'error');
+                      return;
+                    }
+                    const res = safeFilterSingleDelete(templates, act.id!);
+                    if (!res.ok) return;
+                    const target = res.removed;
+                    updateTemplates(res.next);
+                    registerDeletedId(act.id!);
+                    await softDeleteFromFirestore('bk_parent_summon_templates', target || act.id!, {
+                      deletedBy: activeCounselor?.name || 'Guru BK',
+                      deletedReason: 'Dihapus dari Templat Panggilan',
+                      entityType: 'Templat Panggilan',
+                      nama: target?.title || act.id!,
+                    });
+                    showToast('Templat panggilan dihapus', 'info');
+                  } else if (act.kind === 'reset-templates') {
+                    updateTemplates(DEFAULT_SUMMON_TEMPLATES);
+                    showToast('Daftar templat dikembalikan ke standar bawaan', 'success');
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                {pendingConfirmAction.kind === 'reset-templates' ? 'Ya, Kembalikan' : 'Ya, Hapus 1 Ini Saja'}
+              </button>
+            </div>
           </div>
         </div>
       )}

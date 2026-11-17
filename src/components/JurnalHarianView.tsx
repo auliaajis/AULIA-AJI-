@@ -33,9 +33,13 @@ import {
   SlidersHorizontal as Sliders
 } from 'lucide-react';
 import { downloadJournalPDF, downloadJournalRangePDF, formatIndonesianDate } from '../utils/pdfGenerator';
+import { formatCardDate, formatCardTime, formatCardDateTime } from '../utils/dateFormatter';
 import { triggerBackgroundAutoSync } from '../utils/googleSync';
-import { registerDeletedId } from '../utils/deletionTracker';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
+import { saveBulkToFirestore, saveSchoolData, loadSchoolData, softDeleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { getValidatedSchoolIdentity, buildSchoolStamp } from '../utils/schoolConfig';
+import { showToast } from '../utils/toast';
+import { isValidDeleteId, safeFilterSingleDelete, generateUniqueId } from '../utils/safeDelete';
 import PageHeaderBanner from './PageHeaderBanner';
 
 interface JurnalHarianViewProps {
@@ -241,16 +245,22 @@ export default function JurnalHarianView({
     );
   };
 
-  // Main Journal entries state
+  // Main Journal entries state (school-scoped & filtered against soft deletes)
   const [journalEntries, setJournalEntries] = useState<BKJournalEntry[]>(() => {
-    const saved = localStorage.getItem('bk_daily_journals');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        return [];
-      }
+    const deletedSet = new Set(getDeletedIds());
+    const list = loadSchoolData<BKJournalEntry[]>('bk_daily_journals', [], activeCounselor?.schoolId);
+    if (Array.isArray(list) && list.length > 0) {
+      return list.filter((j) => j && j.isDeleted !== true && !deletedSet.has(String(j.id)));
     }
+    try {
+      const legacyRaw = localStorage.getItem('bk_daily_journals');
+      if (legacyRaw) {
+        const parsed = JSON.parse(legacyRaw);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((j: any) => j && j.isDeleted !== true && !deletedSet.has(String(j.id)));
+        }
+      }
+    } catch {}
     return [];
   });
 
@@ -258,6 +268,7 @@ export default function JurnalHarianView({
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingEntry, setEditingEntry] = useState<BKJournalEntry | null>(null);
   const [includeAutoInPrint, setIncludeAutoInPrint] = useState(true);
+  const [pendingDeleteJournalId, setPendingDeleteJournalId] = useState<string | null>(null);
 
   // List of classes for quick selection helper
   const classList = React.useMemo(() => {
@@ -577,38 +588,39 @@ export default function JurnalHarianView({
 
   // Sync to local cache
   useEffect(() => {
-    localStorage.setItem('bk_daily_journals', JSON.stringify(journalEntries));
+    saveSchoolData('bk_daily_journals', journalEntries, activeCounselor?.schoolId);
     if (isInitialMountJournal.current) {
       isInitialMountJournal.current = false;
       return;
     }
     triggerBackgroundAutoSync();
-  }, [journalEntries]);
+  }, [journalEntries, activeCounselor?.schoolId]);
 
   // Realtime subscriber for remote changes
   useEffect(() => {
     const handleRealtimeUpdate = (e: any) => {
       if (e.detail?.key === 'bk_daily_journals') {
+        const deletedSet = new Set(getDeletedIds());
         if (Array.isArray(e.detail.data)) {
-          setJournalEntries(e.detail.data);
+          setJournalEntries(e.detail.data.filter((j: any) => j && j.isDeleted !== true && !deletedSet.has(String(j.id))));
         } else {
-          const saved = localStorage.getItem('bk_daily_journals');
-          if (saved) setJournalEntries(JSON.parse(saved));
+          const loaded = loadSchoolData<BKJournalEntry[]>('bk_daily_journals', [], activeCounselor?.schoolId);
+          setJournalEntries(loaded.filter((j) => j && j.isDeleted !== true && !deletedSet.has(String(j.id))));
         }
       }
     };
 
     window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
     window.addEventListener('storage', (e) => {
-      if (e.key === 'bk_daily_journals') {
-        handleRealtimeUpdate({ detail: { key: e.key } });
+      if (e.key && (e.key === 'bk_daily_journals' || e.key.startsWith('bk_daily_journals_sch_'))) {
+        handleRealtimeUpdate({ detail: { key: 'bk_daily_journals' } });
       }
     });
 
     return () => {
       window.removeEventListener('bk_realtime_sync', handleRealtimeUpdate);
     };
-  }, []);
+  }, [activeCounselor?.schoolId]);
 
   // Load editing values
   useEffect(() => {
@@ -647,7 +659,7 @@ export default function JurnalHarianView({
   const handleSaveEntry = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !description.trim() || !target.trim()) {
-      alert('Mohon lengkapi semua field yang wajib diisi.');
+      showToast('Mohon lengkapi semua field yang wajib diisi.', 'error');
       return;
     }
 
@@ -671,8 +683,15 @@ export default function JurnalHarianView({
       saveToFirestore('bk_daily_journals', updatedEntry);
     } else {
       // Add New
+      const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+      if (!schoolValidation.ok) {
+        showToast('Gagal: Sekolah belum diatur', 'error');
+        return;
+      }
+      const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
       const newEntry: BKJournalEntry = {
-        id: `j-${Date.now()}`,
+        ...stamp,
+        id: generateUniqueId('j'),
         date: selectedDate,
         startTime,
         endTime,
@@ -682,13 +701,13 @@ export default function JurnalHarianView({
         target,
         status,
         counselorId: activeCounselor.id,
-        createdAt: new Date().toISOString(),
+        createdAt: stamp.createdAt,
         proofPhotoUrl,
         proofPhotoName,
         absentStudents: absentStudents.trim() || undefined,
       };
       setJournalEntries(prev => [newEntry, ...prev]);
-      saveToFirestore('bk_daily_journals', newEntry);
+      saveToFirestore('bk_daily_journals', newEntry, schoolValidation.schoolId);
 
       // Add to global Activity Log if handler is provided
       if (onAddActivityLog) {
@@ -724,11 +743,31 @@ export default function JurnalHarianView({
   };
 
   const handleDeleteEntry = (id: string) => {
-    if (confirm('Apakah Anda yakin ingin menghapus catatan jurnal ini?')) {
-      registerDeletedId(id);
-      deleteFromFirestore('bk_daily_journals', id);
-      setJournalEntries(prev => prev.filter(item => item.id !== id));
+    setPendingDeleteJournalId(id);
+  };
+
+  const executeDeleteEntry = async (id: string) => {
+    setPendingDeleteJournalId(null);
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID jurnal tidak valid, hapus dibatalkan', 'error');
+      return;
     }
+    const res = safeFilterSingleDelete(journalEntries, id);
+    if (!res.ok) return;
+    const targetEntry = res.removed;
+    setJournalEntries((prev) => {
+      const next = safeFilterSingleDelete(prev, id);
+      return next.ok ? next.next : prev;
+    });
+    registerDeletedId(id);
+    await softDeleteFromFirestore('bk_daily_journals', targetEntry || id, {
+      deletedBy: activeCounselor?.name || 'Guru BK',
+      deletedReason: 'Dihapus dari Jurnal Harian',
+      entityType: 'Jurnal Harian',
+      nama: targetEntry?.title || id,
+      kelas: targetEntry?.target || '',
+    });
+    showToast('Catatan jurnal dihapus', 'info');
   };
 
   // Scan current day automatic activities
@@ -906,7 +945,7 @@ export default function JurnalHarianView({
 
     setJournalEntries(prev => [...newEntries, ...prev]);
     newEntries.forEach(ne => saveToFirestore('bk_daily_journals', ne));
-    alert(`Berhasil mengimpor ${mappedAutoActivities.length} kegiatan otomatis ke Jurnal Harian permanen!`);
+    showToast(`Berhasil mengimpor ${mappedAutoActivities.length} kegiatan otomatis ke Jurnal Harian permanen!`, 'success');
   };
 
   // Multi-Role RPL & Journal Presets (Guru Mapel, Guru BK, Wali Kelas)
@@ -1040,7 +1079,7 @@ export default function JurnalHarianView({
   // Smart AI Narasi Generator (Supports both Guru Mapel & Guru BK)
   const handleSmartGenerateNarasi = async () => {
     if (!title.trim() && !activityType) {
-      alert('Mohon isi terlebih dahulu nama kegiatan / topik atau jenis kegiatan.');
+      showToast('Mohon isi terlebih dahulu nama kegiatan / topik atau jenis kegiatan.', 'error');
       return;
     }
 
@@ -1139,7 +1178,7 @@ export default function JurnalHarianView({
     ];
 
     if (activities.length === 0) {
-      alert('Tidak ada kegiatan (manual maupun otomatis) yang tercatat pada tanggal ini untuk dianalisis.');
+      showToast('Tidak ada kegiatan (manual maupun otomatis) yang tercatat pada tanggal ini untuk dianalisis.', 'info');
       return;
     }
 
@@ -2263,7 +2302,7 @@ export default function JurnalHarianView({
                             </span>
                             <span className="text-[10px] bg-gray-100 text-gray-600 font-bold px-2 py-0.5 rounded flex items-center gap-1">
                               <Clock className="w-3 h-3 text-gray-400" />
-                              <span>{entry.startTime} - {entry.endTime}</span>
+                              <span>{formatCardTime(entry.startTime).replace(' WIB', '')} - {formatCardTime(entry.endTime || entry.startTime)}</span>
                             </span>
                           </div>
 
@@ -2626,6 +2665,43 @@ export default function JurnalHarianView({
       </div>
     </>
   )}
+
+  {pendingDeleteJournalId && (() => {
+    const targetJournal = journalEntries.find((j) => j.id === pendingDeleteJournalId);
+    return (
+    <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+      <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+            <Trash2 className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus Jurnal</h3>
+            <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+              Hapus catatan jurnal "{targetJournal?.title || 'ini'}" saja? Jurnal lain tidak akan terhapus.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setPendingDeleteJournalId(null)}
+            className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+          >
+            Batal
+          </button>
+          <button
+            type="button"
+            onClick={() => executeDeleteEntry(pendingDeleteJournalId)}
+            className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+          >
+            Ya, Hapus 1 Ini Saja
+          </button>
+        </div>
+      </div>
+    </div>
+    );
+  })()}
 
 </div>
   );

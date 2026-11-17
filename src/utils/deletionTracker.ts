@@ -3,11 +3,24 @@
  */
 
 export function isProtectedCanonicalId(id: string): boolean {
+  if (!id) return false;
   const str = String(id).trim();
-  // Protect counselors c1..c99, system admin, and canonical student IDs
+  // Hanya lindungi ID akun sistem konselor, JANGAN lindungi data siswa/kasus/layanan/absensi
+  // agar data yang sudah dihapus pengguna tetap permanen tersimpan sebagai terhapus.
   if (/^(c[0-9]+|admin|aulia|nona|tri|bina)$/i.test(str)) return true;
-  if (/^s([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-5][0-9])$/i.test(str)) return true;
   return false;
+}
+
+/**
+ * Completely clears the deletion tracker (only for manual total reset)
+ */
+export function clearAllDeletedIds(): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('bk_deleted_ids');
+      window.dispatchEvent(new Event('storage'));
+    }
+  } catch (e) {}
 }
 
 /**
@@ -15,17 +28,37 @@ export function isProtectedCanonicalId(id: string): boolean {
  */
 export function registerDeletedId(id: string): void {
   try {
+    if (!id) return;
     if (isProtectedCanonicalId(id)) {
-      return; // Never register protected canonical system data as deleted
+      return; // Never register counselor system account IDs as deleted
     }
+    const cleanId = String(id).trim();
     const deleted = JSON.parse(localStorage.getItem('bk_deleted_ids') || '[]');
-    if (!deleted.includes(id)) {
-      deleted.push(id);
+    if (Array.isArray(deleted) && !deleted.includes(cleanId)) {
+      deleted.push(cleanId);
       localStorage.setItem('bk_deleted_ids', JSON.stringify(deleted));
       window.dispatchEvent(new Event('storage'));
     }
   } catch (e) {
     console.error('Error registering deleted ID:', e);
+  }
+}
+
+/**
+ * Removes an ID from the deletion tracker ONLY when user explicitly restores it from Sampah / Trash
+ */
+export function unregisterDeletedId(id: string): void {
+  try {
+    if (!id) return;
+    const cleanId = String(id).trim();
+    const raw = JSON.parse(localStorage.getItem('bk_deleted_ids') || '[]');
+    if (Array.isArray(raw)) {
+      const filtered = raw.filter((item: string) => String(item).trim() !== cleanId);
+      localStorage.setItem('bk_deleted_ids', JSON.stringify(filtered));
+      window.dispatchEvent(new Event('storage'));
+    }
+  } catch (e) {
+    console.error('Error unregistering deleted ID:', e);
   }
 }
 
@@ -36,15 +69,15 @@ export function getDeletedIds(): string[] {
   try {
     const raw = JSON.parse(localStorage.getItem('bk_deleted_ids') || '[]');
     if (!Array.isArray(raw)) return [];
-    // Protect canonical student, violation, service, home visit, log, and counselor IDs from accidental suppression
-    return raw.filter((id: string) => !isProtectedCanonicalId(id));
+    return raw.map((id: string) => String(id).trim()).filter((id: string) => Boolean(id) && !isProtectedCanonicalId(id));
   } catch (e) {
     return [];
   }
 }
 
 /**
- * Clears any accidental canonical IDs from deletion tracker
+ * DINONAKTIFKAN untuk mencegah data yang sudah dihapus muncul lagi saat refresh/login.
+ * Hanya menyaring ID akun konselor jika ada.
  */
 export function clearCanonicalDeletedIds(): void {
   try {
@@ -52,28 +85,15 @@ export function clearCanonicalDeletedIds(): void {
     if (Array.isArray(raw)) {
       const filtered = raw.filter((id: string) => !isProtectedCanonicalId(id));
       localStorage.setItem('bk_deleted_ids', JSON.stringify(filtered));
-      window.dispatchEvent(new Event('storage'));
     }
   } catch (e) {}
 }
 
 /**
- * Unblocks all student IDs from the deletion tracker
+ * DINONAKTIFKAN untuk data siswa yang dihapus pengguna agar tidak muncul kembali saat refresh/login.
  */
 export function resetStudentDeletedIds(): void {
-  try {
-    const raw = JSON.parse(localStorage.getItem('bk_deleted_ids') || '[]');
-    if (Array.isArray(raw)) {
-      const filtered = raw.filter((id: string) => {
-        const str = String(id).trim();
-        // Remove student IDs (s1..s300 or digits)
-        if (/^s[0-9]+/i.test(str) || /^[0-9]{5,}/.test(str)) return false;
-        return !isProtectedCanonicalId(id);
-      });
-      localStorage.setItem('bk_deleted_ids', JSON.stringify(filtered));
-      window.dispatchEvent(new Event('storage'));
-    }
-  } catch (e) {}
+  // Sengaja dibiarkan no-op agar siswa yang sudah dihapus TIDAK muncul lagi saat refresh/login.
 }
 
 /**
@@ -81,7 +101,8 @@ export function resetStudentDeletedIds(): void {
  */
 export function mergeDeletedIds(remoteIds: string[]): string[] {
   const local = getDeletedIds();
-  const union = Array.from(new Set([...local, ...remoteIds]));
+  const cleanRemote = (remoteIds || []).map(id => String(id).trim()).filter(id => Boolean(id) && !isProtectedCanonicalId(id));
+  const union = Array.from(new Set([...local, ...cleanRemote]));
   localStorage.setItem('bk_deleted_ids', JSON.stringify(union));
   return union;
 }

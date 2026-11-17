@@ -247,6 +247,13 @@ export const BK_COMPONENTS_DATA: BKComponentDefinition[] = [
         icon: UserPlus,
         defaultTarget: 'Individu',
       },
+      {
+        type: 'Observasi & Wawancara',
+        label: 'Observasi / Wawancara',
+        shortDesc: 'Pengamatan perilaku langsung di kelas/sekolah & wawancara mendalam',
+        icon: UserCheck,
+        defaultTarget: 'Individu',
+      },
     ],
   },
 

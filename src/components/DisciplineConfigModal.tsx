@@ -15,6 +15,7 @@ export const DisciplineConfigModal: React.FC<DisciplineConfigModalProps> = ({
   onConfigSaved
 }) => {
   const [config, setConfig] = useState<DisciplineConfig>(() => getDisciplineConfig());
+  const [confirmReset, setConfirmReset] = useState(false);
 
   if (!isOpen) return null;
 
@@ -27,12 +28,11 @@ export const DisciplineConfigModal: React.FC<DisciplineConfigModalProps> = ({
   };
 
   const handleReset = () => {
-    if (confirm('Kembalikan konfigurasi pendisiplinan ke setelan bawaan?')) {
-      const reset = resetDisciplineConfig();
-      setConfig(reset);
-      onConfigSaved(reset);
-      showToast('Konfigurasi dikembalikan ke setelan awal', 'info');
-    }
+    const reset = resetDisciplineConfig();
+    setConfig(reset);
+    onConfigSaved(reset);
+    setConfirmReset(false);
+    showToast('Konfigurasi dikembalikan ke setelan awal', 'info');
   };
 
   return (
@@ -201,14 +201,34 @@ export const DisciplineConfigModal: React.FC<DisciplineConfigModalProps> = ({
 
           {/* Footer buttons */}
           <div className="flex items-center justify-between pt-2">
-            <button
-              type="button"
-              onClick={handleReset}
-              className="inline-flex items-center gap-1.5 text-xs font-bold text-gray-600 hover:text-red-600 px-3 py-2 rounded-xl border border-gray-200 hover:border-red-200 transition-colors cursor-pointer"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Reset Standar</span>
-            </button>
+            {confirmReset ? (
+              <div className="inline-flex items-center gap-1.5 bg-rose-50 border border-rose-200 px-2.5 py-1.5 rounded-xl">
+                <span className="text-[11px] font-bold text-rose-800">Reset standar?</span>
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  className="px-2 py-0.5 bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold rounded-lg cursor-pointer"
+                >
+                  Ya, Reset
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmReset(false)}
+                  className="px-2 py-0.5 bg-white border border-gray-200 text-gray-700 text-[11px] font-bold rounded-lg cursor-pointer"
+                >
+                  Batal
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmReset(true)}
+                className="inline-flex items-center gap-1.5 text-xs font-bold text-gray-600 hover:text-red-600 px-3 py-2 rounded-xl border border-gray-200 hover:border-red-200 transition-colors cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reset Standar</span>
+              </button>
+            )}
 
             <div className="flex items-center gap-2">
               <button

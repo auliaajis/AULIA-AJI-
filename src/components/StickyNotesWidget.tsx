@@ -1,8 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { StickyNote, Counselor } from '../types';
-import { saveBulkToFirestore, loadSchoolData, saveSchoolData } from '../utils/firestoreSync';
+import { saveBulkToFirestore, loadSchoolData, saveSchoolData, softDeleteFromFirestore } from '../utils/firestoreSync';
 import { getActiveSchoolId } from '../utils/schoolConfig';
+import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
+import { showToast } from '../utils/toast';
+import { isValidDeleteId, safeFilterSingleDelete, generateUniqueId } from '../utils/safeDelete';
 import { Pin, Plus, Trash2, CheckCircle2, Circle, Edit3, X, StickyNote as StickyNoteIcon, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
 
 const COLOR_MAP = {
@@ -52,23 +55,45 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
   const schoolId = getActiveSchoolId();
   const storageKey = `bk_sticky_notes_${counselorId}`;
 
+  const isInitialMountRef = useRef(true);
+
   const loadNotes = (): StickyNote[] => {
+    const deletedSet = new Set(getDeletedIds());
     const raw = loadSchoolData<StickyNote[]>(storageKey, [], schoolId);
     if (Array.isArray(raw) && raw.length > 0) {
-      return raw.filter((n: any) => n.id !== 'note-1' && n.id !== 'note-2');
+      return raw.filter(
+        (n: any) =>
+          n &&
+          isValidDeleteId(n.id) &&
+          n.id !== 'note-1' &&
+          n.id !== 'note-2' &&
+          n.isDeleted !== true &&
+          !deletedSet.has(String(n.id))
+      );
     }
     // Fallback check for default/legacy notes
     const legacy = localStorage.getItem('bk_sticky_notes');
-    if (legacy && counselorId === 'default' || counselorId === 'c1' || counselorId === 'admin') {
+    if (legacy && (counselorId === 'default' || counselorId === 'c1' || counselorId === 'admin')) {
       try {
         const parsed = JSON.parse(legacy);
-        if (Array.isArray(parsed)) return parsed.filter((n: any) => n.id !== 'note-1' && n.id !== 'note-2');
+        if (Array.isArray(parsed)) {
+          return parsed.filter(
+            (n: any) =>
+              n &&
+              isValidDeleteId(n.id) &&
+              n.id !== 'note-1' &&
+              n.id !== 'note-2' &&
+              n.isDeleted !== true &&
+              !deletedSet.has(String(n.id))
+          );
+        }
       } catch (e) {}
     }
     return [];
   };
 
   const [notes, setNotes] = useState<StickyNote[]>(() => loadNotes());
+  const [pendingDeleteNote, setPendingDeleteNote] = useState<StickyNote | null>(null);
 
   // Reload notes when counselor changes
   useEffect(() => {
@@ -90,7 +115,13 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
 
   useEffect(() => {
     saveSchoolData(storageKey, notes, schoolId);
-    saveBulkToFirestore(storageKey, notes, schoolId);
+    if (isInitialMountRef.current) {
+      isInitialMountRef.current = false;
+      return;
+    }
+    if (notes.length > 0) {
+      saveBulkToFirestore(storageKey, notes, schoolId);
+    }
   }, [notes, storageKey, schoolId]);
 
   useEffect(() => {
@@ -156,7 +187,7 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
       );
     } else {
       const newNote: StickyNote = {
-        id: `note-${Date.now()}`,
+        id: generateUniqueId('note'),
         title: titleInput.trim() || undefined,
         content: contentInput.trim(),
         color: colorInput,
@@ -183,8 +214,34 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
     );
   };
 
-  const handleDelete = (id: string) => {
-    setNotes((prev) => prev.filter((n) => n.id !== id));
+  const handleDelete = (note: StickyNote) => {
+    if (!isValidDeleteId(note?.id)) {
+      showToast('Gagal: ID catatan tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    setPendingDeleteNote(note);
+  };
+
+  const executeDeleteNote = async (note: StickyNote) => {
+    setPendingDeleteNote(null);
+    if (!isValidDeleteId(note?.id)) {
+      showToast('Gagal: ID catatan tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const res = safeFilterSingleDelete(notes, note.id);
+    if (!res.ok) return;
+    setNotes((prev) => {
+      const next = safeFilterSingleDelete(prev, note.id);
+      return next.ok ? next.next : prev;
+    });
+    registerDeletedId(note.id);
+    await softDeleteFromFirestore(storageKey, note, {
+      deletedBy: activeCounselor?.name || 'Guru BK',
+      deletedReason: 'Dihapus dari Catatan Cepat BK',
+      entityType: 'Catatan Cepat',
+      nama: note.title || note.content.slice(0, 40),
+    });
+    showToast('Catatan cepat dihapus', 'info');
   };
 
   // Sort notes: pinned first, uncompleted before completed
@@ -327,7 +384,7 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
                         </button>
 
                         <button
-                          onClick={() => handleDelete(note.id)}
+                          onClick={() => handleDelete(note)}
                           className="p-0.5 rounded text-gray-400 hover:text-rose-600 cursor-pointer"
                           title="Hapus"
                         >
@@ -461,6 +518,39 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
           </div>
         )}
       </AnimatePresence>
+      {pendingDeleteNote && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus Catatan</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+                  Hapus catatan "{pendingDeleteNote.title || pendingDeleteNote.content.slice(0, 35)}" saja? Catatan lain tidak akan terhapus.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteNote(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => executeDeleteNote(pendingDeleteNote)}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Ya, Hapus 1 Ini Saja
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

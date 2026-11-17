@@ -14,29 +14,77 @@ import {
   runTransaction,
   setLogLevel,
   disableNetwork,
-  enableNetwork
+  enableNetwork,
+  query,
+  where,
+  orderBy,
+  updateDoc,
+  serverTimestamp
 } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getDeletedIds, registerDeletedId, resetStudentDeletedIds } from './deletionTracker';
+import { getDeletedIds, registerDeletedId, unregisterDeletedId } from './deletionTracker';
 import { isDummyRecord } from './purgeDummyData';
-import { CANONICAL_AULIA_STUDENTS } from '../data/canonicalStudents';
 import { showToast } from './toast';
+import { isValidDeleteId } from './safeDelete';
 import { 
   getActiveSchoolId, 
   getSchoolConfig, 
   saveSchoolConfig,
+  registerSchoolConfigWithoutActivating,
   getRegisteredSchools, 
   saveRegisteredSchools, 
   SchoolConfig,
   DEFAULT_SCHOOL_CONFIG,
   loadSchoolData,
   saveSchoolData,
-  sanitizeSchoolId
+  sanitizeSchoolId,
+  matchesSchoolOrLegacy,
+  isLegacyUnassignedRecord,
+  belongsToOtherSchool,
+  extractRecordSchoolId
 } from './schoolConfig';
-import { Counselor } from '../types';
+import { Counselor, HapusLogEntry } from '../types';
 import { initialStudents } from '../data/mockData';
 
 export { loadSchoolData, saveSchoolData, getActiveSchoolId, getSchoolConfig };
+export { fixMissingSchoolId, runMultiSchoolMigrationOnce, ensureSchoolDocumentExists, stampDocumentSchoolInfo } from './multiSchoolMigration';
+export type { FixMissingSchoolIdResult } from './multiSchoolMigration';
+
+/**
+ * Gets the current authenticated user's schoolId from token claims / auth profile.
+ * Never relies on manual input.
+ */
+export async function getCurrentUserSchoolId(): Promise<string> {
+  try {
+    if (auth.currentUser) {
+      const tokenResult = await auth.currentUser.getIdTokenResult();
+      if (tokenResult?.claims?.schoolId) {
+        return sanitizeSchoolId(String(tokenResult.claims.schoolId));
+      }
+      const userSnap = await getDoc(doc(db, 'users', auth.currentUser.uid));
+      if (userSnap.exists() && userSnap.data()?.schoolId) {
+        return sanitizeSchoolId(String(userSnap.data().schoolId));
+      }
+    }
+  } catch (err) {
+    console.warn('[FirestoreSync] Error reading schoolId from auth token:', err);
+  }
+  return sanitizeSchoolId(getActiveSchoolId() || 'sch_20320123');
+}
+
+export function getCurrentUserSchoolIdSync(): string {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('bk_active_counselor') : null;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.schoolId) {
+        return sanitizeSchoolId(parsed.schoolId);
+      }
+    }
+  } catch {}
+  return sanitizeSchoolId(getActiveSchoolId() || 'sch_20320123');
+}
 
 // Initialize Firebase App
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -52,7 +100,9 @@ try {
 export const SYNC_MAP: Record<string, string> = {
   'bk_students': 'students',
   'bk_violations': 'violations',
+  'bk_cases': 'cases',
   'bk_services': 'services',
+  'bk_counseling': 'counseling',
   'bk_daily_journals': 'daily_journals',
   'bk_home_visits': 'home_visits',
   'bk_parent_summons': 'parent_summons',
@@ -65,22 +115,130 @@ export const SYNC_MAP: Record<string, string> = {
   'bk_komitmen_rtl_list': 'komitmen_rtl_list',
   'bk_logs': 'activity_logs',
   'bk_counselors': 'counselors',
+  'bk_users': 'users',
   'bk_teaching_schedule': 'teaching_schedule',
   'bk_class_teaching_progress': 'class_teaching_progress',
   'bk_sticky_notes': 'sticky_notes',
   'bk_parent_summon_templates': 'parent_summon_templates',
   'bk_walikelas_config': 'walikelas_config',
   'bk_akpd_class_sessions': 'akpd_class_sessions',
-  'bk_violation_rules': 'violation_rules'
+  'bk_violation_rules': 'violation_rules',
+  'bk_program_evaluations': 'program_evaluations',
+  'bk_service_evaluations': 'service_evaluations'
 };
+
+/**
+ * Deduplicates and purges dummy items from a collection before sorting or persisting.
+ */
+export function deduplicateCollectionItems(key: string, items: any[], schoolId?: string): any[] {
+  if (!Array.isArray(items) || items.length === 0) return items;
+  const _currentSchoolId = sanitizeSchoolId(schoolId || getActiveSchoolId());
+  void _currentSchoolId;
+
+  if (key === 'bk_students') {
+    const seenIds = new Set<string>();
+    const seenNis = new Map<string, string>();
+    const resultMap = new Map<string, any>();
+
+    for (const item of items) {
+      if (!item || !isValidDeleteId(item.id)) continue;
+      const itemId = String(item.id).trim();
+      if (item.isDeleted === true) continue;
+      if (isDummyRecord(item, 'bk_students')) continue;
+
+      if (seenIds.has(itemId)) {
+        const existing = resultMap.get(itemId);
+        if (existing) {
+          resultMap.set(itemId, {
+            ...existing,
+            ...item,
+            violationPoints: Math.max(existing.violationPoints || 0, item.violationPoints || 0),
+            bkServicesCount: Math.max(existing.bkServicesCount || 0, item.bkServicesCount || 0),
+            achievementPoints: Math.max(existing.achievementPoints || 0, item.achievementPoints || 0),
+          });
+        }
+        continue;
+      }
+
+      const nis = String(item.nis || '').trim();
+      const matchedByNis = nis ? seenNis.get(nis) : undefined;
+      const isCurrentLegacy = /^s\d+$/.test(itemId);
+      const isMatchedLegacy = matchedByNis ? /^s\d+$/.test(matchedByNis) : false;
+
+      // Hanya gabungkan dua ID berbeda bila salah satunya adalah format legacy s1..s194 dengan NIS sama
+      if (matchedByNis && matchedByNis !== itemId && (isCurrentLegacy || isMatchedLegacy)) {
+        if (isCurrentLegacy && !isMatchedLegacy) {
+          const existing = resultMap.get(matchedByNis);
+          resultMap.delete(matchedByNis);
+          seenIds.delete(matchedByNis);
+          resultMap.set(itemId, {
+            ...item,
+            violationPoints: Math.max(item.violationPoints || 0, existing?.violationPoints || 0),
+            bkServicesCount: Math.max(item.bkServicesCount || 0, existing?.bkServicesCount || 0),
+            achievementPoints: Math.max(item.achievementPoints || 0, existing?.achievementPoints || 0),
+          });
+          seenIds.add(itemId);
+          seenNis.set(nis, itemId);
+        } else {
+          const existing = resultMap.get(matchedByNis);
+          if (existing) {
+            existing.violationPoints = Math.max(existing.violationPoints || 0, item.violationPoints || 0);
+            existing.bkServicesCount = Math.max(existing.bkServicesCount || 0, item.bkServicesCount || 0);
+            existing.achievementPoints = Math.max(existing.achievementPoints || 0, item.achievementPoints || 0);
+          }
+        }
+        continue;
+      }
+
+      seenIds.add(itemId);
+      resultMap.set(itemId, item);
+      if (nis && !seenNis.has(nis)) seenNis.set(nis, itemId);
+    }
+    return Array.from(resultMap.values());
+  }
+
+  if (key === 'bk_violations' || key === 'bk_cases') {
+    const seenIds = new Set<string>();
+    const result: any[] = [];
+    for (const item of items) {
+      if (!item || !isValidDeleteId(item.id)) continue;
+      if (item.isDeleted === true) continue;
+      if (isDummyRecord(item, 'bk_violations')) continue;
+      const itemId = String(item.id).trim();
+      if (seenIds.has(itemId)) continue;
+      seenIds.add(itemId);
+      result.push(item);
+    }
+    return result;
+  }
+
+  if (key === 'bk_services' || key === 'bk_counseling') {
+    const seenIds = new Set<string>();
+    const result: any[] = [];
+    for (const item of items) {
+      if (!item || !isValidDeleteId(item.id)) continue;
+      if (item.isDeleted === true) continue;
+      if (isDummyRecord(item, 'bk_services')) continue;
+      const itemId = String(item.id).trim();
+      if (seenIds.has(itemId)) continue;
+      seenIds.add(itemId);
+      result.push(item);
+    }
+    return result;
+  }
+
+  return items;
+}
 
 /**
  * Deterministically sorts collection records across devices
  */
-export function sortCollectionData(key: string, items: any[]): any[] {
-  if (!Array.isArray(items) || items.length <= 1) return items;
+export function sortCollectionData(key: string, items: any[], schoolId?: string): any[] {
+  if (!Array.isArray(items) || items.length === 0) return items;
+  const cleanItems = deduplicateCollectionItems(key, items, schoolId);
+  if (cleanItems.length <= 1) return cleanItems;
 
-  return [...items].sort((a, b) => {
+  return [...cleanItems].sort((a, b) => {
     switch (key) {
       case 'bk_students': {
         const classComp = String(a.class || '').localeCompare(String(b.class || ''));
@@ -126,6 +284,12 @@ export function sortCollectionData(key: string, items: any[]): any[] {
       }
       case 'bk_counselors': {
         return String(a.name || '').localeCompare(String(b.name || ''));
+      }
+      case 'bk_program_evaluations':
+      case 'bk_service_evaluations': {
+        const dateE = String(b.tanggal || '').localeCompare(String(a.tanggal || ''));
+        if (dateE !== 0) return dateE;
+        return String(b.createdAt || b.id || '').localeCompare(String(a.createdAt || a.id || ''));
       }
       default:
         return String(b.id || '').localeCompare(String(a.id || ''));
@@ -362,20 +526,26 @@ try {
           }
         }));
         notifyCloudStatusChange('connected');
-      } else if (msg.type === 'doc_deleted' && msg.key && msg.itemId) {
+      } else if (msg.type === 'doc_deleted' && msg.key && isValidDeleteId(msg.itemId)) {
         if (msg.schoolId && msg.schoolId !== activeSchoolId && msg.key !== 'bk_counselors') return;
-        const currentList = loadSchoolData<any[]>(msg.key, [], msg.schoolId || activeSchoolId);
+        const targetSchool = msg.schoolId || activeSchoolId;
+        const currentList = loadSchoolData<any[]>(msg.key, [], targetSchool);
         if (Array.isArray(currentList)) {
-          const filtered = currentList.filter(item => String(item?.id) !== String(msg.itemId));
-          saveSchoolData(msg.key, filtered, msg.schoolId || activeSchoolId);
-          window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-            detail: {
-              key: msg.key,
-              data: filtered,
-              schoolId: msg.schoolId || activeSchoolId,
-              fromBroadcastChannel: true
-            }
-          }));
+          const cleanTarget = String(msg.itemId).trim();
+          const filtered = currentList.filter(item => !item || !isValidDeleteId(item.id) || String(item.id).trim() !== cleanTarget);
+          if (currentList.length - filtered.length <= 5) {
+            saveSchoolData(msg.key, filtered, targetSchool);
+            window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
+              detail: {
+                type: 'doc_deleted',
+                key: msg.key,
+                itemId: cleanTarget,
+                data: filtered,
+                schoolId: targetSchool,
+                fromBroadcastChannel: true
+              }
+            }));
+          }
         }
         notifyCloudStatusChange('connected');
       }
@@ -402,17 +572,25 @@ export function broadcastRealtimeChange(payload: {
   if (typeof window !== 'undefined') {
     if (payload.type === 'sync' && Array.isArray(payload.data)) {
       window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-        detail: { key: payload.key, data: payload.data, schoolId: activeSchoolId }
+        detail: { type: 'sync', key: payload.key, data: payload.data, schoolId: activeSchoolId }
       }));
     } else if (payload.type === 'doc_saved' && payload.doc) {
       const updatedList = loadSchoolData(payload.key, [], activeSchoolId);
       window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-        detail: { key: payload.key, data: updatedList, schoolId: activeSchoolId }
+        detail: { type: 'doc_saved', key: payload.key, data: updatedList, doc: payload.doc, schoolId: activeSchoolId }
       }));
-    } else if (payload.type === 'doc_deleted') {
-      const updatedList = loadSchoolData(payload.key, [], activeSchoolId);
+    } else if (payload.type === 'doc_deleted' && isValidDeleteId(payload.itemId)) {
+      const updatedList = Array.isArray(payload.data)
+        ? payload.data
+        : loadSchoolData(payload.key, [], activeSchoolId);
       window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-        detail: { key: payload.key, data: updatedList, schoolId: activeSchoolId }
+        detail: {
+          type: 'doc_deleted',
+          key: payload.key,
+          itemId: String(payload.itemId).trim(),
+          data: updatedList,
+          schoolId: activeSchoolId
+        }
       }));
     }
   }
@@ -684,13 +862,14 @@ export async function saveToFirestore(
 
   const itemId = String(item.id);
   const deletedSet = new Set(getDeletedIds());
-  if (deletedSet.has(itemId)) {
+  if (item.isDeleted === true || deletedSet.has(itemId)) {
     // Never write or restore items that were explicitly deleted
     return { success: false, isStale: false };
   }
 
   const colName = SYNC_MAP[localKey] || localKey;
   const schoolId = customSchoolId ? sanitizeSchoolId(customSchoolId) : getActiveSchoolId();
+  const schoolName = item.schoolName || (options as any).schoolName || (schoolId === 'sch_20320123' ? 'SMP N 2 Susukan' : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan'));
   const docRef = getSchoolDocRef(colName, itemId, schoolId);
 
   // 1. Optimistic fast update: update local cache and broadcast immediately (<1ms response)
@@ -698,7 +877,12 @@ export async function saveToFirestore(
   const optimisticNow = Date.now();
   const optimisticItem = {
     ...item,
+    isDeleted: false,
     schoolId,
+    sekolahId: item.sekolahId || schoolId,
+    schoolName,
+    namaSekolah: item.namaSekolah || schoolName,
+    createdAt: item.createdAt || new Date().toISOString(),
     _version: optimisticVersion,
     _updatedAt: optimisticNow,
     _lastModifiedByTab: CLIENT_TAB_ID,
@@ -729,6 +913,11 @@ export async function saveToFirestore(
 
         if (docSnap.exists()) {
           remoteData = docSnap.data();
+          if (remoteData?.isDeleted === true && !options.force) {
+            registerDeletedId(itemId);
+            result = { success: false, isStale: false };
+            return;
+          }
           remoteVersion = getItemVersion(remoteData);
           remoteTime = getItemTimestamp(remoteData);
         }
@@ -800,7 +989,12 @@ export async function saveToFirestore(
 
         const stampedItem = {
           ...item,
+          isDeleted: false,
           schoolId,
+          sekolahId: item.sekolahId || schoolId,
+          schoolName,
+          namaSekolah: item.namaSekolah || schoolName,
+          createdAt: item.createdAt || new Date().toISOString(),
           _version: nextVersion,
           _updatedAt: now,
           _lastModifiedByTab: CLIENT_TAB_ID,
@@ -809,6 +1003,34 @@ export async function saveToFirestore(
         };
 
         transaction.set(docRef, stampedItem, { merge: true });
+
+        // Multi-sekolah cross-collection mirror: ensure users, students, cases, counseling in root & subcollections
+        try {
+          if (colName === 'violations' || colName === 'cases') {
+            transaction.set(getSchoolDocRef('cases', itemId, schoolId), stampedItem, { merge: true });
+            transaction.set(getSchoolDocRef('violations', itemId, schoolId), stampedItem, { merge: true });
+            transaction.set(doc(db, 'cases', itemId), stampedItem, { merge: true });
+            transaction.set(doc(db, 'violations', itemId), stampedItem, { merge: true });
+          } else if (colName === 'services' || colName === 'counseling') {
+            transaction.set(getSchoolDocRef('counseling', itemId, schoolId), stampedItem, { merge: true });
+            transaction.set(getSchoolDocRef('services', itemId, schoolId), stampedItem, { merge: true });
+            transaction.set(doc(db, 'counseling', itemId), stampedItem, { merge: true });
+            transaction.set(doc(db, 'services', itemId), stampedItem, { merge: true });
+          } else if (colName === 'counselors' || colName === 'users') {
+            transaction.set(getSchoolDocRef('users', itemId, schoolId), stampedItem, { merge: true });
+            transaction.set(getSchoolDocRef('counselors', itemId, schoolId), stampedItem, { merge: true });
+            transaction.set(doc(db, 'users', itemId), stampedItem, { merge: true });
+            transaction.set(doc(db, 'counselors', itemId), stampedItem, { merge: true });
+          } else if (colName === 'students') {
+            transaction.set(doc(db, 'students', itemId), stampedItem, { merge: true });
+          } else if (colName === 'program_evaluations') {
+            transaction.set(doc(db, 'program_evaluations', itemId), stampedItem, { merge: true });
+          } else if (colName === 'service_evaluations') {
+            transaction.set(doc(db, 'service_evaluations', itemId), stampedItem, { merge: true });
+          }
+        } catch (mirrorErr) {
+          // ignore non-critical mirror issues
+        }
 
         // Update in-memory item
         item._version = nextVersion;
@@ -840,7 +1062,9 @@ export async function saveToFirestore(
       const now = Date.now();
       const stampedItem = {
         ...item,
+        isDeleted: false,
         schoolId,
+        schoolName,
         _version: nextVersion,
         _updatedAt: now,
         _lastModifiedByTab: CLIENT_TAB_ID,
@@ -849,10 +1073,33 @@ export async function saveToFirestore(
       };
       item._version = nextVersion;
       item._updatedAt = now;
+      item.schoolId = schoolId;
+      item.schoolName = schoolName;
       item._lastModifiedByTab = CLIENT_TAB_ID;
 
       try {
         await setDoc(docRef, stampedItem, { merge: true });
+        try {
+          if (colName === 'violations' || colName === 'cases') {
+            setDoc(getSchoolDocRef('cases', itemId, schoolId), stampedItem, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'cases', itemId), stampedItem, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'violations', itemId), stampedItem, { merge: true }).catch(() => {});
+          } else if (colName === 'services' || colName === 'counseling') {
+            setDoc(getSchoolDocRef('counseling', itemId, schoolId), stampedItem, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'counseling', itemId), stampedItem, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'services', itemId), stampedItem, { merge: true }).catch(() => {});
+          } else if (colName === 'counselors' || colName === 'users') {
+            setDoc(getSchoolDocRef('users', itemId, schoolId), stampedItem, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'users', itemId), stampedItem, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'counselors', itemId), stampedItem, { merge: true }).catch(() => {});
+          } else if (colName === 'students') {
+            setDoc(doc(db, 'students', itemId), stampedItem, { merge: true }).catch(() => {});
+          } else if (colName === 'program_evaluations') {
+            setDoc(doc(db, 'program_evaluations', itemId), stampedItem, { merge: true }).catch(() => {});
+          } else if (colName === 'service_evaluations') {
+            setDoc(doc(db, 'service_evaluations', itemId), stampedItem, { merge: true }).catch(() => {});
+          }
+        } catch (mErr) {}
         removePendingCloudWrite(itemId);
       } catch (setErr) {
         console.warn(`[FirestoreSync] Cloud write queued for offline sync [${colName}/${itemId}]:`, setErr);
@@ -891,43 +1138,752 @@ export async function saveToFirestore(
   }
 }
 
+const ID_MONTHS_LONG = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+];
+
+export function formatDeletedAtIndonesian(date: Date = new Date()): string {
+  const day = date.getDate();
+  const month = ID_MONTHS_LONG[date.getMonth()] || 'Januari';
+  const year = date.getFullYear();
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  return `${day} ${month} ${year} ${hh}:${mm}`;
+}
+
+export interface SoftDeleteOptions {
+  customSchoolId?: string;
+  deletedBy?: string;
+  reason?: string;
+  deletedReason?: string;
+  entityType?: string;
+  studentId?: string;
+  studentName?: string;
+  nama?: string;
+  studentClass?: string;
+  kelas?: string;
+}
+
+export interface SoftDeletedTrashItem {
+  id: string;
+  localKey: string;
+  colName: string;
+  entityType: string;
+  nama: string;
+  kelas: string;
+  deletedAt: string;
+  deletedBy: string;
+  alasan: string;
+  schoolId: string;
+  rawDoc: any;
+  hapusLogId?: string;
+  deletedAtMs?: number;
+}
+
+function getMirrorCollectionRefs(colName: string, itemId: string, schoolId: string) {
+  const refs: ReturnType<typeof doc>[] = [
+    getSchoolDocRef(colName, itemId, schoolId),
+    doc(db, colName, itemId)
+  ];
+  if (colName === 'violations' || colName === 'cases') {
+    refs.push(
+      getSchoolDocRef('cases', itemId, schoolId),
+      getSchoolDocRef('violations', itemId, schoolId),
+      doc(db, 'cases', itemId),
+      doc(db, 'violations', itemId)
+    );
+  } else if (colName === 'services' || colName === 'counseling') {
+    refs.push(
+      getSchoolDocRef('counseling', itemId, schoolId),
+      getSchoolDocRef('services', itemId, schoolId),
+      doc(db, 'counseling', itemId),
+      doc(db, 'services', itemId)
+    );
+  } else if (colName === 'counselors' || colName === 'users') {
+    refs.push(
+      getSchoolDocRef('users', itemId, schoolId),
+      getSchoolDocRef('counselors', itemId, schoolId),
+      doc(db, 'users', itemId),
+      doc(db, 'counselors', itemId)
+    );
+  }
+  // Deduplicate by Firestore path
+  const seen = new Set<string>();
+  return refs.filter(r => {
+    if (seen.has(r.path)) return false;
+    seen.add(r.path);
+    return true;
+  });
+}
+
+function resolveEntityLabelAndMeta(localKey: string, item: any, options?: SoftDeleteOptions) {
+  const key = localKey || '';
+  let entityType = options?.entityType || 'Data BK';
+  let nama = options?.nama || options?.studentName || item?.name || item?.studentName || item?.title || item?.namaProgram || item?.category || 'Tanpa Nama';
+  let kelas = options?.kelas || options?.studentClass || item?.class || item?.studentClass || item?.kelas || '';
+  let idSiswa = options?.studentId || item?.studentId || '';
+
+  if (key === 'bk_students' || key === 'students') {
+    entityType = options?.entityType || 'Siswa';
+    nama = item?.name || options?.nama || options?.studentName || nama;
+    kelas = item?.class || options?.kelas || options?.studentClass || kelas;
+    idSiswa = item?.id || idSiswa;
+  } else if (key === 'bk_violations' || key === 'bk_cases' || key === 'violations' || key === 'cases') {
+    entityType = options?.entityType || 'Kasus / Pelanggaran';
+    nama = `${item?.studentName || options?.nama || options?.studentName || 'Siswa'} — ${item?.category || 'Pelanggaran'}`;
+    kelas = item?.studentClass || options?.kelas || options?.studentClass || '';
+  } else if (key === 'bk_services' || key === 'bk_counseling' || key === 'services' || key === 'counseling') {
+    entityType = options?.entityType || 'Layanan BK';
+    const studentList = Array.isArray(item?.students) ? item.students : [];
+    const stNames = studentList.map((s: any) => s?.name).filter(Boolean).join(', ');
+    nama = `${stNames || options?.nama || options?.studentName || item?.serviceType || 'Layanan BK'} — ${item?.serviceType || 'Konseling'}`;
+    kelas = studentList.map((s: any) => s?.class).filter(Boolean).join(', ') || options?.kelas || options?.studentClass || '';
+    if (!idSiswa && studentList[0]?.id) idSiswa = studentList[0].id;
+  } else if (key === 'bk_achievements' || key === 'bk_student_achievements' || key === 'achievements') {
+    entityType = options?.entityType || 'Prestasi / Apresiasi';
+    nama = `${item?.studentName || 'Siswa'} — ${item?.achievementName || 'Prestasi'}`;
+    kelas = item?.studentClass || '';
+  } else if (key === 'bk_home_visits' || key === 'home_visits') {
+    entityType = options?.entityType || 'Home Visit';
+    nama = `${item?.studentName || options?.nama || 'Siswa'} — Kunjungan Rumah`;
+    kelas = item?.studentClass || options?.kelas || '';
+  } else if (key === 'bk_parent_summons' || key === 'parent_summons') {
+    entityType = options?.entityType || 'Panggilan Orang Tua';
+    nama = `${item?.studentName || options?.nama || 'Siswa'} — ${item?.agenda || 'Panggilan Ortu'}`;
+    kelas = item?.studentClass || options?.kelas || '';
+  } else if (key === 'bk_attendance_history' || key === 'attendance_history') {
+    entityType = options?.entityType || 'Rekap Absensi';
+    nama = options?.nama || `Absensi Kelas ${item?.class || item?.className || '-'} (${item?.date || '-'})`;
+    kelas = options?.kelas || item?.class || item?.className || '';
+  } else if (key === 'bk_daily_journals' || key === 'daily_journals') {
+    entityType = options?.entityType || 'Jurnal Harian';
+    nama = options?.nama || item?.title || `${item?.activityType || 'Jurnal'} (${item?.date || '-'})`;
+  } else if (key === 'bk_program_evaluations' || key === 'program_evaluations' || key === 'bk_service_evaluations' || key === 'service_evaluations') {
+    entityType = options?.entityType || 'Evaluasi BK';
+    nama = item?.namaProgram || item?.bidang || 'Evaluasi BK';
+    kelas = item?.kelas || '';
+  } else if (key.includes('surat_perjanjian')) {
+    entityType = options?.entityType || 'Surat Perjanjian';
+    nama = `${item?.studentName || options?.nama || 'Siswa'} — ${item?.letterNumber || 'Surat Perjanjian'}`;
+    kelas = item?.studentClass || options?.kelas || '';
+  } else if (key.includes('kontrak_perilaku')) {
+    entityType = options?.entityType || 'Kontrak Perilaku';
+    nama = `${item?.studentName || options?.nama || 'Siswa'} — ${item?.contractNumber || 'Kontrak Perilaku'}`;
+    kelas = item?.studentClass || options?.kelas || '';
+  } else if (key.includes('jurnal_pembinaan')) {
+    entityType = options?.entityType || 'Jurnal Pembinaan';
+    nama = `${item?.studentName || options?.nama || 'Siswa'} — ${item?.journalNumber || 'Jurnal Pembinaan'}`;
+    kelas = item?.studentClass || options?.kelas || '';
+  } else if (key.includes('komitmen_rtl')) {
+    entityType = options?.entityType || 'Komitmen & RTL';
+    nama = `${item?.studentName || options?.nama || 'Siswa'} — ${item?.commitmentNumber || 'RTL'}`;
+    kelas = item?.studentClass || options?.kelas || '';
+  }
+
+  return { entityType, nama, kelas, idSiswa };
+}
+
+function getTrashStorageKey(schoolId: string) {
+  return `bk_trash_${sanitizeSchoolId(schoolId)}`;
+}
+
+function getHapusLogStorageKey(schoolId: string) {
+  return `bk_hapus_log_${sanitizeSchoolId(schoolId)}`;
+}
+
+function upsertLocalTrashCache(entry: SoftDeletedTrashItem) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const key = getTrashStorageKey(entry.schoolId);
+    const raw = JSON.parse(localStorage.getItem(key) || '[]');
+    const list: SoftDeletedTrashItem[] = Array.isArray(raw) ? raw : [];
+    const filtered = list.filter(it => !(String(it.id) === String(entry.id) && it.colName === entry.colName));
+    const next = [entry, ...filtered].slice(0, 300);
+    localStorage.setItem(key, JSON.stringify(next));
+  } catch (e) {}
+}
+
+function removeFromLocalTrashCache(itemId: string, schoolId: string, colName?: string) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const key = getTrashStorageKey(schoolId);
+    const raw = JSON.parse(localStorage.getItem(key) || '[]');
+    if (Array.isArray(raw)) {
+      const next = raw.filter(it => !(String(it.id) === String(itemId) && (!colName || it.colName === colName || (colName === 'cases' && it.colName === 'violations') || (colName === 'counseling' && it.colName === 'services'))));
+      localStorage.setItem(key, JSON.stringify(next));
+    }
+  } catch (e) {}
+}
+
+function appendLocalHapusLog(log: HapusLogEntry, schoolId: string) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const key = getHapusLogStorageKey(schoolId);
+    const raw = JSON.parse(localStorage.getItem(key) || '[]');
+    const list: HapusLogEntry[] = Array.isArray(raw) ? raw : [];
+    const next = [log, ...list.filter(l => l.id !== log.id)].slice(0, 300);
+    localStorage.setItem(key, JSON.stringify(next));
+  } catch (e) {}
+}
+
 /**
- * Delete a single document from Firestore Realtime (School-scoped)
+ * SOFT DELETE PERMANEN:
+ * Mengubah dokumen di Firestore menjadi { isDeleted: true, deletedAt, deletedBy }
+ * dan mencatat audit log di collection `hapusLog`. Data tidak tampil lagi saat refresh/login/sync.
  */
-export async function deleteFromFirestore(localKey: string, itemId: string, customSchoolId?: string): Promise<void> {
-  if (!itemId || isQuotaExceeded) return;
-  const cleanId = String(itemId);
-  registerDeletedId(cleanId);
+export async function softDeleteFromFirestore(
+  localKey: string,
+  itemOrId: any,
+  options: SoftDeleteOptions = {}
+): Promise<{ success: boolean; logEntry?: HapusLogEntry }> {
+  const rawId = typeof itemOrId === 'string' ? itemOrId : itemOrId?.id;
+  if (!isValidDeleteId(rawId)) {
+    showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+    return { success: false };
+  }
+  const cleanId = String(rawId).trim();
+
+  const schoolId = options.customSchoolId ? sanitizeSchoolId(options.customSchoolId) : getActiveSchoolId();
   const colName = SYNC_MAP[localKey] || localKey;
-  const schoolId = customSchoolId ? sanitizeSchoolId(customSchoolId) : getActiveSchoolId();
   const cacheKey = `${schoolId}_${localKey}`;
 
-  // Optimistic local deletion: drop from memory/cache and broadcast instantly (<1ms)
+  // 2. Capture full object snapshot & enforce anti-mass-delete guard (> 5 items) BEFORE mutating anything
   const currentList = loadSchoolData<any[]>(localKey, [], schoolId);
+  let nextActiveList: any[] | null = null;
   if (Array.isArray(currentList)) {
-    const nextList = currentList.filter((it: any) => String(it?.id) !== cleanId);
-    saveSchoolData(localKey, nextList, schoolId);
+    const filtered = currentList.filter((it: any) => !it || !isValidDeleteId(it.id) || String(it.id).trim() !== cleanId);
+    const dropped = currentList.length - filtered.length;
+    if (dropped > 5) {
+      showToast('Gagal: Terdeteksi hapus massal, dibatalkan', 'error');
+      return { success: false };
+    }
+    nextActiveList = filtered;
+  }
+
+  // 1. Register ID locally so sync/listeners immediately block resurrection
+  registerDeletedId(cleanId);
+  removePendingCloudWrite(cleanId);
+
+  const foundInLocal = Array.isArray(currentList)
+    ? currentList.find((it: any) => String(it?.id || '').trim() === cleanId)
+    : undefined;
+  const snapshotObj = typeof itemOrId === 'object' && itemOrId !== null
+    ? { ...(foundInLocal || {}), ...itemOrId }
+    : (foundInLocal || { id: cleanId });
+
+  const deletedAt = formatDeletedAtIndonesian(new Date());
+  const deletedAtMs = Date.now();
+  let defaultCounselorName = options.deletedBy || '';
+  if (!defaultCounselorName && typeof localStorage !== 'undefined') {
+    try {
+      const cRaw = localStorage.getItem('bk_active_counselor');
+      if (cRaw) defaultCounselorName = JSON.parse(cRaw)?.name || '';
+    } catch {}
+  }
+  const deletedBy = defaultCounselorName || 'Aulia Aji Sasongko, S.Pd.';
+  const deletedReason = options.reason || options.deletedReason || 'Dihapus oleh pengguna';
+
+  const meta = resolveEntityLabelAndMeta(localKey, snapshotObj, options);
+  const logId = `hlog-${deletedAtMs}-${Math.random().toString(36).slice(2, 7)}`;
+
+  const logEntry: HapusLogEntry = {
+    id: logId,
+    idSiswa: meta.idSiswa || undefined,
+    recordId: cleanId,
+    localKey,
+    entityType: meta.entityType,
+    nama: meta.nama,
+    kelas: meta.kelas,
+    tanggalHapus: deletedAt,
+    oleh: deletedBy,
+    alasan: deletedReason,
+    schoolId
+  };
+
+  const softDeletedPayload = {
+    ...snapshotObj,
+    id: cleanId,
+    schoolId,
+    isDeleted: true,
+    deletedAt,
+    deletedBy,
+    deletedReason,
+    _deletedAtMs: deletedAtMs,
+    _version: (getItemVersion(snapshotObj) || 0) + 1,
+    _updatedAt: deletedAtMs,
+    _lastModifiedByTab: CLIENT_TAB_ID
+  };
+
+  // 3. Remove ONLY this 1 item from active local storage & broadcast
+  if (Array.isArray(nextActiveList)) {
+    saveSchoolData(localKey, nextActiveList, schoolId);
     broadcastRealtimeChange({
       type: 'doc_deleted',
       key: localKey,
       itemId: cleanId,
       schoolId,
-      data: nextList
+      data: nextActiveList
+    });
+  } else {
+    broadcastRealtimeChange({
+      type: 'doc_deleted',
+      key: localKey,
+      itemId: cleanId,
+      schoolId
     });
   }
+  delete lastSavedRemoteMap[cacheKey];
 
-  try {
-    await ensureFirebaseAuth();
-    notifyCloudStatusChange('syncing');
-    const docRef = getSchoolDocRef(colName, cleanId, schoolId);
-    await deleteDoc(docRef);
-    delete lastSavedRemoteMap[cacheKey];
-    notifyCloudStatusChange('connected');
-  } catch (err) {
-    if (!checkAndHandleQuotaError(err)) {
-      console.error(`Firestore delete error [${schoolId}/${colName}/${cleanId}]:`, err);
+  // Also update paired local keys (e.g. bk_cases <-> bk_violations, bk_counseling <-> bk_services)
+  if (localKey === 'bk_violations' || localKey === 'bk_cases') {
+    const pairedKey = localKey === 'bk_violations' ? 'bk_cases' : 'bk_violations';
+    const pList = loadSchoolData<any[]>(pairedKey, [], schoolId);
+    if (Array.isArray(pList)) {
+      const pFiltered = pList.filter((it: any) => !it || !isValidDeleteId(it.id) || String(it.id).trim() !== cleanId);
+      if (pList.length - pFiltered.length <= 5) {
+        saveSchoolData(pairedKey, pFiltered, schoolId);
+      }
+    }
+  } else if (localKey === 'bk_services' || localKey === 'bk_counseling') {
+    const pairedKey = localKey === 'bk_services' ? 'bk_counseling' : 'bk_services';
+    const pList = loadSchoolData<any[]>(pairedKey, [], schoolId);
+    if (Array.isArray(pList)) {
+      const pFiltered = pList.filter((it: any) => !it || !isValidDeleteId(it.id) || String(it.id).trim() !== cleanId);
+      if (pList.length - pFiltered.length <= 5) {
+        saveSchoolData(pairedKey, pFiltered, schoolId);
+      }
     }
   }
+
+  // 4. Cache locally in Trash + HapusLog for instant Sampah access
+  upsertLocalTrashCache({
+    id: cleanId,
+    localKey,
+    colName,
+    entityType: meta.entityType,
+    nama: meta.nama,
+    kelas: meta.kelas,
+    deletedAt,
+    deletedBy,
+    alasan: deletedReason,
+    schoolId,
+    rawDoc: softDeletedPayload,
+    hapusLogId: logId,
+    deletedAtMs
+  });
+  appendLocalHapusLog(logEntry, schoolId);
+
+  // 5. Persist soft-delete flag & hapusLog to Firestore (updateDoc primary, setDoc merge fallback)
+  if (!isQuotaExceeded) {
+    try {
+      await ensureFirebaseAuth();
+      notifyCloudStatusChange('syncing');
+
+      const refs = getMirrorCollectionRefs(colName, cleanId, schoolId);
+      await Promise.allSettled(
+        refs.map((ref) =>
+          updateDoc(ref, softDeletedPayload).catch(() =>
+            setDoc(ref, softDeletedPayload, { merge: true })
+          )
+        )
+      );
+
+      // Write audit log to hapusLog collection (school-scoped + root)
+      await Promise.allSettled([
+        setDoc(getSchoolDocRef('hapusLog', logId, schoolId), logEntry, { merge: true }),
+        setDoc(doc(db, 'hapusLog', logId), logEntry, { merge: true })
+      ]);
+
+      notifyCloudStatusChange('connected');
+    } catch (err) {
+      if (!checkAndHandleQuotaError(err)) {
+        console.error(`Firestore soft delete error [${schoolId}/${colName}/${cleanId}]:`, err);
+      }
+    }
+  }
+
+  return { success: true, logEntry };
+}
+
+/**
+ * Legacy signature compatibility wrapper: routes all deletes through permanent soft-delete
+ */
+export async function deleteFromFirestore(
+  localKey: string,
+  itemId: string,
+  customSchoolId?: string,
+  options?: SoftDeleteOptions
+): Promise<void> {
+  if (!itemId) return;
+  await softDeleteFromFirestore(localKey, itemId, {
+    ...(options || {}),
+    customSchoolId: customSchoolId || options?.customSchoolId
+  });
+}
+
+/**
+ * Soft-delete banyak siswa sekaligus (untuk aksi darurat Kosongkan Data Siswa)
+ */
+export async function softDeleteBulkStudentsFromFirestore(
+  students: any[],
+  deletedBy?: string,
+  customSchoolId?: string
+): Promise<void> {
+  if (!Array.isArray(students) || students.length === 0) return;
+  const schoolId = customSchoolId ? sanitizeSchoolId(customSchoolId) : getActiveSchoolId();
+  const deletedAt = formatDeletedAtIndonesian(new Date());
+  const deletedAtMs = Date.now();
+  const actor = deletedBy || 'Koordinator BK';
+
+  students.forEach(s => {
+    if (s?.id) {
+      registerDeletedId(String(s.id));
+      upsertLocalTrashCache({
+        id: String(s.id),
+        localKey: 'bk_students',
+        colName: 'students',
+        entityType: 'Siswa',
+        nama: s.name || 'Siswa',
+        kelas: s.class || '',
+        deletedAt,
+        deletedBy: actor,
+        alasan: 'Kosongkan daftar siswa',
+        schoolId,
+        rawDoc: { ...s, isDeleted: true, deletedAt, deletedBy: actor, schoolId, _deletedAtMs: deletedAtMs },
+        deletedAtMs
+      });
+    }
+  });
+
+  saveSchoolData('bk_students', [], schoolId);
+  delete lastSavedRemoteMap[`${schoolId}_bk_students`];
+  broadcastRealtimeChange({ type: 'sync', key: 'bk_students', data: [], schoolId });
+
+  if (!isQuotaExceeded) {
+    try {
+      await ensureFirebaseAuth();
+      const CHUNK = 150;
+      for (let i = 0; i < students.length; i += CHUNK) {
+        const chunk = students.slice(i, i + CHUNK);
+        const batch = writeBatch(db);
+        chunk.forEach(s => {
+          if (!s?.id) return;
+          const sid = String(s.id);
+          const payload = {
+            ...s,
+            schoolId,
+            isDeleted: true,
+            deletedAt,
+            deletedBy: actor,
+            deletedReason: 'Kosongkan daftar siswa',
+            _deletedAtMs: deletedAtMs,
+            _updatedAt: deletedAtMs
+          };
+          batch.set(getSchoolDocRef('students', sid, schoolId), payload, { merge: true });
+          batch.set(doc(db, 'students', sid), payload, { merge: true });
+        });
+        await batch.commit();
+      }
+      const logId = `hlog-bulk-${deletedAtMs}`;
+      const bulkLog: HapusLogEntry = {
+        id: logId,
+        recordId: 'bulk_students',
+        localKey: 'bk_students',
+        entityType: 'Siswa (Massal)',
+        nama: `${students.length} Data Siswa Dikosongkan`,
+        kelas: 'Semua Kelas',
+        tanggalHapus: deletedAt,
+        oleh: actor,
+        alasan: 'Kosongkan daftar siswa darurat',
+        schoolId
+      };
+      appendLocalHapusLog(bulkLog, schoolId);
+      setDoc(getSchoolDocRef('hapusLog', logId, schoolId), bulkLog, { merge: true }).catch(() => {});
+    } catch (err) {
+      checkAndHandleQuotaError(err);
+    }
+  }
+}
+
+const TRASH_COLLECTIONS: { localKey: string; colName: string }[] = [
+  { localKey: 'bk_students', colName: 'students' },
+  { localKey: 'bk_violations', colName: 'violations' },
+  { localKey: 'bk_violations', colName: 'cases' },
+  { localKey: 'bk_services', colName: 'services' },
+  { localKey: 'bk_services', colName: 'counseling' },
+  { localKey: 'bk_achievements', colName: 'achievements' },
+  { localKey: 'bk_home_visits', colName: 'home_visits' },
+  { localKey: 'bk_parent_summons', colName: 'parent_summons' },
+  { localKey: 'bk_attendance_history', colName: 'attendance_history' },
+  { localKey: 'bk_daily_journals', colName: 'daily_journals' },
+  { localKey: 'bk_program_evaluations', colName: 'program_evaluations' },
+  { localKey: 'bk_service_evaluations', colName: 'service_evaluations' },
+  { localKey: 'bk_surat_perjanjian_list', colName: 'surat_perjanjian_list' },
+  { localKey: 'bk_kontrak_perilaku_list', colName: 'kontrak_perilaku_list' },
+  { localKey: 'bk_jurnal_pembinaan_disiplin_list', colName: 'jurnal_pembinaan_disiplin_list' },
+  { localKey: 'bk_komitmen_rtl_list', colName: 'komitmen_rtl_list' },
+];
+
+/**
+ * Mengambil seluruh data yang sudah di-soft-delete (isDeleted === true) & riwayat hapusLog
+ * untuk ditampilkan pada menu [Sampah / Riwayat Hapus]
+ */
+export async function fetchSoftDeletedRecordsFromFirestore(customSchoolId?: string): Promise<{
+  items: SoftDeletedTrashItem[];
+  logs: HapusLogEntry[];
+}> {
+  const schoolId = customSchoolId ? sanitizeSchoolId(customSchoolId) : getActiveSchoolId();
+  const itemMap = new Map<string, SoftDeletedTrashItem>();
+  const logMap = new Map<string, HapusLogEntry>();
+
+  const normalizeGroupKey = (colName: string, id: string) => {
+    if (colName === 'cases' || colName === 'violations') return `cases_violations_${id}`;
+    if (colName === 'counseling' || colName === 'services') return `counseling_services_${id}`;
+    return `${colName}_${id}`;
+  };
+
+  // 1. Muat cache lokal Sampah & hapusLog terlebih dahulu
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const localTrash = JSON.parse(localStorage.getItem(getTrashStorageKey(schoolId)) || '[]');
+      if (Array.isArray(localTrash)) {
+        localTrash.forEach((it: SoftDeletedTrashItem) => {
+          if (it && it.id) {
+            itemMap.set(normalizeGroupKey(it.colName, String(it.id)), it);
+          }
+        });
+      }
+    } catch {}
+    try {
+      const localLogs = JSON.parse(localStorage.getItem(getHapusLogStorageKey(schoolId)) || '[]');
+      if (Array.isArray(localLogs)) {
+        localLogs.forEach((l: HapusLogEntry) => {
+          if (l && l.id && !l.permanentlyDeleted) logMap.set(l.id, l);
+        });
+      }
+    } catch {}
+  }
+
+  // 2. Query Firestore untuk isDeleted === true dan hapusLog
+  if (!isQuotaExceeded) {
+    try {
+      await ensureFirebaseAuth();
+
+      await Promise.all([
+        ...TRASH_COLLECTIONS.map(async ({ localKey, colName }) => {
+          const processSnap = (snap: any) => {
+            snap.forEach((d: any) => {
+              const data = d.data();
+              if (!data || data.isDeleted !== true) return;
+              if (belongsToOtherSchool(data, schoolId)) return;
+              const cleanId = String(d.id);
+              registerDeletedId(cleanId);
+              const meta = resolveEntityLabelAndMeta(localKey, { id: cleanId, ...data });
+              const key = normalizeGroupKey(colName, cleanId);
+              const existing = itemMap.get(key);
+              itemMap.set(key, {
+                id: cleanId,
+                localKey,
+                colName: existing?.colName || colName,
+                entityType: meta.entityType,
+                nama: meta.nama,
+                kelas: meta.kelas,
+                deletedAt: data.deletedAt || existing?.deletedAt || '-',
+                deletedBy: data.deletedBy || existing?.deletedBy || 'Pengguna',
+                alasan: data.deletedReason || existing?.alasan || 'Dihapus oleh pengguna',
+                schoolId,
+                rawDoc: { id: cleanId, ...data },
+                deletedAtMs: data._deletedAtMs || existing?.deletedAtMs || 0
+              });
+            });
+          };
+
+          try {
+            const subQ = query(getSchoolColRef(colName, schoolId), where('isDeleted', '==', true));
+            const subSnap = await getDocs(subQ);
+            if (!subSnap.empty) processSnap(subSnap);
+          } catch {}
+          try {
+            const rootQ = query(collection(db, colName), where('isDeleted', '==', true));
+            const rootSnap = await getDocs(rootQ);
+            if (!rootSnap.empty) processSnap(rootSnap);
+          } catch {}
+        }),
+        (async () => {
+          try {
+            const subLogs = await getDocs(getSchoolColRef('hapusLog', schoolId));
+            subLogs.forEach(d => {
+              const l = { id: d.id, ...d.data() } as HapusLogEntry;
+              if (l && !l.permanentlyDeleted) logMap.set(l.id, l);
+            });
+          } catch {}
+          try {
+            const rootLogsQ = query(collection(db, 'hapusLog'), where('schoolId', '==', schoolId));
+            const rootLogs = await getDocs(rootLogsQ);
+            rootLogs.forEach(d => {
+              const l = { id: d.id, ...d.data() } as HapusLogEntry;
+              if (l && !l.permanentlyDeleted) logMap.set(l.id, l);
+            });
+          } catch {}
+        })()
+      ]);
+    } catch (err) {
+      checkAndHandleQuotaError(err);
+    }
+  }
+
+  const items = Array.from(itemMap.values()).sort((a, b) => (b.deletedAtMs || 0) - (a.deletedAtMs || 0));
+  const logs = Array.from(logMap.values()).sort((a, b) => (b.id > a.id ? 1 : -1));
+  return { items, logs };
+}
+
+/**
+ * PULIHKAN DATA DARI SAMPAH:
+ * Menghapus penanda isDeleted: true di Firestore & mengembalikan dokumen ke daftar aktif.
+ */
+export async function restoreSoftDeletedFromFirestore(
+  trashItem: SoftDeletedTrashItem,
+  customSchoolId?: string
+): Promise<{ success: boolean }> {
+  const schoolId = customSchoolId ? sanitizeSchoolId(customSchoolId) : sanitizeSchoolId(trashItem.schoolId || getActiveSchoolId());
+  const cleanId = String(trashItem.id);
+  const colName = trashItem.colName || SYNC_MAP[trashItem.localKey] || 'students';
+  const now = Date.now();
+
+  // 1. Unblock from deletion tracker
+  unregisterDeletedId(cleanId);
+  removeFromLocalTrashCache(cleanId, schoolId, colName);
+
+  const restoredDoc: any = {
+    ...(trashItem.rawDoc || { id: cleanId }),
+    id: cleanId,
+    schoolId,
+    isDeleted: false,
+    deletedAt: null,
+    deletedBy: null,
+    deletedReason: null,
+    restoredAt: formatDeletedAtIndonesian(new Date()),
+    _version: (getItemVersion(trashItem.rawDoc) || 1) + 1,
+    _updatedAt: now,
+    _lastModifiedByTab: CLIENT_TAB_ID
+  };
+
+  // 2. Restore ke localStorage & broadcast ke seluruh UI
+  const targetKeys = new Set<string>([trashItem.localKey]);
+  if (trashItem.localKey === 'bk_violations' || colName === 'cases' || colName === 'violations') {
+    targetKeys.add('bk_violations');
+    targetKeys.add('bk_cases');
+  } else if (trashItem.localKey === 'bk_services' || colName === 'counseling' || colName === 'services') {
+    targetKeys.add('bk_services');
+    targetKeys.add('bk_counseling');
+  }
+
+  targetKeys.forEach(k => {
+    const cur = loadSchoolData<any[]>(k, [], schoolId);
+    const list = Array.isArray(cur) ? cur.filter((it: any) => String(it?.id) !== cleanId) : [];
+    const updated = sortCollectionData(k, [restoredDoc, ...list]);
+    saveSchoolData(k, updated, schoolId);
+    delete lastSavedRemoteMap[`${schoolId}_${k}`];
+    broadcastRealtimeChange({ type: 'sync', key: k, data: updated, schoolId });
+  });
+
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const logKey = getHapusLogStorageKey(schoolId);
+      const rawLogs = JSON.parse(localStorage.getItem(logKey) || '[]');
+      if (Array.isArray(rawLogs)) {
+        localStorage.setItem(logKey, JSON.stringify(rawLogs.filter((l: HapusLogEntry) => String(l.recordId) !== cleanId)));
+      }
+    } catch {}
+  }
+
+  // 3. Update Firestore (subcollection + root + paired aliases)
+  if (!isQuotaExceeded) {
+    try {
+      await ensureFirebaseAuth();
+      const refs = getMirrorCollectionRefs(colName, cleanId, schoolId);
+      await Promise.allSettled(refs.map(ref => setDoc(ref, restoredDoc, { merge: true })));
+    } catch (err) {
+      checkAndHandleQuotaError(err);
+    }
+  }
+
+  return { success: true };
+}
+
+/**
+ * HAPUS PERMANEN DARI SAMPAH (Hard delete deleteDoc di seluruh koleksi subcollection & root Firestore)
+ */
+export async function permanentDeleteFromFirestore(
+  localKey: string,
+  itemId: string,
+  customSchoolId?: string,
+  hapusLogId?: string
+): Promise<{ success: boolean }> {
+  const cleanId = String(itemId).trim();
+  if (!cleanId) return { success: false };
+
+  const schoolId = customSchoolId ? sanitizeSchoolId(customSchoolId) : getActiveSchoolId();
+  const colName = SYNC_MAP[localKey] || localKey;
+
+  // Keep ID registered in deleted tracker & remove from local Trash cache
+  registerDeletedId(cleanId);
+  removeFromLocalTrashCache(cleanId, schoolId, colName);
+
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const logKey = getHapusLogStorageKey(schoolId);
+      const rawLogs = JSON.parse(localStorage.getItem(logKey) || '[]');
+      if (Array.isArray(rawLogs)) {
+        const filtered = rawLogs.filter((l: HapusLogEntry) => String(l.recordId) !== cleanId && (!hapusLogId || l.id !== hapusLogId));
+        localStorage.setItem(logKey, JSON.stringify(filtered));
+      }
+    } catch {}
+  }
+
+  if (!isQuotaExceeded) {
+    try {
+      await ensureFirebaseAuth();
+      notifyCloudStatusChange('syncing');
+      const refs = getMirrorCollectionRefs(colName, cleanId, schoolId);
+      await Promise.allSettled(refs.map(ref => deleteDoc(ref)));
+
+      if (hapusLogId) {
+        await Promise.allSettled([
+          deleteDoc(getSchoolDocRef('hapusLog', hapusLogId, schoolId)),
+          deleteDoc(doc(db, 'hapusLog', hapusLogId))
+        ]);
+      }
+      notifyCloudStatusChange('connected');
+    } catch (err) {
+      checkAndHandleQuotaError(err);
+    }
+  }
+
+  return { success: true };
+}
+
+/**
+ * Bersihkan cache data lokal saat login agar state selalu segar dari Firestore (isDeleted != true),
+ * TANPA menghapus `bk_deleted_ids`, `bk_trash_*`, `bk_hapus_log_*`, token Google, atau konfigurasi sekolah.
+ */
+export function clearLocalDataCachesOnLogin(schoolIdInput?: string): void {
+  if (typeof localStorage === 'undefined') return;
+  const sId = schoolIdInput ? sanitizeSchoolId(schoolIdInput) : getActiveSchoolId();
+  const cachePrefixes = [
+    'bk_students', 'bk_violations', 'bk_cases', 'bk_services', 'bk_counseling',
+    'bk_achievements', 'bk_student_achievements', 'bk_home_visits', 'bk_attendance_history',
+    'bk_daily_journals', 'bk_parent_summons', 'bk_program_evaluations', 'bk_service_evaluations',
+    'bk_logs'
+  ];
+  cachePrefixes.forEach(base => {
+    try {
+      localStorage.removeItem(`${base}_${sId}`);
+      localStorage.removeItem(base);
+    } catch {}
+    delete lastSavedRemoteMap[`${sId}_${base}`];
+  });
 }
 
 /**
@@ -943,7 +1899,7 @@ export async function saveBulkToFirestore(
 
   const deletedSet = new Set(getDeletedIds());
   const activeCleanItems = items.filter(
-    (it: any) => it && it.id && !deletedSet.has(String(it.id)) && !isDummyRecord(it, localKey)
+    (it: any) => it && it.id && it.isDeleted !== true && !deletedSet.has(String(it.id)) && !isDummyRecord(it, localKey)
   );
 
   const schoolId = customSchoolId || getActiveSchoolId();
@@ -961,19 +1917,27 @@ export async function saveBulkToFirestore(
     await ensureFirebaseAuth();
     notifyCloudStatusChange('syncing');
 
-    // If local collection was intentionally emptied by an explicit admin reset, remove documents
+    // If local collection was intentionally emptied by an explicit admin reset, soft-delete documents
     if (sortedItems.length === 0) {
       if (!isIntentionalWipe) {
         // Prevent accidental cloud wipe from empty local initial state
         return;
       }
+      const deletedAt = formatDeletedAtIndonesian(new Date());
+      const deletedAtMs = Date.now();
       const colRef = getSchoolColRef(colName, schoolId);
       const snap = await getDocs(colRef);
       if (!snap.empty) {
         let batch = writeBatch(db);
         let count = 0;
         for (const docSnap of snap.docs) {
-          batch.delete(docSnap.ref);
+          registerDeletedId(docSnap.id);
+          batch.set(docSnap.ref, {
+            isDeleted: true,
+            deletedAt,
+            deletedBy: 'Koordinator BK',
+            _deletedAtMs: deletedAtMs
+          }, { merge: true });
           count++;
           if (count >= 400) {
             await batch.commit();
@@ -1002,14 +1966,20 @@ export async function saveBulkToFirestore(
           const nextVersion = currentVersion > 0 ? currentVersion : 1;
           const currentTimestamp = getItemTimestamp(item) || now;
 
+          const hasAssignedId = extractRecordSchoolId(item) !== '' && !item.isLegacyUnmigrated;
+          if (!hasAssignedId) continue; // Jangan auto-migrasi data lama saat sync biasa; migrasi hanya lewat tombol manual
+          const itemSchoolName = item.schoolName || (schoolId === 'sch_20320123' ? 'SMP N 2 Susukan' : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan'));
           const ref = getSchoolDocRef(colName, String(item.id), schoolId);
-          batch.set(ref, { 
+          const payload = { 
             ...item, 
+            isDeleted: false,
             schoolId,
+            schoolName: itemSchoolName,
             _version: nextVersion,
             _updatedAt: currentTimestamp,
             _lastModifiedByTab: CLIENT_TAB_ID
-          }, { merge: true });
+          };
+          batch.set(ref, payload, { merge: true });
         }
       }
       await batch.commit();
@@ -1023,11 +1993,16 @@ export async function saveBulkToFirestore(
       // Fallback: save individually with setDoc so Firestore client queues them in offline cache
       for (const item of sortedItems) {
         if (item && item.id) {
+          const hasAssignedId = extractRecordSchoolId(item) !== '' && !item.isLegacyUnmigrated;
+          if (!hasAssignedId) continue;
           try {
+            const itemSchoolName = item.schoolName || (schoolId === 'sch_20320123' ? 'SMP N 2 Susukan' : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan'));
             const ref = getSchoolDocRef(colName, String(item.id), schoolId);
             setDoc(ref, { 
               ...item, 
+              isDeleted: false,
               schoolId,
+              schoolName: itemSchoolName,
               _version: getItemVersion(item) || 1,
               _updatedAt: getItemTimestamp(item) || Date.now(),
               _lastModifiedByTab: CLIENT_TAB_ID
@@ -1079,26 +2054,37 @@ export async function fetchCloudAttendance(schoolId?: string): Promise<any[]> {
   if (isQuotaExceeded) return loadSchoolData('bk_attendance_history', [], targetSchoolId);
   try {
     await ensureFirebaseAuth();
-    const colRef = getSchoolColRef('attendance_history', targetSchoolId);
-    let snap = await getDocs(colRef);
-    // CRITICAL SECURITY FIX: Only allow root fallback for canonical demo school
-    if (snap.empty && targetSchoolId === 'sch_20320123') {
-      const rootSnap = await getDocs(collection(db, 'attendance_history'));
-      if (!rootSnap.empty) {
-        snap = rootSnap;
-      }
-    }
     const deletedSet = new Set(getDeletedIds());
-    const cloudAttendance: any[] = [];
-    snap.forEach((d) => {
-      const item = { id: d.id, ...d.data() } as any;
-      if (item && item.id && !deletedSet.has(String(item.id)) && !isDummyRecord(item, 'bk_attendance_history')) {
-        // Enforce school isolation
-        if (!item.schoolId || sanitizeSchoolId(item.schoolId) === targetSchoolId) {
-          cloudAttendance.push({ ...item, schoolId: targetSchoolId });
+    const attendanceMap = new Map<string, any>();
+    const collectSnap = (snap: any) => {
+      snap.forEach((d: any) => {
+        const item = { id: d.id, ...d.data() } as any;
+        if (!item || !item.id) return;
+        const rid = String(item.id);
+        if (item.isDeleted === true) {
+          registerDeletedId(rid);
+          deletedSet.add(rid);
+          attendanceMap.delete(rid);
+          return;
         }
-      }
-    });
+        if (!deletedSet.has(rid) && !isDummyRecord(item, 'bk_attendance_history')) {
+          if (matchesSchoolOrLegacy(item, targetSchoolId)) {
+            const isLegacy = isLegacyUnassignedRecord(item);
+            attendanceMap.set(rid, isLegacy ? { ...item, isLegacyUnmigrated: true } : item);
+          }
+        }
+      });
+    };
+
+    const colRef = getSchoolColRef('attendance_history', targetSchoolId);
+    const [subSnap, rootSnap] = await Promise.allSettled([
+      getDocs(colRef),
+      getDocs(collection(db, 'attendance_history'))
+    ]);
+    if (rootSnap.status === 'fulfilled' && !rootSnap.value.empty) collectSnap(rootSnap.value);
+    if (subSnap.status === 'fulfilled' && !subSnap.value.empty) collectSnap(subSnap.value);
+
+    const cloudAttendance: any[] = Array.from(attendanceMap.values());
 
     if (cloudAttendance.length > 0) {
       const sorted = sortCollectionData('bk_attendance_history', cloudAttendance);
@@ -1674,136 +2660,84 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
     uniqueCollectionMap.get(colName)!.push(localKey);
   });
 
-  // Listen to each unique collection in Firestore in real-time under schools/{schoolId}/{colName}
+  // Listen to each unique collection in BOTH schools/{schoolId}/{colName} AND root/{colName} (untuk data lama tanpa schoolId)
   uniqueCollectionMap.forEach((localKeys, colName) => {
     if (isQuotaExceeded) return;
 
-    const colRef = getSchoolColRef(colName, currentSchoolId);
+    const subDocsMap = new Map<string, any>();
+    const rootDocsMap = new Map<string, any>();
 
-    const unsub = onSnapshot(colRef, (snapshot) => {
-      if (isQuotaExceeded) return;
-
-      // If school collection is currently empty
-      if (snapshot.empty) {
-        // 1. Check if root collection has legacy data to migrate ONLY FOR CANONICAL DEFAULT SCHOOL (sch_20320123)
-        if (currentSchoolId === 'sch_20320123') {
-          getDocs(collection(db, colName)).then((rootSnap) => {
-            if (!rootSnap.empty) {
-              const rootDocs: any[] = [];
-              const deletedSet = new Set(getDeletedIds());
-              rootSnap.forEach((d) => {
-                const item = { id: d.id, ...d.data() } as any;
-                if (item && item.id && !deletedSet.has(String(item.id)) && !isDummyRecord(item, localKeys[0])) {
-                  rootDocs.push({ ...item, schoolId: currentSchoolId });
-                }
-              });
-
-              if (rootDocs.length > 0) {
-                // Automatically migrate root collection to school partition
-                saveBulkToFirestore(localKeys[0], rootDocs, currentSchoolId);
-                localKeys.forEach((localKey) => {
-                  const sorted = sortCollectionData(localKey, rootDocs);
-                  saveSchoolData(localKey, sorted, currentSchoolId);
-                  broadcastRealtimeChange({
-                    type: 'sync',
-                    key: localKey,
-                    data: sorted,
-                    schoolId: currentSchoolId
-                  });
-                });
-                notifyCloudStatusChange('connected');
-              }
-            }
-            // If colName is 'students' and Firestore collection is empty, only populate local state if never explicitly cleared
-            const isCleared = typeof localStorage !== 'undefined' && localStorage.getItem('bk_cleared_sch_20320123') === 'true';
-            if (!isCleared && colName === 'students' && initialStudents && initialStudents.length > 0) {
-              const isBooted = typeof localStorage !== 'undefined' && localStorage.getItem('bk_booted_sch_20320123') === 'true';
-              if (!isBooted) {
-                localStorage.setItem('bk_booted_sch_20320123', 'true');
-                saveSchoolData('bk_students', initialStudents, 'sch_20320123');
-                broadcastRealtimeChange({
-                  type: 'sync',
-                  key: 'bk_students',
-                  data: initialStudents,
-                  schoolId: 'sch_20320123'
-                });
-              }
-            }
-          }).catch((err) => {
-            console.warn(`[FirestoreSync] Fallback check error for ${colName}:`, err);
-          });
-        }
-        return;
-      }
-
-      // Mark collections as initialized/seeded in cloud
-      localKeys.forEach((localKey) => {
-        const seedMarkerKey = `bk_seeded_${currentSchoolId}_${localKey}`;
-        if (typeof localStorage !== 'undefined') localStorage.setItem(seedMarkerKey, 'true');
+    const flushMergedDocs = (snapshotDeletedIds: Set<string>, deletedSet: Set<string>) => {
+      const mergedRemoteMap = new Map<string, any>();
+      rootDocsMap.forEach((val, k) => {
+        if (!deletedSet.has(k) && !snapshotDeletedIds.has(k)) mergedRemoteMap.set(k, val);
       });
-
-      const deletedSet = new Set(getDeletedIds());
-      const rawDocs: any[] = [];
-      snapshot.forEach((d) => {
-        const item = { id: d.id, ...d.data() } as any;
-        if (item && item.id) {
-          const itemId = String(item.id);
-          if (deletedSet.has(itemId)) {
-            // Document was deleted via the app - ensure Firestore follows app command
-            deleteFromFirestore(localKeys[0], itemId);
-          } else if (!isDummyRecord(item, localKeys[0])) {
-            // Defense-in-depth: Verify record does not belong to another school
-            if (item.schoolId) {
-              if (sanitizeSchoolId(item.schoolId) === currentSchoolId) {
-                rawDocs.push(item);
-              }
-            } else if (currentSchoolId === 'sch_20320123') {
-              rawDocs.push({ ...item, schoolId: currentSchoolId });
-            }
-          }
-        }
+      subDocsMap.forEach((val, k) => {
+        if (!deletedSet.has(k) && !snapshotDeletedIds.has(k)) mergedRemoteMap.set(k, val);
       });
+      const rawDocs = Array.from(mergedRemoteMap.values());
 
-      // Update each mapped local key efficiently
       localKeys.forEach((localKey) => {
         const cacheKey = `${currentSchoolId}_${localKey}`;
         const currentLocalList = loadSchoolData<any[]>(localKey, [], currentSchoolId);
         const localMap = new Map<string, any>();
         if (Array.isArray(currentLocalList)) {
           currentLocalList.forEach((it: any) => {
-            if (it && it.id) localMap.set(String(it.id), it);
+            if (it && isValidDeleteId(it.id)) {
+              localMap.set(String(it.id).trim(), it);
+            }
           });
         }
 
-        const docsData: any[] = [];
+        const mergedDocsMap = new Map<string, any>();
+
+        // 1. Pertahankan data lokal aktif (termasuk data lama tanpa schoolId) kecuali sudah dihapus
+        if (Array.isArray(currentLocalList)) {
+          currentLocalList.forEach((localItem: any) => {
+            if (!localItem || !isValidDeleteId(localItem.id)) return;
+            const lid = String(localItem.id).trim();
+            if (localItem.isDeleted === true || deletedSet.has(lid) || snapshotDeletedIds.has(lid)) return;
+            if (isDummyRecord(localItem, localKey)) return;
+            if (!matchesSchoolOrLegacy(localItem, currentSchoolId)) return;
+            mergedDocsMap.set(lid, localItem);
+          });
+        }
+
+        // 2. Gabungkan data remote yang aktif (isDeleted !== true)
         rawDocs.forEach((item) => {
-          const localItem = localMap.get(String(item.id));
+          const rid = String(item.id).trim();
+          if (deletedSet.has(rid) || snapshotDeletedIds.has(rid)) return;
+          const localItem = localMap.get(rid);
           if (localItem) {
             const remoteVersion = getItemVersion(item);
             const localVersion = getItemVersion(localItem);
             const remoteTime = getItemTimestamp(item);
             const localTime = getItemTimestamp(localItem);
 
-            // If this tab recently modified the document locally and the remote snapshot is older
             if (localItem._lastModifiedByTab === CLIENT_TAB_ID &&
                 (localVersion > remoteVersion || (localVersion === remoteVersion && localTime > remoteTime))) {
-              docsData.push(localItem);
+              mergedDocsMap.set(rid, localItem);
               return;
             }
           }
-          docsData.push(item);
+          mergedDocsMap.set(rid, item);
         });
 
+        const docsData = Array.from(mergedDocsMap.values());
 
-
-        // Sort deterministically so all devices display and compare identical order
-        let sortedDocs = sortCollectionData(localKey, docsData);
+        let sortedDocs = sortCollectionData(localKey, docsData, currentSchoolId);
         if (localKey === 'bk_logs' && sortedDocs.length > 80) {
           sortedDocs = sortedDocs.slice(0, 80);
         }
-        const remoteStr = JSON.stringify(sortedDocs);
 
-        // Fast check against last known remote string to eliminate redundant updates
+        const isExplicitClear = typeof localStorage !== 'undefined' &&
+          (localStorage.getItem(`bk_cleared_${currentSchoolId}`) === 'true' || localStorage.getItem(`bk_students_cleared_${currentSchoolId}`) === 'true');
+        if (Array.isArray(currentLocalList) && currentLocalList.length > 5 && sortedDocs.length === 0 && !isExplicitClear) {
+          console.warn(`[FirestoreSync] Anti-mass-wipe: aborted empty snapshot overwrite for ${localKey} (${currentLocalList.length} -> 0)`);
+          return;
+        }
+
+        const remoteStr = JSON.stringify(sortedDocs);
         if (lastSavedRemoteMap[cacheKey] !== remoteStr) {
           lastSavedRemoteMap[cacheKey] = remoteStr;
           saveSchoolData(localKey, sortedDocs, currentSchoolId);
@@ -1816,14 +2750,66 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
           notifyCloudStatusChange('connected');
         }
       });
+    };
+
+    const ingestIntoMap = (targetMap: Map<string, any>, snapshot: any) => {
+      const deletedSet = new Set(getDeletedIds());
+      const snapshotDeletedIds = new Set<string>();
+      targetMap.clear();
+
+      snapshot.forEach((d: any) => {
+        const item = { id: d.id, ...d.data() } as any;
+        if (item && isValidDeleteId(item.id)) {
+          const itemId = String(item.id).trim();
+          if (item.isDeleted === true) {
+            registerDeletedId(itemId);
+            deletedSet.add(itemId);
+            snapshotDeletedIds.add(itemId);
+            return;
+          }
+          if (deletedSet.has(itemId)) {
+            setDoc(d.ref, { isDeleted: true, deletedAt: formatDeletedAtIndonesian(new Date()) }, { merge: true }).catch(() => {});
+            return;
+          }
+          if (!isDummyRecord(item, localKeys[0]) && matchesSchoolOrLegacy(item, currentSchoolId)) {
+            const isLegacy = isLegacyUnassignedRecord(item);
+            targetMap.set(itemId, isLegacy ? { ...item, isLegacyUnmigrated: true } : item);
+          }
+        }
+      });
+
+      flushMergedDocs(snapshotDeletedIds, deletedSet);
+    };
+
+    const colRef = getSchoolColRef(colName, currentSchoolId);
+    const unsubSub = onSnapshot(colRef, (snapshot) => {
+      if (isQuotaExceeded) return;
+      if (!snapshot.empty) {
+        localKeys.forEach((localKey) => {
+          const seedMarkerKey = `bk_seeded_${currentSchoolId}_${localKey}`;
+          if (typeof localStorage !== 'undefined') localStorage.setItem(seedMarkerKey, 'true');
+        });
+      }
+      ingestIntoMap(subDocsMap, snapshot);
     }, (error) => {
       if (!checkAndHandleQuotaError(error)) {
         console.error(`Realtime onSnapshot listener error [${currentSchoolId}/${colName}]:`, error);
         notifyCloudStatusChange('offline');
       }
     });
+    unsubscribes.push(unsubSub);
 
-    unsubscribes.push(unsub);
+    // Juga dengarkan koleksi root untuk menangkap data lama (schoolId == null / "" / tidak ada) tanpa auto-migrasi
+    const rootColRef = collection(db, colName);
+    const unsubRoot = onSnapshot(rootColRef, (snapshot) => {
+      if (isQuotaExceeded) return;
+      ingestIntoMap(rootDocsMap, snapshot);
+    }, (error) => {
+      if (!checkAndHandleQuotaError(error)) {
+        console.warn(`Realtime root onSnapshot notice [${colName}]:`, error);
+      }
+    });
+    unsubscribes.push(unsubRoot);
   });
 
   // Dedicated real-time listener for global account registrations (pengajuan akun baru)
@@ -1863,10 +2849,10 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
         const reqCleanNpsn = req.schoolNpsn ? sanitizeSchoolId(req.schoolNpsn) : '';
         const reqSchoolId = (reqCleanNpsn || (req.schoolId ? sanitizeSchoolId(req.schoolId) : ''));
         
-        // Also ensure school is saved in registered schools if schoolName & npsn exist
-        if (req.schoolName && reqCleanNpsn) {
+        // Daftarkan sekolah dari account_requests ke daftar sekolah terdaftar SAJA tanpa mengubah sekolah aktif saat ini!
+        if (req.schoolName && (reqCleanNpsn || reqSchoolId)) {
           const registered = getRegisteredSchools();
-          if (!registered.some(s => s.schoolId === reqSchoolId || s.npsn === req.schoolNpsn)) {
+          if (!registered.some(s => s.schoolId === reqSchoolId || (req.schoolNpsn && s.npsn === req.schoolNpsn))) {
             const newSch: SchoolConfig = {
               schoolId: reqSchoolId,
               schoolName: req.schoolName,
@@ -1877,15 +2863,27 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
               governmentName: 'PEMERINTAH KABUPATEN / KOTA',
               departmentName: 'DINAS PENDIDIKAN'
             };
-            saveSchoolConfig(newSch);
+            registerSchoolConfigWithoutActivating(newSch);
           }
         }
 
         // Only add to active school list if it strictly belongs to this active school
         if (reqSchoolId === activeSchoolId || (!reqSchoolId && activeSchoolId === 'sch_20320123')) {
           const existing = map.get(req.id);
-          if (!existing || existing.approvalStatus !== req.approvalStatus || JSON.stringify(existing) !== JSON.stringify(req)) {
-            map.set(req.id, { ...(existing || {}), ...req, schoolId: activeSchoolId });
+          const isAuliaReq = req.id === 'c1' || req.username === 'aulia' || (req.email && String(req.email).toLowerCase().includes('auliasasongko'));
+          const safeReq = isAuliaReq
+            ? {
+                ...req,
+                id: 'c1',
+                name: 'Aulia Aji Sasongko, S.Pd.',
+                schoolId: 'sch_20320123',
+                schoolNpsn: '20320123',
+                schoolName: 'SMP N 2 Susukan',
+                role: req.role && !String(req.role).toLowerCase().includes('admin & guru') ? req.role : 'Koordinator BK & Guru Pembimbing Kelas 8'
+              }
+            : { ...req, schoolId: activeSchoolId };
+          if (!existing || existing.approvalStatus !== req.approvalStatus || JSON.stringify(existing) !== JSON.stringify(safeReq)) {
+            map.set(req.id, { ...(existing || {}), ...safeReq });
             changed = true;
           }
         } else if (reqSchoolId) {
@@ -1957,39 +2955,72 @@ export async function forceFullCloudSync(): Promise<void> {
 
   const pullCollections = Array.from(uniqueColMap.entries()).map(async ([colName, localKeys]) => {
     try {
-      const colRef = getSchoolColRef(colName, currentSchoolId);
-      let snap = await getDocs(colRef);
-      // CRITICAL SECURITY FIX: Only allow root fallback for canonical demo school
-      if (snap.empty && currentSchoolId === 'sch_20320123') {
-        const rootSnap = await getDocs(collection(db, colName));
-        if (!rootSnap.empty) {
-          snap = rootSnap;
-        }
-      }
-
       const deletedSet = new Set(getDeletedIds());
-      const docsData: any[] = [];
+      const docMap = new Map<string, any>();
 
-        snap.forEach((d) => {
+      const ingestSnapshot = (snap: any) => {
+        snap.forEach((d: any) => {
           const item = { id: d.id, ...d.data() } as any;
-          if (item && item.id && !deletedSet.has(String(item.id)) && !isDummyRecord(item, localKeys[0])) {
-            // Defense-in-depth: Verify record does not belong to another school
-            if (item.schoolId) {
-              if (sanitizeSchoolId(item.schoolId) === currentSchoolId) {
-                docsData.push(item);
-              }
-            } else if (currentSchoolId === 'sch_20320123') {
-              docsData.push({ ...item, schoolId: currentSchoolId });
+          if (item && item.id) {
+            const rid = String(item.id);
+            if (item.isDeleted === true) {
+              registerDeletedId(rid);
+              deletedSet.add(rid);
+              docMap.delete(rid);
+              return;
+            }
+            if (!deletedSet.has(rid) && !isDummyRecord(item, localKeys[0]) && matchesSchoolOrLegacy(item, currentSchoolId)) {
+              const isLegacy = isLegacyUnassignedRecord(item);
+              docMap.set(rid, isLegacy ? { ...item, isLegacyUnmigrated: true } : item);
             }
           }
         });
+      };
+
+      // 1 & 2. Pull BOTH school subcollection AND root collection (2-syarat: schoolId == currentSchoolId OR kosong/null/missing)
+      const [subRes, rootRes] = await Promise.allSettled([
+        getDocs(getSchoolColRef(colName, currentSchoolId)),
+        getDocs(collection(db, colName))
+      ]);
+      if (rootRes.status === 'fulfilled' && !rootRes.value.empty) ingestSnapshot(rootRes.value);
+      if (subRes.status === 'fulfilled' && !subRes.value.empty) ingestSnapshot(subRes.value);
+
+      // Pastikan dokumen yang punya flag isDeleted di salah satu sumber dihapus dari docMap
+      deletedSet.forEach(dId => docMap.delete(dId));
+      const docsData = Array.from(docMap.values());
 
       for (const localKey of localKeys) {
-        // If remote has data, save and broadcast
-        if (docsData.length > 0) {
+        const localList = loadSchoolData<any[]>(localKey, [], currentSchoolId);
+        const hadDeletedInLocal = Array.isArray(localList) && localList.some(
+          item => item && (item.isDeleted === true || deletedSet.has(String(item.id)))
+        );
 
+        if (docsData.length > 0 || hadDeletedInLocal) {
+          // Merge safely with non-dummy & non-deleted local records
+          const mergedMap = new Map<string, any>();
+          if (Array.isArray(localList)) {
+            localList.forEach(item => {
+              if (item && item.id && item.isDeleted !== true && !deletedSet.has(String(item.id)) && !isDummyRecord(item, localKey)) {
+                mergedMap.set(String(item.id), item);
+              }
+            });
+          }
+          docsData.forEach(remoteItem => {
+            const rid = String(remoteItem.id);
+            if (deletedSet.has(rid) || remoteItem.isDeleted === true) return;
+            const localItem = mergedMap.get(rid);
+            if (!localItem || !isStaleUpdate(remoteItem, localItem)) {
+              mergedMap.set(rid, remoteItem);
+            }
+          });
 
-          const sortedDocs = sortCollectionData(localKey, docsData);
+          const sortedDocs = sortCollectionData(localKey, Array.from(mergedMap.values()), currentSchoolId);
+          const isExplicitClear = typeof localStorage !== 'undefined' &&
+            (localStorage.getItem(`bk_cleared_${currentSchoolId}`) === 'true' || localStorage.getItem(`bk_students_cleared_${currentSchoolId}`) === 'true');
+          if (Array.isArray(localList) && localList.length > 5 && sortedDocs.length === 0 && !isExplicitClear) {
+            console.warn(`[FirestoreSync] Anti-mass-wipe in forceFullCloudSync for ${localKey}`);
+            continue;
+          }
           saveSchoolData(localKey, sortedDocs, currentSchoolId);
           if (localKey === 'bk_attendance_history' && typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: sortedDocs }));
@@ -2000,19 +3031,6 @@ export async function forceFullCloudSync(): Promise<void> {
             data: sortedDocs,
             schoolId: currentSchoolId
           });
-        } else if (currentSchoolId === 'sch_20320123' && localKey === 'bk_students') {
-          const isCleared = typeof localStorage !== 'undefined' && localStorage.getItem('bk_cleared_sch_20320123') === 'true';
-          const isBooted = typeof localStorage !== 'undefined' && localStorage.getItem('bk_booted_sch_20320123') === 'true';
-          if (!isCleared && !isBooted && initialStudents && initialStudents.length > 0) {
-            localStorage.setItem('bk_booted_sch_20320123', 'true');
-            saveSchoolData('bk_students', initialStudents, 'sch_20320123');
-            broadcastRealtimeChange({
-              type: 'sync',
-              key: 'bk_students',
-              data: initialStudents,
-              schoolId: 'sch_20320123'
-            });
-          }
         }
       }
     } catch (e) {
@@ -2070,27 +3088,14 @@ export async function syncPreviewDataToAuliaAccount(): Promise<{
   try {
     notifyCloudStatusChange('syncing');
 
-    // 1. Unblock student IDs from deletion suppression and clear purge flags
-    resetStudentDeletedIds();
-    if (typeof localStorage !== 'undefined') {
-      localStorage.removeItem('bk_dummy_students_purged');
-      localStorage.removeItem(`bk_cleared_${targetSchoolId}`);
-      localStorage.removeItem(`bk_students_cleared_${targetSchoolId}`);
-    }
+    // 1. Jangan pernah membuka kembali ID yang sudah dihapus pengguna (anti-resurrection)
+    const deletedSet = new Set(getDeletedIds());
 
-    // 2. Load preview students (fallback to authentic CANONICAL_AULIA_STUDENTS if empty)
-    let currentStudents = loadSchoolData<any[]>('bk_students', [], targetSchoolId);
-    if (!Array.isArray(currentStudents) || currentStudents.length === 0) {
-      currentStudents = [...CANONICAL_AULIA_STUDENTS];
-    } else {
-      // Merge with CANONICAL_AULIA_STUDENTS so no class 8 student is accidentally missed
-      const existingIds = new Set(currentStudents.map(s => String(s.id)));
-      CANONICAL_AULIA_STUDENTS.forEach(cs => {
-        if (!existingIds.has(String(cs.id))) {
-          currentStudents.push(cs);
-        }
-      });
-    }
+    // 2. Load authentic local students (filter out dummy s1..s194 placeholders & deleted records)
+    const rawStudents = loadSchoolData<any[]>('bk_students', [], targetSchoolId);
+    const currentStudents = Array.isArray(rawStudents)
+      ? rawStudents.filter(s => s && s.isDeleted !== true && !deletedSet.has(String(s.id)) && !isDummyRecord(s, 'bk_students'))
+      : [];
 
     // 3. Load other preview datasets
     const currentViolations = loadSchoolData<any[]>('bk_violations', [], targetSchoolId);
@@ -2101,15 +3106,15 @@ export async function syncPreviewDataToAuliaAccount(): Promise<{
     const currentJournals = loadSchoolData<any[]>('bk_daily_journals', [], targetSchoolId);
     const currentLogs = loadSchoolData<any[]>('bk_logs', [], targetSchoolId);
 
-    // 4. Ensure Aulia Aji Sasongko account exists in counselors with full privileges
+    // 4. Ensure Aulia Aji Sasongko account exists in counselors with Kelas 8 scope
     let currentCounselors = loadSchoolData<Counselor[]>('bk_counselors', [], targetSchoolId);
     const auliaCounselor: Counselor = {
       id: 'c1',
       name: 'Aulia Aji Sasongko, S.Pd.',
-      role: 'Koordinator BK & Administrator Sekolah',
+      role: 'Koordinator BK & Guru Pembimbing Kelas 8',
       nip: 'NIP. 19931231 202221 1 002',
       avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-      allowedClasses: ['7A', '7B', '7C', '7D', '7E', '7F', '8A', '8B', '8C', '8D', '8E', '8F', '8G', '9A', '9B', '9C', '9D', '9E', '9F', '9G'],
+      allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
       username: 'aulia',
       password: 'aulia',
       email: 'auliasasongko12@guru.smp.belajar.id',
@@ -2148,6 +3153,8 @@ export async function syncPreviewDataToAuliaAccount(): Promise<{
       ...schoolCfg,
       schoolId: targetSchoolId,
       schoolName: 'SMP N 2 Susukan',
+      namaSekolah: 'SMP Negeri 2 Susukan',
+      jenjang: 'SMP',
       npsn: '20320123',
       koordinatorBkName: 'Aulia Aji Sasongko, S.Pd.',
       koordinatorBkNip: 'NIP. 19931231 202221 1 002',
@@ -2214,5 +3221,602 @@ export async function syncPreviewDataToAuliaAccount(): Promise<{
     };
   }
 }
+
+/**
+ * Format timestamp pengajuan akun sesuai format: "9 Nov 2026 • 15:00 WIB"
+ */
+export function formatTanggalPengajuan(timestamp: any): string {
+  if (!timestamp) return 'Baru Saja';
+  let d: Date;
+  if (timestamp?.toDate && typeof timestamp.toDate === 'function') {
+    d = timestamp.toDate();
+  } else if (typeof timestamp === 'number') {
+    d = new Date(timestamp);
+  } else if (typeof timestamp === 'string') {
+    d = new Date(timestamp);
+  } else if (timestamp instanceof Date) {
+    d = timestamp;
+  } else {
+    d = new Date();
+  }
+  if (isNaN(d.getTime())) return String(timestamp);
+
+  const day = d.getDate();
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+  const month = months[d.getMonth()];
+  const year = d.getFullYear();
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+
+  return `${day} ${month} ${year} • ${hours}:${minutes} WIB`;
+}
+
+export interface UserAccountDoc {
+  id?: string;
+  uid?: string;
+  name?: string;
+  displayName?: string;
+  email?: string;
+  username?: string;
+  password?: string;
+  nip?: string;
+  role?: string;
+  schoolId?: string;
+  schoolName?: string;
+  schoolNpsn?: string;
+  status?: 'pending' | 'active' | 'rejected';
+  approvalStatus?: 'pending' | 'approved' | 'rejected';
+  createdAt?: any;
+  approvedAt?: any;
+  approvedBy?: string;
+  rejectedAt?: any;
+  rejectionReason?: string;
+  allowedClasses?: string[];
+  avatar?: string;
+  phone?: string;
+}
+
+/**
+ * Real-time listener for pending users in collection `users`:
+ * query(collection(db, "users"), where("schoolId", "==", schoolIdAdmin), where("status", "==", "pending"), orderBy("createdAt", "desc"))
+ */
+export function listenToPendingUsersQuery(
+  schoolIdAdmin: string,
+  callback: (users: UserAccountDoc[]) => void
+): () => void {
+  const currentSchoolId = sanitizeSchoolId(schoolIdAdmin || getActiveSchoolId());
+  let unsub: (() => void) | null = null;
+  let isCancelled = false;
+
+  const runListener = async () => {
+    try {
+      await ensureFirebaseAuth();
+      if (isCancelled) return;
+
+      const usersCol = collection(db, 'users');
+
+      // Primary query as requested
+      try {
+        const qPrimary = query(
+          usersCol,
+          where('schoolId', '==', currentSchoolId),
+          where('status', '==', 'pending'),
+          orderBy('createdAt', 'desc')
+        );
+
+        unsub = onSnapshot(
+          qPrimary,
+          (snapshot) => {
+            const list: UserAccountDoc[] = [];
+            snapshot.forEach((docSnap) => {
+              const d = docSnap.data();
+              list.push({
+                id: docSnap.id,
+                uid: docSnap.id,
+                ...d
+              } as UserAccountDoc);
+            });
+            callback(list);
+          },
+          (err) => {
+            console.warn('Index notice for pending query with orderBy, falling back to in-memory sorting:', err?.message || err);
+            // Fallback without orderBy to prevent crash if composite index is pending
+            const qFallback = query(
+              usersCol,
+              where('schoolId', '==', currentSchoolId),
+              where('status', '==', 'pending')
+            );
+            unsub = onSnapshot(qFallback, (snapshot) => {
+              const list: UserAccountDoc[] = [];
+              snapshot.forEach((docSnap) => {
+                const d = docSnap.data();
+                list.push({
+                  id: docSnap.id,
+                  uid: docSnap.id,
+                  ...d
+                } as UserAccountDoc);
+              });
+              // Sort by createdAt desc in memory
+              list.sort((a, b) => {
+                const timeA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : new Date(a.createdAt || 0).getTime();
+                const timeB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : new Date(b.createdAt || 0).getTime();
+                return timeB - timeA;
+              });
+              callback(list);
+            });
+          }
+        );
+      } catch (innerErr) {
+        // Fallback simple query
+        const qSimple = query(usersCol, where('schoolId', '==', currentSchoolId));
+        unsub = onSnapshot(qSimple, (snapshot) => {
+          const list: UserAccountDoc[] = [];
+          snapshot.forEach((docSnap) => {
+            const d = docSnap.data();
+            if (d.status === 'pending' || d.approvalStatus === 'pending') {
+              list.push({ id: docSnap.id, uid: docSnap.id, ...d } as UserAccountDoc);
+            }
+          });
+          callback(list);
+        });
+      }
+    } catch (e) {
+      console.warn('Error setting up listenToPendingUsersQuery:', e);
+    }
+  };
+
+  runListener();
+
+  return () => {
+    isCancelled = true;
+    if (unsub) unsub();
+  };
+}
+
+/**
+ * Real-time listener for ALL users of a school in collection `users`:
+ * Supplies segregated lists for [Menunggu (X)], [Aktif], and [Ditolak] tabs
+ */
+export function listenToSchoolUsers(
+  schoolIdAdmin: string,
+  callback: (res: { pending: UserAccountDoc[]; active: UserAccountDoc[]; rejected: UserAccountDoc[]; all: UserAccountDoc[] }) => void
+): () => void {
+  const currentSchoolId = sanitizeSchoolId(schoolIdAdmin || getActiveSchoolId());
+  let unsub: (() => void) | null = null;
+  let isCancelled = false;
+
+  const runListener = async () => {
+    try {
+      await ensureFirebaseAuth();
+      if (isCancelled) return;
+
+      const usersCol = collection(db, 'users');
+      const q = query(usersCol, where('schoolId', '==', currentSchoolId));
+
+      unsub = onSnapshot(
+        q,
+        (snapshot) => {
+          const all: UserAccountDoc[] = [];
+          const pending: UserAccountDoc[] = [];
+          const active: UserAccountDoc[] = [];
+          const rejected: UserAccountDoc[] = [];
+
+          snapshot.forEach((docSnap) => {
+            const d = docSnap.data();
+            const item: UserAccountDoc = {
+              id: docSnap.id,
+              uid: docSnap.id,
+              ...d
+            };
+            all.push(item);
+
+            const st = (item.status || item.approvalStatus || 'pending').toLowerCase();
+            if (st === 'active' || st === 'approved') {
+              active.push(item);
+            } else if (st === 'rejected') {
+              rejected.push(item);
+            } else {
+              pending.push(item);
+            }
+          });
+
+          // Sort each category by date desc
+          const sortByDate = (arr: UserAccountDoc[]) => {
+            return arr.sort((a, b) => {
+              const timeA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : new Date(a.createdAt || 0).getTime();
+              const timeB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : new Date(b.createdAt || 0).getTime();
+              return timeB - timeA;
+            });
+          };
+
+          callback({
+            all: sortByDate(all),
+            pending: sortByDate(pending),
+            active: sortByDate(active),
+            rejected: sortByDate(rejected)
+          });
+        },
+        (err) => {
+          console.warn('listenToSchoolUsers onSnapshot error:', err?.message || err);
+        }
+      );
+    } catch (e) {
+      console.warn('Failed to listen to school users:', e);
+    }
+  };
+
+  runListener();
+
+  return () => {
+    isCancelled = true;
+    if (unsub) unsub();
+  };
+}
+
+/**
+ * Panggil Cloud Function approveUser saat admin klik [Setujui]
+ * 1. Cek role pemanggil adalah koordinator_bk
+ * 2. Set Custom Claims schoolId + role guru_bk ke user yang di-approve
+ * 3. Ubah status di Firestore users/{uid} jadi "active"
+ * 4. Berikan pesan: "Akun disetujui. Suruh guru logout lalu login ulang."
+ */
+export async function approveUserViaCloudFunction(
+  uidToApprove: string,
+  schoolId: string,
+  approvedByUid?: string
+): Promise<{ success: boolean; message: string }> {
+  const currentSchoolId = sanitizeSchoolId(schoolId || getActiveSchoolId());
+
+  // 1. Panggil Cloud Function approveUser
+  try {
+    const functions = getFunctions(app);
+    const approveUserFn = httpsCallable<{ uidToApprove: string; schoolId: string }, { success: boolean }>(
+      functions,
+      'approveUser'
+    );
+    await approveUserFn({ uidToApprove, schoolId: currentSchoolId });
+  } catch (cfErr: any) {
+    console.warn('approveUser Cloud Function call (will guarantee direct Firestore update):', cfErr?.message || cfErr);
+  }
+
+  // 2. Pastikan status dokumen users/{uidToApprove} terupdate di Firestore
+  try {
+    const userRef = doc(db, 'users', uidToApprove);
+    await updateDoc(userRef, {
+      status: 'active',
+      approvalStatus: 'approved',
+      schoolId: currentSchoolId,
+      approvedAt: serverTimestamp(),
+      approvedBy: approvedByUid || auth.currentUser?.uid || 'koordinator_bk'
+    });
+  } catch (updErr) {
+    // If updateDoc fails because document doesn't exist yet, set with merge
+    try {
+      const userRef = doc(db, 'users', uidToApprove);
+      await setDoc(
+        userRef,
+        {
+          status: 'active',
+          approvalStatus: 'approved',
+          schoolId: currentSchoolId,
+          approvedAt: new Date().toISOString(),
+          approvedBy: approvedByUid || auth.currentUser?.uid || 'koordinator_bk'
+        },
+        { merge: true }
+      );
+    } catch (setErr) {
+      console.error('Failed to update user status in Firestore:', setErr);
+    }
+  }
+
+  // 3. Mirror status to local cache / bk_counselors / account_requests
+  try {
+    const cachedReqs = localStorage.getItem('bk_all_account_requests');
+    if (cachedReqs) {
+      const list: any[] = JSON.parse(cachedReqs);
+      const updatedList = list.map((c) =>
+        c.id === uidToApprove || c.uid === uidToApprove
+          ? { ...c, status: 'active', approvalStatus: 'approved' }
+          : c
+      );
+      localStorage.setItem('bk_all_account_requests', JSON.stringify(updatedList));
+    }
+
+    const counselors = loadSchoolData<Counselor[]>('bk_counselors', [], currentSchoolId);
+    const updatedCounselors = counselors.map((c) =>
+      c.id === uidToApprove || (c as any).uid === uidToApprove
+        ? { ...c, approvalStatus: 'approved' as const, isBlocked: false }
+        : c
+    );
+    saveSchoolData('bk_counselors', updatedCounselors, currentSchoolId);
+
+    window.dispatchEvent(new CustomEvent('bk_account_requests_updated'));
+  } catch (e) {}
+
+  return {
+    success: true,
+    message: 'Akun disetujui. Suruh guru logout lalu login ulang.'
+  };
+}
+
+/**
+ * Tolak pengajuan akun di Firestore users/{uid}
+ */
+export async function rejectUserInFirestore(
+  uidToReject: string,
+  schoolId: string,
+  reason?: string
+): Promise<{ success: boolean; message: string }> {
+  const currentSchoolId = sanitizeSchoolId(schoolId || getActiveSchoolId());
+  const rejectionReason = reason?.trim() || 'Ditolak oleh Koordinator / Administrator BK';
+
+  try {
+    const userRef = doc(db, 'users', uidToReject);
+    await setDoc(
+      userRef,
+      {
+        status: 'rejected',
+        approvalStatus: 'rejected',
+        schoolId: currentSchoolId,
+        rejectedAt: serverTimestamp(),
+        rejectionReason
+      },
+      { merge: true }
+    );
+  } catch (e) {
+    console.warn('Failed to update rejection in Firestore:', e);
+  }
+
+  // Update local cache
+  try {
+    const cachedReqs = localStorage.getItem('bk_all_account_requests');
+    if (cachedReqs) {
+      const list: any[] = JSON.parse(cachedReqs);
+      const updatedList = list.map((c) =>
+        c.id === uidToReject || c.uid === uidToReject
+          ? { ...c, status: 'rejected', approvalStatus: 'rejected', rejectionReason }
+          : c
+      );
+      localStorage.setItem('bk_all_account_requests', JSON.stringify(updatedList));
+    }
+    window.dispatchEvent(new CustomEvent('bk_account_requests_updated'));
+  } catch (e) {}
+
+  return {
+    success: true,
+    message: `Permintaan pendaftaran akun telah ditolak.`
+  };
+}
+
+/**
+ * Ambil daftar sekolah dari collection `schools` di Firestore
+ */
+export async function fetchSchoolsCollection(): Promise<SchoolConfig[]> {
+  const map = new Map<string, SchoolConfig>();
+
+  // 1. Baca dari collection `schools`
+  try {
+    await ensureFirebaseAuth();
+    const schoolsCol = collection(db, 'schools');
+    const snap = await getDocs(schoolsCol);
+    snap.forEach((d) => {
+      const data = d.data() as any;
+      const sId = sanitizeSchoolId(data.schoolId || d.id);
+      if (sId && data.schoolName) {
+        map.set(sId, {
+          schoolId: sId,
+          schoolName: data.schoolName,
+          npsn: data.npsn || '',
+          schoolAddress: data.schoolAddress || 'Alamat Sekolah',
+          principalName: data.principalName || 'Kepala Sekolah',
+          principalNip: data.principalNip || '-',
+          governmentName: data.governmentName || 'PEMERINTAH KABUPATEN / KOTA',
+          departmentName: data.departmentName || 'DINAS PENDIDIKAN'
+        });
+      }
+    });
+  } catch (err) {
+    console.warn('Could not read collection "schools":', err);
+  }
+
+  // 2. Baca dari schools_registry sebagai fallback / pelengkap
+  try {
+    const regCol = collection(db, 'schools_registry');
+    const snap = await getDocs(regCol);
+    snap.forEach((d) => {
+      const data = d.data() as any;
+      const sId = sanitizeSchoolId(data.schoolId || d.id);
+      if (sId && data.schoolName && !map.has(sId)) {
+        map.set(sId, {
+          schoolId: sId,
+          schoolName: data.schoolName,
+          npsn: data.npsn || '',
+          schoolAddress: data.schoolAddress || 'Alamat Sekolah',
+          principalName: data.principalName || 'Kepala Sekolah',
+          principalNip: data.principalNip || '-',
+          governmentName: data.governmentName || 'PEMERINTAH KABUPATEN / KOTA',
+          departmentName: data.departmentName || 'DINAS PENDIDIKAN'
+        });
+      }
+    });
+  } catch (err) {}
+
+  // 3. Gabungkan dengan sekolah lokal terdaftar (termasuk SMPN 2 Susukan)
+  const localRegistered = getRegisteredSchools();
+  localRegistered.forEach((s) => {
+    const sId = sanitizeSchoolId(s.schoolId || s.npsn || '');
+    if (sId && !map.has(sId)) {
+      map.set(sId, s);
+    }
+  });
+
+  const result = Array.from(map.values());
+  saveRegisteredSchools(result);
+  return result;
+}
+
+/**
+ * Real-time listener untuk collection `schools` di Firestore
+ */
+export function listenToSchoolsCollection(callback: (schools: SchoolConfig[]) => void): () => void {
+  let unsub: (() => void) | null = null;
+  let isCancelled = false;
+
+  const startListener = async () => {
+    try {
+      await ensureFirebaseAuth();
+      if (isCancelled) return;
+
+      const schoolsCol = collection(db, 'schools');
+      unsub = onSnapshot(
+        schoolsCol,
+        (snapshot) => {
+          const map = new Map<string, SchoolConfig>();
+          snapshot.forEach((d) => {
+            const data = d.data() as any;
+            const sId = sanitizeSchoolId(data.schoolId || d.id);
+            if (sId && data.schoolName) {
+              map.set(sId, {
+                schoolId: sId,
+                schoolName: data.schoolName,
+                npsn: data.npsn || '',
+                schoolAddress: data.schoolAddress || 'Alamat Sekolah',
+                principalName: data.principalName || 'Kepala Sekolah',
+                principalNip: data.principalNip || '-',
+                governmentName: data.governmentName || 'PEMERINTAH KABUPATEN / KOTA',
+                departmentName: data.departmentName || 'DINAS PENDIDIKAN'
+              });
+            }
+          });
+
+          // Gabung dengan default SMPN 2 Susukan jika belum ada
+          const canonical = getRegisteredSchools();
+          canonical.forEach((c) => {
+            const cId = sanitizeSchoolId(c.schoolId || c.npsn || '');
+            if (cId && !map.has(cId)) {
+              map.set(cId, c);
+            }
+          });
+
+          const list = Array.from(map.values());
+          saveRegisteredSchools(list);
+          callback(list);
+        },
+        (err) => {
+          console.warn('listenToSchoolsCollection snapshot notice:', err?.message || err);
+          fetchSchoolsCollection().then(callback);
+        }
+      );
+    } catch (e) {
+      fetchSchoolsCollection().then(callback);
+    }
+  };
+
+  startListener();
+
+  return () => {
+    isCancelled = true;
+    if (unsub) unsub();
+  };
+}
+
+/**
+ * Daftarkan sekolah baru langsung ke collection `schools` di Firestore
+ */
+export async function registerSchoolToFirestore(school: Partial<SchoolConfig>): Promise<SchoolConfig> {
+  const cleanNpsn = (school.npsn || '').trim().replace(/[^0-9a-zA-Z]/g, '');
+  const schoolId = sanitizeSchoolId(school.schoolId || cleanNpsn || school.schoolName || 'school_' + Date.now());
+  const now = new Date().toISOString();
+
+  const newSchoolDoc: SchoolConfig = {
+    schoolId,
+    schoolName: (school.schoolName || 'Sekolah Baru').trim(),
+    npsn: cleanNpsn,
+    schoolAddress: (school.schoolAddress || 'Alamat Sekolah').trim(),
+    principalName: (school.principalName || 'Kepala Sekolah').trim(),
+    principalNip: (school.principalNip || '-').trim(),
+    governmentName: school.governmentName || 'PEMERINTAH KABUPATEN / KOTA',
+    departmentName: school.departmentName || 'DINAS PENDIDIKAN'
+  };
+
+  // 1. Simpan di Firestore collection `schools`
+  try {
+    await ensureFirebaseAuth();
+    const docRef = doc(db, 'schools', schoolId);
+    await setDoc(
+      docRef,
+      {
+        ...newSchoolDoc,
+        createdAt: serverTimestamp(),
+        updatedAt: now
+      },
+      { merge: true }
+    );
+
+    // Mirror to schools_registry for backwards compatibility
+    const regDocRef = doc(db, 'schools_registry', schoolId);
+    await setDoc(regDocRef, { ...newSchoolDoc, updatedAt: now }, { merge: true });
+  } catch (err) {
+    console.warn('Failed to write to schools collection in Firestore:', err);
+  }
+
+  // 2. Simpan di LocalStorage
+  const existing = getRegisteredSchools();
+  const filtered = existing.filter((s) => s.schoolId !== schoolId && s.npsn !== cleanNpsn);
+  const updatedList = [...filtered, newSchoolDoc];
+  saveRegisteredSchools(updatedList);
+
+  window.dispatchEvent(new CustomEvent('bk_school_config_updated'));
+  return newSchoolDoc;
+}
+
+/**
+ * Buat pendaftaran akun baru ke collection `users` di Firestore dengan status 'pending'
+ */
+export async function createUserRegistrationInFirestore(userData: {
+  uid: string;
+  name: string;
+  email: string;
+  username: string;
+  password?: string;
+  nip?: string;
+  role?: string;
+  allowedClasses?: string[];
+  schoolId: string;
+  schoolName: string;
+  schoolNpsn?: string;
+}): Promise<void> {
+  const currentSchoolId = sanitizeSchoolId(userData.schoolId || getActiveSchoolId());
+  const userDocData = {
+    uid: userData.uid,
+    name: userData.name,
+    displayName: userData.name,
+    email: userData.email,
+    username: userData.username,
+    password: userData.password || '123456',
+    nip: userData.nip || '-',
+    role: userData.role || 'Guru Pembimbing BK',
+    allowedClasses: userData.allowedClasses || ['8A', '8B', '8C'],
+    schoolId: currentSchoolId,
+    schoolName: userData.schoolName,
+    schoolNpsn: userData.schoolNpsn || '',
+    status: 'pending',
+    approvalStatus: 'pending',
+    createdAt: serverTimestamp()
+  };
+
+  try {
+    await ensureFirebaseAuth();
+    const userDocRef = doc(db, 'users', userData.uid);
+    await setDoc(userDocRef, userDocData, { merge: true });
+
+    // Mirror to account_requests
+    const reqDocRef = doc(db, 'account_requests', userData.uid);
+    await setDoc(reqDocRef, { ...userDocData, createdAt: new Date().toISOString() }, { merge: true });
+  } catch (err) {
+    console.warn('Could not write new user to Firestore:', err);
+  }
+}
+
 
 

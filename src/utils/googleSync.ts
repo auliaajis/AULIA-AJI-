@@ -2,12 +2,93 @@
  * Utility functions for Google Apps Script & Google Forms/Sheets integration
  */
 import { getAccessToken } from './firebaseAuth';
-import { pushDataDirect, pullDataDirect } from './googleSheetsDirect';
-import { mergeFullDatabase } from './dataMerger';
+import { pushDataDirect } from './googleSheetsDirect';
 import { registerSyncedIds, cleanupSyncedIds } from './deletionTracker';
-import { initialStudents, initialViolations, initialServices } from '../data/mockData';
 import { loadSchoolData, saveSchoolData, getActiveSchoolId } from './schoolConfig';
 import { getOrCreateDriveFolder, getRootFolderName } from './googleDriveUpload';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { db, ensureFirebaseAuth } from './firestoreSync';
+import { formatTanggalIndonesia } from './dateFormatter';
+
+export interface GoogleBackupStatus {
+  lastPushAt: string | null;
+  status: 'Berhasil' | 'Gagal' | 'Belum pernah dikirim';
+  mode?: 'apps_script' | 'oauth';
+  pushedBy?: string;
+}
+
+export function formatBackupTimestampId(iso?: string | null): string {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '-';
+  const tgl = formatTanggalIndonesia(d);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${tgl} ${hh}:${mm}`;
+}
+
+export function getGoogleBackupStatusLocal(customSchoolId?: string): GoogleBackupStatus {
+  const schoolId = customSchoolId || getActiveSchoolId();
+  const saved = loadSchoolData<GoogleBackupStatus | null>('bk_google_backup_status', null, schoolId);
+  if (saved && typeof saved === 'object' && saved.status) {
+    return saved;
+  }
+  return {
+    lastPushAt: null,
+    status: 'Belum pernah dikirim'
+  };
+}
+
+export async function saveGoogleBackupStatusToFirestore(
+  statusUpdate: {
+    status: 'Berhasil' | 'Gagal';
+    mode?: 'apps_script' | 'oauth';
+    pushedBy?: string;
+    lastPushAt?: string;
+  },
+  customSchoolId?: string
+): Promise<GoogleBackupStatus> {
+  const schoolId = customSchoolId || getActiveSchoolId();
+  const prev = getGoogleBackupStatusLocal(schoolId);
+  const record: GoogleBackupStatus = {
+    lastPushAt: statusUpdate.lastPushAt || (statusUpdate.status === 'Berhasil' ? new Date().toISOString() : prev.lastPushAt),
+    status: statusUpdate.status,
+    mode: statusUpdate.mode || prev.mode,
+    pushedBy: statusUpdate.pushedBy || prev.pushedBy
+  };
+
+  saveSchoolData('bk_google_backup_status', record, schoolId);
+
+  try {
+    await ensureFirebaseAuth();
+    const schoolDocRef = doc(db, 'schools', schoolId);
+    await setDoc(schoolDocRef, { googleBackupStatus: record }, { merge: true });
+  } catch (err) {
+    console.warn('[GoogleSync] Gagal menyimpan status backup ke Firestore:', err);
+  }
+
+  return record;
+}
+
+export async function loadGoogleBackupStatusFromFirestore(customSchoolId?: string): Promise<GoogleBackupStatus> {
+  const schoolId = customSchoolId || getActiveSchoolId();
+  const localStatus = getGoogleBackupStatusLocal(schoolId);
+  try {
+    await ensureFirebaseAuth();
+    const schoolDocRef = doc(db, 'schools', schoolId);
+    const snap = await getDoc(schoolDocRef);
+    if (snap.exists()) {
+      const remote = snap.data()?.googleBackupStatus as GoogleBackupStatus | undefined;
+      if (remote && remote.status) {
+        saveSchoolData('bk_google_backup_status', remote, schoolId);
+        return remote;
+      }
+    }
+  } catch (err) {
+    console.warn('[GoogleSync] Gagal membaca status backup dari Firestore:', err);
+  }
+  return localStatus;
+}
 
 export function getLocalDatabaseData() {
   const schoolId = getActiveSchoolId();
@@ -240,88 +321,24 @@ export async function testConnection(url: string): Promise<{ success: boolean; m
 }
 
 /**
- * Push all local data from localStorage to Google Sheets via Apps Script Web App
+ * Push all local/Firestore-synced data to Google Sheets via Apps Script Web App
+ * // SATU ARAH: Hanya Kirim ke Sheet. Dilarang Tarik dari Sheet.
  */
-export async function pushDataToGoogle(url: string, force: boolean = false): Promise<{ success: boolean; message: string }> {
+export async function pushDataToGoogle(url: string, _force: boolean = false): Promise<{ success: boolean; message: string }> {
+  // SATU ARAH: Hanya Kirim ke Sheet. Dilarang Tarik dari Sheet.
   if (!url) {
     return { success: false, message: 'URL Google Apps Script belum dikonfigurasi.' };
   }
   
   try {
     const localData = getLocalDatabaseData();
-    let finalStudents = localData.students;
-    let finalViolations = localData.violations;
-    let finalServices = localData.services;
-    let finalAttendance = localData.attendance;
-    let finalJournals = localData.journals;
-    let finalHomeVisits = localData.homeVisits;
-    let finalAchievements = localData.achievements;
-
-    // Safety check: Prevent overwriting remote database if this device hasn't been verified/synced
-    if (!force && localStorage.getItem('bk_google_sync_verified') !== 'true') {
-      try {
-        const checkRes = await pullDataFromGoogle(url);
-        if (checkRes.success && checkRes.data) {
-          const d = checkRes.data;
-          const remoteCount = (d.students?.length || 0) + (d.violations?.length || 0) + (d.services?.length || 0) + (d.achievements?.length || 0);
-          if (remoteCount > 0) {
-            return {
-              success: false,
-              message: 'OVERWRITE_PREVENTION: Sistem mendeteksi adanya data riwayat yang tersimpan di Google Sheets Anda, sementara perangkat ini belum melakukan impor data lama. Untuk mencegah terhapusnya data lama Anda di awan, sinkronisasi otomatis ditangguhkan.\n\nSilakan lakukan "Impor Data" (Tarik Data) terlebih dahulu di menu Integrasi Google.'
-            };
-          }
-        }
-      } catch (err) {
-        console.warn('Gagal memverifikasi proteksi database:', err);
-      }
-    } else {
-      // Smart Auto-Merge: Pull and merge first to keep both laptop & phone changes alive!
-      try {
-        const pullRes = await pullDataFromGoogle(url);
-        if (pullRes.success && pullRes.data) {
-          const d = pullRes.data;
-          const merged = mergeFullDatabase(
-            {
-              students: finalStudents,
-              violations: finalViolations,
-              services: finalServices,
-              attendance: finalAttendance,
-              journals: finalJournals,
-              homeVisits: finalHomeVisits,
-              achievements: finalAchievements
-            },
-            {
-              students: d.students || [],
-              violations: d.violations || [],
-              services: d.services || [],
-              attendance: d.attendance || [],
-              journals: d.journals || [],
-              homeVisits: d.homeVisits || [],
-              achievements: d.achievements || []
-            }
-          );
-          finalStudents = merged.students;
-          finalViolations = merged.violations;
-          finalServices = merged.services;
-          finalAttendance = merged.attendance;
-          finalJournals = merged.journals;
-          finalHomeVisits = merged.homeVisits;
-          finalAchievements = merged.achievements;
-
-          const currentSchoolId = getActiveSchoolId();
-          saveSchoolData('bk_students', finalStudents, currentSchoolId);
-          saveSchoolData('bk_violations', finalViolations, currentSchoolId);
-          saveSchoolData('bk_services', finalServices, currentSchoolId);
-          saveSchoolData('bk_attendance_history', finalAttendance, currentSchoolId);
-          saveSchoolData('bk_daily_journals', finalJournals, currentSchoolId);
-          saveSchoolData('bk_home_visits', finalHomeVisits, currentSchoolId);
-          saveSchoolData('bk_achievements', finalAchievements, currentSchoolId);
-          window.dispatchEvent(new Event('storage'));
-        }
-      } catch (err) {
-        console.warn('Gagal mengambil data remote sebelum push untuk digabungkan:', err);
-      }
-    }
+    const finalStudents = localData.students;
+    const finalViolations = localData.violations;
+    const finalServices = localData.services;
+    const finalAttendance = localData.attendance;
+    const finalJournals = localData.journals;
+    const finalHomeVisits = localData.homeVisits;
+    const finalAchievements = localData.achievements;
     
     const payload = {
       action: 'sync',
@@ -349,63 +366,65 @@ export async function pushDataToGoogle(url: string, force: boolean = false): Pro
       ].filter(Boolean);
       registerSyncedIds(allActiveIds);
       cleanupSyncedIds(allActiveIds);
+
+      saveGoogleBackupStatusToFirestore({ status: 'Berhasil', mode: 'apps_script' }).catch(() => {});
       
       window.dispatchEvent(new Event('storage'));
-      return { success: true, message: res.data?.message || res.message || 'Data berhasil diekspor ke Google Sheets!' };
+      return { success: true, message: res.data?.message || res.message || 'Salinan backup berhasil dikirim ke Google Sheets!' };
     }
     
-    return { success: false, message: res.message || 'Sinkronisasi gagal, periksa log Apps Script.' };
+    saveGoogleBackupStatusToFirestore({ status: 'Gagal', mode: 'apps_script' }).catch(() => {});
+    return { success: false, message: res.message || 'Gagal mengirim data backup, periksa log Apps Script.' };
   } catch (error: any) {
+    saveGoogleBackupStatusToFirestore({ status: 'Gagal', mode: 'apps_script' }).catch(() => {});
     return { success: false, message: getDetailedGasErrorMessage(url, error) };
   }
 }
 
-/**
- * Pull all data from Google Sheets via Apps Script Web App
- */
-export async function pullDataFromGoogle(url: string): Promise<{ success: boolean; data?: any; message: string }> {
-  if (!url) {
-    return { success: false, message: 'URL Google Apps Script belum dikonfigurasi.' };
-  }
-  
-  const res = await callGasApi(url, 'GET', undefined, { action: 'readAll' });
-  if (res.success && res.data) {
-    const d = res.data;
-    if (d.students || d.violations || d.services || d.attendance) {
-      return {
-        success: true,
-        data: d,
-        message: 'Data berhasil disinkronkan dari Google Sheets!'
-      };
-    }
-  }
-  
-  return { success: false, message: res.message || 'Respons kosong atau format spreadsheet tidak cocok.' };
+// DINONAKTIFKAN: Dilarang tarik dari Sheet, Firestore adalah sumber kebenaran
+export async function pullDataFromGoogle(_url: string): Promise<{ success: boolean; data?: any; message: string }> {
+  return {
+    success: false,
+    message: 'DINONAKTIFKAN: Dilarang tarik dari Sheet, Firestore adalah sumber kebenaran.'
+  };
 }
 
 /**
- * Automatically triggers background synchronization of all database tables (Siswa, Pelanggaran, Layanan, Absensi)
- * to any configured active Google service (Direct Sync via Google Drive API or Google Apps Script URL).
+ * Automatically triggers one-way background backup of database tables
+ * from App/Firestore to Google Sheets (NEVER pulls from Spreadsheet).
+ * // SATU ARAH: Hanya Kirim ke Sheet. Dilarang Tarik dari Sheet.
  */
 export async function triggerBackgroundAutoSync(): Promise<{ success: boolean; message: string }> {
+  // SATU ARAH: Hanya Kirim ke Sheet. Dilarang Tarik dari Sheet.
   const spreadsheetId = localStorage.getItem('bk_google_spreadsheet_id');
   const scriptUrl = localStorage.getItem('bk_google_script_url');
   const hasIntegration = !!(spreadsheetId || scriptUrl);
 
-  // Security guard: Skip automatic background sync if device hasn't pulled/verified yet
-  if (hasIntegration && localStorage.getItem('bk_google_sync_verified') !== 'true') {
-    console.warn('Auto-Sync: Sinkronisasi otomatis ditangguhkan demi melindungi data lama Anda di Google Sheets dari overwrite perangkat baru.');
-    return { success: false, message: 'Sinkronisasi otomatis ditangguhkan demi perlindungan database.' };
+  if (!hasIntegration) {
+    return { success: false, message: 'Tidak ada koneksi Google Sheets yang aktif.' };
   }
 
   const localData = getLocalDatabaseData();
-  let finalStudents = localData.students;
-  let finalViolations = localData.violations;
-  let finalServices = localData.services;
-  let finalAttendance = localData.attendance;
-  let finalJournals = localData.journals;
-  let finalHomeVisits = localData.homeVisits;
-  let finalAchievements = localData.achievements;
+  const finalStudents = localData.students;
+  const finalViolations = localData.violations;
+  const finalServices = localData.services;
+  const finalAttendance = localData.attendance;
+  const finalJournals = localData.journals;
+  const finalHomeVisits = localData.homeVisits;
+  const finalAchievements = localData.achievements;
+
+  const totalLocalRecords =
+    finalStudents.length +
+    finalViolations.length +
+    finalServices.length +
+    finalAttendance.length +
+    finalJournals.length +
+    finalHomeVisits.length +
+    finalAchievements.length;
+
+  if (totalLocalRecords === 0) {
+    return { success: false, message: 'Belum ada data di aplikasi untuk dikirim ke backup.' };
+  }
 
   let directSyncSuccess = false;
   let gasSyncSuccess = false;
@@ -413,55 +432,6 @@ export async function triggerBackgroundAutoSync(): Promise<{ success: boolean; m
     try {
       const token = await getAccessToken();
       if (token) {
-        console.log('Auto-Sync: Memulai sinkronisasi langsung (OAuth) ke Spreadsheet...');
-        
-        // Smart Auto-Merge: Pull and merge first to keep both laptop & phone changes alive!
-        try {
-          const pullRes = await pullDataDirect(token, spreadsheetId);
-          if (pullRes.success && pullRes.data) {
-            const d = pullRes.data;
-            const merged = mergeFullDatabase(
-              {
-                students: finalStudents,
-                violations: finalViolations,
-                services: finalServices,
-                attendance: finalAttendance,
-                journals: finalJournals,
-                homeVisits: finalHomeVisits,
-                achievements: finalAchievements
-              },
-              {
-                students: d.students || [],
-                violations: d.violations || [],
-                services: d.services || [],
-                attendance: d.attendance || [],
-                journals: d.journals || [],
-                homeVisits: d.homeVisits || [],
-                achievements: d.achievements || []
-              }
-            );
-            finalStudents = merged.students;
-            finalViolations = merged.violations;
-            finalServices = merged.services;
-            finalAttendance = merged.attendance;
-            finalJournals = merged.journals;
-            finalHomeVisits = merged.homeVisits;
-            finalAchievements = merged.achievements;
-
-            const currentSchoolId = getActiveSchoolId();
-            saveSchoolData('bk_students', finalStudents, currentSchoolId);
-            saveSchoolData('bk_violations', finalViolations, currentSchoolId);
-            saveSchoolData('bk_services', finalServices, currentSchoolId);
-            saveSchoolData('bk_attendance_history', finalAttendance, currentSchoolId);
-            saveSchoolData('bk_daily_journals', finalJournals, currentSchoolId);
-            saveSchoolData('bk_home_visits', finalHomeVisits, currentSchoolId);
-            saveSchoolData('bk_achievements', finalAchievements, currentSchoolId);
-            window.dispatchEvent(new Event('storage'));
-          }
-        } catch (err) {
-          console.warn('Auto-Sync: Gagal menarik data untuk penggabungan langsung:', err);
-        }
-
         const res = await pushDataDirect(token, spreadsheetId, {
           students: finalStudents,
           violations: finalViolations,
@@ -472,31 +442,25 @@ export async function triggerBackgroundAutoSync(): Promise<{ success: boolean; m
           achievements: finalAchievements
         });
         if (res.success) {
-          console.log('Auto-Sync: Sinkronisasi langsung berhasil!');
           directSyncSuccess = true;
+          saveGoogleBackupStatusToFirestore({ status: 'Berhasil', mode: 'oauth' }).catch(() => {});
         }
       }
     } catch (err) {
-      console.error('Auto-Sync: Gagal melakukan sinkronisasi langsung:', err);
+      console.error('Auto-Sync: Gagal melakukan backup langsung:', err);
     }
   }
 
   // 2. Try Apps Script Web App Sync (via Web App URL)
   if (scriptUrl) {
-    console.log('Auto-Sync: Memulai sinkronisasi lewat Google Apps Script Web App...');
     try {
       const res = await pushDataToGoogle(scriptUrl);
       if (res.success) {
-        console.log('Auto-Sync: Sinkronisasi Apps Script berhasil!');
         gasSyncSuccess = true;
       }
     } catch (err) {
-      console.error('Auto-Sync: Gagal melakukan sinkronisasi Apps Script:', err);
+      console.error('Auto-Sync: Gagal melakukan backup Apps Script:', err);
     }
-  }
-
-  if (!hasIntegration) {
-    return { success: false, message: 'Tidak ada koneksi Google Sheets yang aktif.' };
   }
 
   if (directSyncSuccess || gasSyncSuccess) {
@@ -514,11 +478,11 @@ export async function triggerBackgroundAutoSync(): Promise<{ success: boolean; m
 
     return { 
       success: true, 
-      message: `Database berhasil diperbarui secara otomatis di Google Sheets! (${directSyncSuccess ? 'Direct Sync' : ''} ${gasSyncSuccess ? 'Apps Script' : ''})` 
+      message: `Backup satu arah berhasil dikirim ke Google Sheets! (${directSyncSuccess ? 'OAuth' : ''} ${gasSyncSuccess ? 'Apps Script' : ''})` 
     };
   }
 
-  return { success: false, message: 'Gagal menyinkronkan database secara otomatis ke Google Sheets.' };
+  return { success: false, message: 'Gagal mengirim backup otomatis ke Google Sheets.' };
 }
 
 /**

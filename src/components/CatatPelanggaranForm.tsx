@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Student, ViolationRecord, Counselor, BKServiceType, BKComponentType } from '../types';
+import { Student, ViolationRecord, Counselor, BKServiceType, BKComponentType, RestitutionStatusType } from '../types';
 import {
   ChevronRight,
   Gavel,
@@ -18,34 +18,141 @@ import {
   ImageIcon,
   AlertCircle,
   X,
+  ExternalLink,
   FileText,
   Edit3,
   Trash2,
   Users,
+  User,
   ChevronDown,
   SlidersHorizontal as Sliders,
   HeartHandshake,
   Sparkles,
   Calendar,
   Clock,
-  ArrowRight
+  ArrowRight,
+  CheckCircle2,
+  Check
 } from 'lucide-react';
-import { downloadViolationPDF } from '../utils/pdfGenerator';
+import { downloadViolationPDF, generateAndUploadCasePdf } from '../utils/pdfGenerator';
+import { formatCardDateTime, formatCardDate, formatCardTime } from '../utils/dateFormatter';
 import { sendAutomatedEmail, createGmailDraft, triggerBackgroundAutoSync } from '../utils/googleSync';
 import { getNormalizedClassKey, defaultWaliKelasList } from '../utils/classNormalizer';
 import StudentCombobox from './StudentCombobox';
 import { showToast } from '../utils/toast';
+import { isValidDeleteId } from '../utils/safeDelete';
 import {
   ViolationCategory,
   ViolationOption,
   getSchoolViolationCategories
 } from '../utils/violationRulesConfig';
 
+export const RESTITUTION_STATUS_CONFIG: Record<
+  RestitutionStatusType,
+  {
+    label: RestitutionStatusType;
+    colorBadge: string;
+    colorDot: string;
+    description: string;
+    subLabel: string;
+  }
+> = {
+  'Baru Dicatat': {
+    label: 'Baru Dicatat',
+    colorBadge: 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200',
+    colorDot: 'bg-gray-400',
+    description: 'Baru masuk, belum dipanggil',
+    subLabel: 'Belum dipanggil',
+  },
+  'Sudah Konseling': {
+    label: 'Sudah Konseling',
+    colorBadge: 'bg-blue-100 text-blue-800 border-blue-300 hover:bg-blue-200',
+    colorDot: 'bg-blue-500',
+    description: 'Sudah bicara dengan siswa',
+    subLabel: 'Sudah bicara dengan siswa',
+  },
+  'Proses Restitusi': {
+    label: 'Proses Restitusi',
+    colorBadge: 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200',
+    colorDot: 'bg-amber-500',
+    description: 'Sedang menjalankan kesepakatan perbaikan',
+    subLabel: 'Jalankan perbaikan',
+  },
+  'Selesai / Dipantau': {
+    label: 'Selesai / Dipantau',
+    colorBadge: 'bg-emerald-100 text-emerald-800 border-emerald-300 hover:bg-emerald-200',
+    colorDot: 'bg-emerald-500',
+    description: 'Sudah selesai, tinggal pantau 2 minggu',
+    subLabel: 'Selesai, pantau 2 minggu',
+  },
+};
+
+export const getViolationRestitutionStatus = (v: ViolationRecord): RestitutionStatusType => {
+  if (v.restitutionStatus) {
+    if (
+      v.restitutionStatus === 'Baru Dicatat' ||
+      v.restitutionStatus === 'Sudah Konseling' ||
+      v.restitutionStatus === 'Proses Restitusi' ||
+      v.restitutionStatus === 'Selesai / Dipantau'
+    ) {
+      return v.restitutionStatus;
+    }
+    if ((v.restitutionStatus as string) === 'Selesai') return 'Selesai / Dipantau';
+  }
+  const progress = (v.handlingProgress || '').toLowerCase();
+  const handled = (v.handledBy || '').toLowerCase();
+
+  if (
+    progress.includes('selesai') ||
+    progress.includes('tuntas') ||
+    progress.includes('pantau 2 minggu') ||
+    progress.includes('dipantau')
+  ) {
+    return 'Selesai / Dipantau';
+  }
+  if (
+    progress.includes('restitusi') ||
+    progress.includes('kesepakatan') ||
+    progress.includes('perbaikan') ||
+    handled.includes('wali kelas & guru bk')
+  ) {
+    return 'Proses Restitusi';
+  }
+  if (handled.includes('guru bk') || progress.includes('konseling') || progress.includes('bicara')) {
+    return 'Sudah Konseling';
+  }
+  return 'Baru Dicatat';
+};
+
+export const isAttendanceViolation = (v: ViolationRecord): boolean => {
+  if (!v) return false;
+  const cat = (v.category || '').toLowerCase();
+  const loc = (v.location || '').toLowerCase();
+  const rep = (v.reportedBy || '').toLowerCase();
+  const notes = (v.notes || '').toLowerCase();
+  const prog = (v.handlingProgress || '').toLowerCase();
+
+  return (
+    cat.includes('alpa') ||
+    cat.includes('alpha') ||
+    cat.includes('terlambat') ||
+    cat.includes('tidak masuk') ||
+    cat.includes('membolos') ||
+    loc.includes('absensi') ||
+    rep.includes('absensi') ||
+    notes.includes('absensi') ||
+    prog.includes('absensi')
+  );
+};
+
 interface CatatPelanggaranFormProps {
   students: Student[];
   violations: ViolationRecord[];
   activeCounselor: Counselor;
   preSelectedStudentId?: string;
+  initialTab?: 'input' | 'arsip';
+  initialArchiveSearch?: string;
+  onNavigateToProfile?: (studentIdOrName: string) => void;
   onSaveViolation: (record: Omit<ViolationRecord, 'id' | 'ticketId'>) => void;
   onUpdateViolation?: (record: ViolationRecord) => void;
   onDeleteViolation?: (id: string) => void;
@@ -76,6 +183,9 @@ export default function CatatPelanggaranForm({
   violations,
   activeCounselor,
   preSelectedStudentId,
+  initialTab,
+  initialArchiveSearch,
+  onNavigateToProfile,
   onSaveViolation,
   onUpdateViolation,
   onDeleteViolation,
@@ -85,8 +195,27 @@ export default function CatatPelanggaranForm({
   onCancel,
 }: CatatPelanggaranFormProps) {
   // Tab switcher & search states
-  const [activeTab, setActiveTab] = useState<'input' | 'arsip'>('input');
-  const [archiveSearch, setArchiveSearch] = useState('');
+  const [activeTab, setActiveTab] = useState<'input' | 'arsip'>(initialTab || 'input');
+  const [archiveSearch, setArchiveSearch] = useState(initialArchiveSearch || '');
+  const [isPrivacyMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('bk_privacy_mode') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
+
+  useEffect(() => {
+    if (initialArchiveSearch !== undefined) {
+      setArchiveSearch(initialArchiveSearch);
+    }
+  }, [initialArchiveSearch]);
 
   // Sesi Layanan Konseling Tindak Lanjut Otomatis State
   const [autoCreateCounseling, setAutoCreateCounseling] = useState(false);
@@ -109,6 +238,34 @@ export default function CatatPelanggaranForm({
   // Editing Violation Modal state
   const [editingViolation, setEditingViolation] = useState<ViolationRecord | null>(null);
 
+  // Detail Kasus Modal state
+  const [detailViolation, setDetailViolation] = useState<ViolationRecord | null>(null);
+  const [isProcessingDrivePdf, setIsProcessingDrivePdf] = useState(false);
+  const [caseDriveFailed, setCaseDriveFailed] = useState(false);
+  const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<{
+    type: 'violation' | 'student';
+    id: string;
+    message: string;
+  } | null>(null);
+
+  const handleProcessCaseDrivePdf = async (v: ViolationRecord) => {
+    setIsProcessingDrivePdf(true);
+    setCaseDriveFailed(false);
+    try {
+      const res = await generateAndUploadCasePdf(v);
+      if (res.success && res.pdfUrl) {
+        setDetailViolation((prev) => (prev && prev.id === v.id ? { ...prev, pdfUrl: res.pdfUrl } : prev));
+        setCaseDriveFailed(false);
+      } else if (res.isDriveFailed) {
+        setCaseDriveFailed(true);
+      }
+    } catch {
+      setCaseDriveFailed(true);
+    } finally {
+      setIsProcessingDrivePdf(false);
+    }
+  };
+
   // Student Quick Detail / Edit Modal state
   const [selectedStudentForEdit, setSelectedStudentForEdit] = useState<Student | null>(null);
   const [editStudentName, setEditStudentName] = useState('');
@@ -119,12 +276,190 @@ export default function CatatPelanggaranForm({
   const [archiveStartDate, setArchiveStartDate] = useState('');
   const [archiveEndDate, setArchiveEndDate] = useState('');
 
+  // Sub-tab for Archive: 'perilaku' (default) vs 'absensi'
+  const [archiveSubTab, setArchiveSubTab] = useState<'perilaku' | 'absensi'>('perilaku');
+
+  // Total counts for Absensi vs Perilaku (Partition: total = violations.length)
+  const { absensiTotalCount, perilakuTotalCount } = useMemo(() => {
+    if (!Array.isArray(violations)) return { absensiTotalCount: 0, perilakuTotalCount: 0 };
+    let abs = 0;
+    let per = 0;
+    violations.forEach(v => {
+      if (isAttendanceViolation(v)) {
+        abs++;
+      } else {
+        per++;
+      }
+    });
+    return { absensiTotalCount: abs, perilakuTotalCount: per };
+  }, [violations]);
+
+  // Restitution Status Filter state (for Perilaku tab)
+  const [restitutionStatusFilter, setRestitutionStatusFilter] = useState<'Semua' | RestitutionStatusType>('Semua');
+
+  // Active month calculation for Dashboard Pemulihan
+  const activeMonthKey = useMemo(() => {
+    const currentRealMonth = new Date().toISOString().slice(0, 7);
+    if (Array.isArray(violations) && violations.some((v) => String(v.date || '').slice(0, 7) === currentRealMonth)) {
+      return currentRealMonth;
+    }
+    if (Array.isArray(violations)) {
+      const months = violations
+        .map((v) => String(v.date || '').slice(0, 7))
+        .filter((m) => /^\d{4}-\d{2}$/.test(m));
+      if (months.length > 0) {
+        months.sort();
+        return months[months.length - 1];
+      }
+    }
+    return currentRealMonth;
+  }, [violations]);
+
+  const activeMonthLabel = useMemo(() => {
+    const INDO_MONTH_NAMES = [
+      'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+      'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+    ];
+    if (!activeMonthKey) return 'Bulan Ini';
+    const [y, m] = activeMonthKey.split('-');
+    const idx = parseInt(m, 10) - 1;
+    return `${INDO_MONTH_NAMES[idx] || m} ${y}`;
+  }, [activeMonthKey]);
+
+  const monthViolations = useMemo(() => {
+    if (!Array.isArray(violations) || !activeMonthKey) return [];
+    return violations.filter((v) => String(v.date || '').startsWith(activeMonthKey));
+  }, [violations, activeMonthKey]);
+
+  const monthStats = useMemo(() => {
+    let selesai = 0;
+    let proses = 0;
+    let baruDicatat = 0;
+
+    monthViolations.forEach((v) => {
+      const st = getViolationRestitutionStatus(v);
+      if (st === 'Selesai / Dipantau') {
+        selesai++;
+      } else if (st === 'Proses Restitusi' || st === 'Sudah Konseling') {
+        proses++;
+      } else {
+        baruDicatat++;
+      }
+    });
+
+    return {
+      total: monthViolations.length,
+      selesai,
+      proses,
+      baruDicatat,
+    };
+  }, [monthViolations]);
+
+  const topCategoriesMonth = useMemo(() => {
+    const counts: Record<string, number> = {};
+    monthViolations.forEach((v) => {
+      const cat = (v.category || 'Lainnya').trim();
+      counts[cat] = (counts[cat] || 0) + 1;
+    });
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([category, count]) => ({ category, count }));
+  }, [monthViolations]);
+
+  const topClassesMonth = useMemo(() => {
+    const counts: Record<string, number> = {};
+    monthViolations.forEach((v) => {
+      const cls = (v.studentClass || 'Tidak Diketahui').trim();
+      counts[cls] = (counts[cls] || 0) + 1;
+    });
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([className, count]) => ({ className, count }));
+  }, [monthViolations]);
+
+  // Restitution Status Modal state for quick update
+  const [statusModalViolation, setStatusModalViolation] = useState<ViolationRecord | null>(null);
+  const [modalTargetStatus, setModalTargetStatus] = useState<RestitutionStatusType>('Baru Dicatat');
+  const [modalAgreement, setModalAgreement] = useState('');
+  const [modalDeadline, setModalDeadline] = useState('');
+  const [modalSupervisor, setModalSupervisor] = useState('');
+  const [modalCompletedDate, setModalCompletedDate] = useState('');
+
+  const handleOpenStatusModal = (v: ViolationRecord) => {
+    const curStatus = getViolationRestitutionStatus(v);
+    setStatusModalViolation(v);
+    setModalTargetStatus(curStatus);
+    setModalAgreement(v.restitutionAgreement || (v.handlingProgress && !v.handlingProgress.includes('Disinkronkan otomatis') ? v.handlingProgress : ''));
+    const defaultDeadline = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    setModalDeadline(v.restitutionDeadline || defaultDeadline);
+    setModalSupervisor(v.restitutionSupervisor || `${activeCounselor?.name || 'Guru BK'} & Wali Kelas ${v.studentClass}`);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    setModalCompletedDate(v.restitutionCompletedDate || todayStr);
+  };
+
+  const handleSelectStatusInModal = (st: RestitutionStatusType) => {
+    setModalTargetStatus(st);
+    if (st === 'Selesai / Dipantau' && !modalCompletedDate) {
+      setModalCompletedDate(new Date().toISOString().slice(0, 10));
+    }
+  };
+
+  const handleSaveStatusModal = () => {
+    if (!statusModalViolation) return;
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const completedDate = modalCompletedDate || todayStr;
+
+    let newProgress = '';
+    let newHandledBy: 'Belum Ditangani' | 'Wali Kelas' | 'Guru BK' | 'Wali Kelas & Guru BK' = 'Belum Ditangani';
+
+    if (modalTargetStatus === 'Proses Restitusi') {
+      newHandledBy = 'Wali Kelas & Guru BK';
+      newProgress = `Proses Restitusi: ${modalAgreement.trim() || 'Menjalankan perbaikan'} (Deadline: ${formatCardDate(modalDeadline)}, Pemantau: ${modalSupervisor.trim() || 'Wali Kelas & BK'})`;
+    } else if (modalTargetStatus === 'Selesai / Dipantau') {
+      newHandledBy = 'Guru BK';
+      newProgress = `Selesai / Dipantau per ${formatCardDate(completedDate)} (Masa pemantauan 2 minggu)`;
+    } else if (modalTargetStatus === 'Sudah Konseling') {
+      newHandledBy = 'Guru BK';
+      newProgress = 'Sudah Konseling: Pembicaraan awal & penelusuran akar masalah telah dilakukan bersama siswa.';
+    } else {
+      newHandledBy = 'Belum Ditangani';
+      newProgress = 'Baru Dicatat: Menunggu proses pemanggilan siswa.';
+    }
+
+    const updated: ViolationRecord = {
+      ...statusModalViolation,
+      restitutionStatus: modalTargetStatus,
+      restitutionAgreement: modalTargetStatus === 'Proses Restitusi' ? modalAgreement.trim() : statusModalViolation.restitutionAgreement,
+      restitutionDeadline: modalTargetStatus === 'Proses Restitusi' ? modalDeadline : statusModalViolation.restitutionDeadline,
+      restitutionSupervisor: modalTargetStatus === 'Proses Restitusi' ? modalSupervisor.trim() : statusModalViolation.restitutionSupervisor,
+      restitutionCompletedDate: modalTargetStatus === 'Selesai / Dipantau' ? completedDate : statusModalViolation.restitutionCompletedDate,
+      handledBy: newHandledBy,
+      handlingProgress: newProgress,
+    };
+
+    if (onUpdateViolation) {
+      onUpdateViolation(updated);
+    }
+    setStatusModalViolation(null);
+    showToast(`Status penanganan berhasil diubah ke "${modalTargetStatus}"`, 'success');
+  };
+
   // Filtered violation records for archive list
   const filteredViolations = useMemo(() => {
     if (!Array.isArray(violations)) return [];
     const q = archiveSearch.toLowerCase().trim();
     return violations.filter(v => {
       if (!v) return false;
+
+      // 1. Strict partition by sub-tab: Absensi vs Perilaku
+      const isAtt = isAttendanceViolation(v);
+      if (archiveSubTab === 'absensi' && !isAtt) return false;
+      if (archiveSubTab === 'perilaku' && isAtt) return false;
+
+      // 2. Search query filter
       const matchesQuery = !q || (
         String(v.studentName || '').toLowerCase().includes(q) ||
         String(v.studentClass || '').toLowerCase().includes(q) ||
@@ -133,6 +468,7 @@ export default function CatatPelanggaranForm({
       );
       if (!matchesQuery) return false;
 
+      // 3. Date range filters
       if (archiveStartDate) {
         const vDate = String(v.date || '').slice(0, 10);
         if (vDate && vDate < archiveStartDate) return false;
@@ -142,9 +478,15 @@ export default function CatatPelanggaranForm({
         if (vDate && vDate > archiveEndDate) return false;
       }
 
+      // 4. Status Restitusi filter (applies only in Tab Perilaku)
+      if (archiveSubTab === 'perilaku' && restitutionStatusFilter !== 'Semua') {
+        const st = getViolationRestitutionStatus(v);
+        if (st !== restitutionStatusFilter) return false;
+      }
+
       return true;
     });
-  }, [violations, archiveSearch, archiveStartDate, archiveEndDate]);
+  }, [violations, archiveSubTab, archiveSearch, archiveStartDate, archiveEndDate, restitutionStatusFilter]);
 
   // Autocomplete student query & class filter state
   const [studentQuery, setStudentQuery] = useState('');
@@ -853,7 +1195,187 @@ SMP Negeri 2 Susukan`,
       </div>
 
       {activeTab === 'arsip' ? (
-        <div className="bg-white rounded-2xl shadow-sm border border-[#bcc9c6]/30 overflow-hidden">
+        <div className="space-y-5">
+          {/* 🌟 DASHBOARD PEMULIHAN (DI ATAS TABEL ARSIP) */}
+          <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#bcc9c6]/30 shadow-2xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-[#bcc9c6]/20 pb-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#00685f] bg-[#00685f]/10 px-2.5 py-0.5 rounded-md border border-[#00685f]/15">
+                    Dashboard Pemulihan
+                  </span>
+                  <span className="text-xs font-bold text-gray-500">
+                    Periode: {activeMonthLabel}
+                  </span>
+                </div>
+                <h3 className="text-lg font-black text-[#0b1c30] mt-0.5">
+                  Ringkasan Pemulihan & Restitusi Siswa
+                </h3>
+              </div>
+              <div className="text-xs text-gray-500 font-semibold self-start sm:self-auto bg-gray-50 px-3 py-1 rounded-xl border border-gray-200">
+                Total Arsip: <strong className="text-[#00685f]">{violations?.length || 0}</strong> catatan
+              </div>
+            </div>
+
+            {/* 4 Kartu Kecil di Atas Tabel */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+              {/* 1. Total Kasus Bulan Ini */}
+              <div className="bg-[#f8faf9] border border-[#bcc9c6]/40 rounded-xl p-3.5 sm:p-4 shadow-2xs hover:border-[#00685f]/40 transition-all">
+                <div className="flex items-center justify-between text-xs font-bold text-gray-600 mb-1">
+                  <span>Total Kasus Bulan Ini</span>
+                  <FileText className="w-4 h-4 text-[#00685f]" />
+                </div>
+                <div className="text-2xl sm:text-3xl font-black text-[#0b1c30]">
+                  {monthStats.total}
+                </div>
+                <div className="text-[11px] text-gray-500 font-medium mt-1">
+                  Total kejadian di {activeMonthLabel}
+                </div>
+              </div>
+
+              {/* 2. Sudah Selesai Restitusi: [angka] hijau */}
+              <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3.5 sm:p-4 shadow-2xs hover:border-emerald-300 transition-all">
+                <div className="flex items-center justify-between text-xs font-bold text-emerald-800 mb-1">
+                  <span>Sudah Selesai Restitusi</span>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                </div>
+                <div className="text-2xl sm:text-3xl font-black text-emerald-600">
+                  {monthStats.selesai}
+                </div>
+                <div className="text-[11px] text-emerald-700 font-medium mt-1">
+                  Pemulihan tuntas / dipantau
+                </div>
+              </div>
+
+              {/* 3. Masih Proses Restitusi: [angka] kuning */}
+              <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3.5 sm:p-4 shadow-2xs hover:border-amber-300 transition-all">
+                <div className="flex items-center justify-between text-xs font-bold text-amber-900 mb-1">
+                  <span>Masih Proses Restitusi</span>
+                  <Clock className="w-4 h-4 text-amber-600" />
+                </div>
+                <div className="text-2xl sm:text-3xl font-black text-amber-600">
+                  {monthStats.proses}
+                </div>
+                <div className="text-[11px] text-amber-800 font-medium mt-1">
+                  Sedang jalankan kesepakatan
+                </div>
+              </div>
+
+              {/* 4. Baru Dicatat Belum Ditangani: [angka] merah */}
+              <div className="bg-red-50/70 border border-red-200 rounded-xl p-3.5 sm:p-4 shadow-2xs hover:border-red-300 transition-all">
+                <div className="flex items-center justify-between text-xs font-bold text-red-900 mb-1">
+                  <span>Baru Dicatat Belum Ditangani</span>
+                  <AlertCircle className="w-4 h-4 text-red-600" />
+                </div>
+                <div className="text-2xl sm:text-3xl font-black text-red-600">
+                  {monthStats.baruDicatat}
+                </div>
+                <div className="text-[11px] text-red-700 font-medium mt-1">
+                  Belum dipanggil konseling
+                </div>
+              </div>
+            </div>
+
+            {/* Di bawah 4 kartu, 2 kotak */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4 pt-1">
+              {/* Kotak Kiri: Kasus Terbanyak Bulan Ini */}
+              <div className="bg-[#f8faf9] border border-[#bcc9c6]/30 rounded-xl p-4 shadow-2xs">
+                <div className="flex items-center justify-between mb-3 border-b border-[#bcc9c6]/20 pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-[#00685f]"></span>
+                    <h4 className="text-xs sm:text-sm font-extrabold text-[#0b1c30]">
+                      Kasus Terbanyak Bulan Ini
+                    </h4>
+                  </div>
+                  <span className="text-[11px] font-bold text-gray-500">Top 3</span>
+                </div>
+                {topCategoriesMonth.length > 0 ? (
+                  <div className="space-y-2">
+                    {topCategoriesMonth.map((item, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center justify-between text-xs p-2.5 bg-white border border-[#bcc9c6]/30 rounded-lg hover:border-[#00685f]/30 transition-all"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <span
+                            className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black ${
+                              idx === 0
+                                ? 'bg-[#00685f] text-white'
+                                : idx === 1
+                                ? 'bg-teal-100 text-[#00685f]'
+                                : 'bg-gray-100 text-gray-600'
+                            }`}
+                          >
+                            {idx + 1}
+                          </span>
+                          <span className="font-bold text-[#0b1c30] line-clamp-1">
+                            {item.category}
+                          </span>
+                        </div>
+                        <span className="px-2.5 py-0.5 bg-gray-100 text-[#00685f] font-black text-xs rounded-md shrink-0">
+                          {item.count} kasus
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-gray-400 py-4 text-center font-medium">
+                    Belum ada data kasus di bulan ini.
+                  </div>
+                )}
+              </div>
+
+              {/* Kotak Kanan: Kelas Terbanyak */}
+              <div className="bg-[#f8faf9] border border-[#bcc9c6]/30 rounded-xl p-4 shadow-2xs">
+                <div className="flex items-center justify-between mb-3 border-b border-[#bcc9c6]/20 pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                    <h4 className="text-xs sm:text-sm font-extrabold text-[#0b1c30]">
+                      Kelas Terbanyak
+                    </h4>
+                  </div>
+                  <span className="text-[11px] font-bold text-gray-500">Top 3</span>
+                </div>
+                {topClassesMonth.length > 0 ? (
+                  <div className="space-y-2">
+                    {topClassesMonth.map((item, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center justify-between text-xs p-2.5 bg-white border border-[#bcc9c6]/30 rounded-lg hover:border-amber-400/40 transition-all"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <span
+                            className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black ${
+                              idx === 0
+                                ? 'bg-amber-500 text-white'
+                                : idx === 1
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-gray-100 text-gray-600'
+                            }`}
+                          >
+                            {idx + 1}
+                          </span>
+                          <span className="font-bold text-[#0b1c30]">
+                            Kelas {item.className}
+                          </span>
+                        </div>
+                        <span className="px-2.5 py-0.5 bg-amber-100/70 text-amber-900 font-black text-xs rounded-md shrink-0">
+                          {item.count} kasus
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-gray-400 py-4 text-center font-medium">
+                    Belum ada data kelas di bulan ini.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Table Container Below */}
+          <div className="bg-white rounded-2xl shadow-sm border border-[#bcc9c6]/30 overflow-hidden">
           {/* Detail Header banner */}
           <div className="p-6 border-b border-[#bcc9c6]/30 bg-[#f8f9ff] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -879,6 +1401,43 @@ SMP Negeri 2 Susukan`,
                 className="w-full bg-white border border-[#bcc9c6]/40 rounded-xl pl-10 pr-4 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 font-semibold text-[#0b1c30]"
               />
             </div>
+          </div>
+
+          {/* Sub-Tabs: [Absensi] vs [Perilaku] */}
+          <div className="px-6 pt-3 bg-[#f8f9ff] border-b border-[#bcc9c6]/30 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setArchiveSubTab('absensi')}
+              className={`pb-3 px-5 text-sm font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-2 ${
+                archiveSubTab === 'absensi'
+                  ? 'border-[#00685f] text-[#00685f]'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <span>Absensi ({absensiTotalCount})</span>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                archiveSubTab === 'absensi' ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-500'
+              }`}>
+                Wali Kelas
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setArchiveSubTab('perilaku')}
+              className={`pb-3 px-5 text-sm font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-2 ${
+                archiveSubTab === 'perilaku'
+                  ? 'border-[#00685f] text-[#00685f]'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <span>Perilaku ({perilakuTotalCount})</span>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                archiveSubTab === 'perilaku' ? 'bg-[#00685f]/10 text-[#00685f]' : 'bg-gray-100 text-gray-500'
+              }`}>
+                Wajib BK
+              </span>
+            </button>
           </div>
 
           {/* Date-Range Picker & Quick Filter Bar */}
@@ -978,9 +1537,79 @@ SMP Negeri 2 Susukan`,
             </div>
 
             <div className="text-[11px] text-gray-600 font-semibold">
-              Menampilkan <strong className="text-[#00685f]">{filteredViolations.length}</strong> dari {violations?.length || 0} catatan
+              Menampilkan <strong className="text-[#00685f]">{filteredViolations.length}</strong> dari {archiveSubTab === 'perilaku' ? perilakuTotalCount : absensiTotalCount} catatan ({archiveSubTab === 'perilaku' ? 'Perilaku' : 'Absensi'})
             </div>
           </div>
+
+          {/* Status Restitusi Filter Bar (Hanya tampil untuk Tab Perilaku) */}
+          {archiveSubTab === 'perilaku' ? (
+            <div className="p-3.5 sm:px-6 bg-[#f0f9f8] border-b border-[#bcc9c6]/30 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-extrabold text-[#00685f] flex items-center gap-1.5 text-xs mr-1">
+                  <Sliders className="w-4 h-4" />
+                  <span>Filter Status Restitusi:</span>
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => setRestitutionStatusFilter('Semua')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    restitutionStatusFilter === 'Semua'
+                      ? 'bg-[#00685f] text-white shadow-xs'
+                      : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  Semua ({perilakuTotalCount})
+                </button>
+
+                {(['Baru Dicatat', 'Sudah Konseling', 'Proses Restitusi', 'Selesai / Dipantau'] as RestitutionStatusType[]).map((st) => {
+                  const count = (violations || [])
+                    .filter(v => !isAttendanceViolation(v) && getViolationRestitutionStatus(v) === st).length;
+                  const cfg = RESTITUTION_STATUS_CONFIG[st];
+                  const isActive = restitutionStatusFilter === st;
+                  return (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setRestitutionStatusFilter(isActive ? 'Semua' : st)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 border shadow-2xs ${
+                        isActive
+                          ? `${cfg.colorBadge} ring-2 ring-offset-1 ring-[#00685f]/40 font-black shadow-xs`
+                          : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                      }`}
+                      title={cfg.description}
+                    >
+                      <span className={`w-2 h-2 rounded-full ${cfg.colorDot}`} />
+                      <span>{st}</span>
+                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${isActive ? 'bg-white/80 font-black text-gray-800' : 'bg-gray-100 text-gray-600'}`}>
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {restitutionStatusFilter !== 'Semua' && (
+                <button
+                  type="button"
+                  onClick={() => setRestitutionStatusFilter('Semua')}
+                  className="px-2.5 py-1 rounded-lg text-[11px] font-extrabold bg-teal-100 text-[#00685f] hover:bg-teal-200 border border-teal-300 transition-all cursor-pointer"
+                >
+                  Tampilkan Semua Status ✕
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="p-3 sm:px-6 bg-amber-50/70 border-b border-amber-200/60 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-900 font-semibold">
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
+                <span>Pelanggaran dari Absensi Harian (Alpha, Terlambat, Tanpa Keterangan). Ditindaklanjuti secara langsung oleh Wali Kelas.</span>
+              </div>
+              <span className="text-[11px] text-amber-800 font-bold bg-amber-100 px-2.5 py-0.5 rounded-lg border border-amber-300 shrink-0">
+                Total {absensiTotalCount} Catatan
+              </span>
+            </div>
+          )}
 
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-left text-xs">
@@ -993,7 +1622,9 @@ SMP Negeri 2 Susukan`,
                   <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Kategori</th>
                   <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Bobot</th>
                   <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Waktu / Pelapor</th>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Penanganan Wali / BK</th>
+                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">
+                    {archiveSubTab === 'perilaku' ? 'STATUS RESTITUSI & PENANGANAN BK' : 'PENANGANAN WALI KELAS'}
+                  </th>
                   <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px] text-center">Unduh Bukti</th>
                 </tr>
               </thead>
@@ -1007,20 +1638,22 @@ SMP Negeri 2 Susukan`,
                         <button
                           type="button"
                           onClick={() => {
-                            const st = students.find(s => s.id === v.studentId || s.name === v.studentName);
-                            if (st) {
-                              setSelectedStudentForEdit(st);
-                              setEditStudentName(st.name);
-                              setEditStudentClass(st.class);
-                              setEditStudentNis(st.nis);
+                            if (onNavigateToProfile) {
+                              onNavigateToProfile(v.studentId || v.studentName);
                             } else {
-                              alert(`Siswa ${v.studentName} (${v.studentClass})`);
+                              const st = students.find(s => s.id === v.studentId || s.name === v.studentName);
+                              if (st) {
+                                setSelectedStudentForEdit(st);
+                                setEditStudentName(st.name);
+                                setEditStudentClass(st.class);
+                                setEditStudentNis(st.nis);
+                              }
                             }
                           }}
                           className="font-extrabold text-[#0b1c30] hover:text-[#00685f] hover:underline cursor-pointer text-left block"
-                          title="Klik untuk melihat / edit profil siswa"
+                          title="Klik untuk membuka Profil Siswa Khusus Guru BK"
                         >
-                          {v.studentName}
+                          {isPrivacyMode ? `Siswa ${index + 1} (${v.studentClass})` : v.studentName}
                         </button>
                       </td>
                       <td className="px-6 py-4 font-semibold text-gray-600">{v.studentClass}</td>
@@ -1042,25 +1675,92 @@ SMP Negeri 2 Susukan`,
                       </td>
                       <td className="px-6 py-4 font-bold text-red-600">+{v.pointsAdded}</td>
                       <td className="px-6 py-4 text-gray-500">
-                        <div>{v.date} &bull; {v.time}</div>
+                        <div className="font-semibold text-gray-700">{formatCardDateTime(v.date, v.time)}</div>
                         <div className="text-[10px] opacity-75 font-semibold">Oleh: {v.reportedBy}</div>
                       </td>
                       <td className="px-6 py-4">
-                        <div className="space-y-1">
-                          <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
-                            v.handledBy === 'Wali Kelas' ? 'bg-amber-100 text-amber-800 border border-amber-200' :
-                            v.handledBy === 'Guru BK' ? 'bg-blue-100 text-blue-800 border border-blue-200' :
-                            v.handledBy === 'Wali Kelas & Guru BK' ? 'bg-purple-100 text-purple-800 border border-purple-200' :
-                            'bg-red-50 text-red-800 border border-red-100'
-                          }`}>
-                            {v.handledBy || 'Belum Ditangani'}
-                          </span>
-                          {v.handlingProgress && (
-                            <p className="text-[11px] text-gray-600 font-medium max-w-[200px] leading-snug">
-                              {v.handlingProgress}
+                        {archiveSubTab === 'absensi' ? (
+                          <div className="space-y-1 max-w-[240px]">
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-black bg-amber-100 text-amber-900 border border-amber-300 shadow-2xs">
+                              <User className="w-3.5 h-3.5 text-amber-700" />
+                              <span>Wali Kelas</span>
+                            </span>
+                            <p className="text-[11px] text-gray-600 font-medium leading-snug">
+                              {v.handlingProgress || 'Teguran persuasif & pembinaan tingkat kelas oleh Wali Kelas.'}
                             </p>
-                          )}
-                        </div>
+                          </div>
+                        ) : (
+                          <div className="space-y-1.5 min-w-[190px]">
+                            {/* Label Status Warna (Bisa diklik untuk ubah status) */}
+                            {(() => {
+                              const curStatus = getViolationRestitutionStatus(v);
+                              const cfg = RESTITUTION_STATUS_CONFIG[curStatus];
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenStatusModal(v)}
+                                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black border shadow-2xs transition-all cursor-pointer active:scale-95 hover:shadow-xs group ${cfg.colorBadge}`}
+                                  title="Klik untuk mengubah status penanganan & restitusi"
+                                >
+                                  <span className={`w-2 h-2 rounded-full ${cfg.colorDot} animate-pulse`} />
+                                  <span>{curStatus}</span>
+                                  <ChevronDown className="w-3.5 h-3.5 opacity-60 group-hover:opacity-100 transition-opacity" />
+                                </button>
+                              );
+                            })()}
+
+                            {/* Keterangan detail tahap penanganan */}
+                            {(() => {
+                              const curStatus = getViolationRestitutionStatus(v);
+                              if (curStatus === 'Proses Restitusi') {
+                                return (
+                                  <div className="bg-amber-50/90 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-950 space-y-1 shadow-2xs">
+                                    <div>
+                                      <span className="font-bold text-amber-900 block text-[10px] uppercase tracking-wider">Isi Kesepakatan:</span>
+                                      <span className="leading-snug block mt-0.5 font-medium">
+                                        {v.restitutionAgreement || (v.handlingProgress && !v.handlingProgress.includes('Disinkronkan otomatis') ? v.handlingProgress : 'Sedang menjalankan komitmen perbaikan')}
+                                      </span>
+                                    </div>
+                                    <div className="pt-1 border-t border-amber-200/60 flex flex-wrap items-center justify-between gap-1 text-[10px]">
+                                      <span className="text-amber-800 font-bold flex items-center gap-1">
+                                        <Clock className="w-3 h-3 text-amber-600" />
+                                        Deadline: {formatCardDate(v.restitutionDeadline || v.date)}
+                                      </span>
+                                      <span className="text-amber-700 font-medium flex items-center gap-1">
+                                        <User className="w-3 h-3 text-amber-600" />
+                                        {v.restitutionSupervisor || 'Wali Kelas / BK'}
+                                      </span>
+                                    </div>
+                                  </div>
+                                );
+                              }
+                              if (curStatus === 'Selesai / Dipantau') {
+                                return (
+                                  <div className="bg-emerald-50/90 border border-emerald-200 rounded-xl p-2 text-[11px] text-emerald-950 flex items-start gap-1.5 shadow-2xs">
+                                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                                    <div className="leading-snug">
+                                      <span className="font-bold text-emerald-900">Selesai: </span>
+                                      <span className="font-medium">{formatCardDate(v.restitutionCompletedDate || v.date)}</span>
+                                      <span className="block text-[10px] text-emerald-700 font-bold mt-0.5">Masa Pantau: 2 Minggu</span>
+                                    </div>
+                                  </div>
+                                );
+                              }
+                              if (curStatus === 'Sudah Konseling') {
+                                return (
+                                  <div className="bg-blue-50/70 border border-blue-200/70 rounded-lg px-2 py-1 text-[10.5px] text-blue-800 font-semibold flex items-center gap-1">
+                                    <span>💬 Sudah bicara dengan siswa</span>
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div className="bg-gray-100/70 border border-gray-200/70 rounded-lg px-2 py-1 text-[10.5px] text-gray-600 font-semibold flex items-center gap-1">
+                                  <span>⏳ Baru masuk, belum dipanggil</span>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        )}
                       </td>
                       <td className="px-6 py-4 text-center">
                         <div className="flex items-center justify-center gap-1.5">
@@ -1104,11 +1804,39 @@ SMP Negeri 2 Susukan`,
                             </button>
                           )}
 
+                          {/* Tombol Detail Kasus */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDetailViolation(v);
+                              setCaseDriveFailed(false);
+                            }}
+                            className="px-2 py-1.5 bg-[#00685f]/10 text-[#00685f] hover:bg-[#00685f] hover:text-white rounded-lg font-bold text-[11px] transition-all cursor-pointer shadow-2xs border border-[#00685f]/30 flex items-center gap-1"
+                            title="Buka Detail Kasus & Berkas Layanan"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            <span>Detail</span>
+                          </button>
+
+                          {/* Tombol Lihat PDF di Drive jika sudah tersimpan */}
+                          {v.pdfUrl && (
+                            <a
+                              href={v.pdfUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-1.5 bg-emerald-50 text-emerald-800 hover:bg-emerald-600 hover:text-white rounded-lg font-bold transition-all cursor-pointer shadow-xs border border-emerald-300"
+                              title="Lihat PDF di Google Drive"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                            </a>
+                          )}
+
+                          {/* Tombol Download / Download Ulang PDF */}
                           <button
                             type="button"
                             onClick={() => downloadViolationPDF(v)}
                             className="p-1.5 bg-[#ba1a1a]/10 text-[#ba1a1a] hover:bg-[#ba1a1a] hover:text-white rounded-lg font-bold transition-all cursor-pointer shadow-xs"
-                            title="Unduh Bukti Pelanggaran PDF"
+                            title={v.pdfUrl ? "Download Ulang PDF" : "Unduh Bukti Pelanggaran PDF"}
                           >
                             <Download className="w-3.5 h-3.5" />
                           </button>
@@ -1122,14 +1850,17 @@ SMP Negeri 2 Susukan`,
                             <Edit3 className="w-3.5 h-3.5" />
                           </button>
 
+
                           {onDeleteViolation && (
                             <button
                               type="button"
-                              onClick={() => {
-                                if (confirm(`Apakah Anda yakin ingin menghapus catatan pelanggaran "${v.category}" untuk ${v.studentName}? Bobot siswa akan otomatis dikurangi kembali.`)) {
-                                  onDeleteViolation(v.id);
-                                }
-                              }}
+                              onClick={() =>
+                                setConfirmDeleteTarget({
+                                  type: 'violation',
+                                  id: v.id,
+                                  message: `Hapus kasus "${v.category}" milik ${v.studentName} saja? Kasus lain tidak akan terhapus.`,
+                                })
+                              }
                               className="p-1.5 bg-red-50 text-red-600 hover:bg-red-600 hover:text-white rounded-lg font-bold transition-all cursor-pointer shadow-xs border border-red-200"
                               title="Hapus Catatan Pelanggaran Ini"
                             >
@@ -1150,6 +1881,7 @@ SMP Negeri 2 Susukan`,
               </tbody>
             </table>
           </div>
+        </div>
         </div>
       ) : (
         <>
@@ -1238,7 +1970,7 @@ SMP Negeri 2 Susukan`,
                             onClick={() => setSelectedStudents([])}
                             className="text-[10px] font-black text-red-600 hover:underline cursor-pointer"
                           >
-                            Kosongkan Semua ({selectedStudents.length})
+                            Batal Pilih Semua ({selectedStudents.length})
                           </button>
                         )}
                       </div>
@@ -2066,16 +2798,27 @@ SMP Negeri 2 Susukan`,
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-gray-700 block mb-1">Ditangani Oleh</label>
+                  <label className="text-xs font-bold text-gray-700 block mb-1">Status Restitusi</label>
                   <select
-                    value={editingViolation.handledBy || 'Guru BK'}
-                    onChange={(e) => setEditingViolation({ ...editingViolation, handledBy: e.target.value as any })}
-                    className="w-full bg-gray-50 border border-gray-300 rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-red-500"
+                    value={getViolationRestitutionStatus(editingViolation)}
+                    onChange={(e) => {
+                      const newSt = e.target.value as RestitutionStatusType;
+                      setEditingViolation({
+                        ...editingViolation,
+                        restitutionStatus: newSt,
+                        handledBy:
+                          newSt === 'Baru Dicatat' ? 'Belum Ditangani' :
+                          newSt === 'Sudah Konseling' ? 'Guru BK' :
+                          newSt === 'Proses Restitusi' ? 'Wali Kelas & Guru BK' : 'Guru BK',
+                        restitutionCompletedDate: newSt === 'Selesai / Dipantau' ? (editingViolation.restitutionCompletedDate || new Date().toISOString().slice(0, 10)) : editingViolation.restitutionCompletedDate
+                      });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-[#00685f]"
                   >
-                    <option value="Belum Ditangani">Belum Ditangani</option>
-                    <option value="Wali Kelas">Wali Kelas</option>
-                    <option value="Guru BK">Guru BK</option>
-                    <option value="Wali Kelas & Guru BK">Wali Kelas & Guru BK</option>
+                    <option value="Baru Dicatat">Baru Dicatat</option>
+                    <option value="Sudah Konseling">Sudah Konseling</option>
+                    <option value="Proses Restitusi">Proses Restitusi</option>
+                    <option value="Selesai / Dipantau">Selesai / Dipantau</option>
                   </select>
                 </div>
               </div>
@@ -2368,12 +3111,13 @@ SMP Negeri 2 Susukan`,
               {onDeleteStudent && (
                 <button
                   type="button"
-                  onClick={() => {
-                    if (confirm(`Apakah Anda yakin ingin menghapus data siswa ${selectedStudentForEdit.name} dari sistem?`)) {
-                      onDeleteStudent(selectedStudentForEdit.id);
-                      setSelectedStudentForEdit(null);
-                    }
-                  }}
+                  onClick={() =>
+                    setConfirmDeleteTarget({
+                      type: 'student',
+                      id: selectedStudentForEdit.id,
+                      message: `Hapus ${selectedStudentForEdit.name} (${selectedStudentForEdit.class}) saja? Siswa lain tidak akan terhapus.`,
+                    })
+                  }
                   className="px-3 py-2 text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 rounded-xl cursor-pointer flex items-center gap-1"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -2562,9 +3306,413 @@ SMP Negeri 2 Susukan`,
           </div>
         </div>
       )}
+
+      {/* QUICK STATUS RESTITUSI EDIT MODAL */}
+      {statusModalViolation && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl border border-gray-200 animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="flex items-start justify-between border-b pb-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#00685f]" />
+                  <h3 className="font-extrabold text-base text-[#0b1c30]">
+                    Ubah Status Penanganan & Restitusi
+                  </h3>
+                </div>
+                <p className="text-xs text-gray-600 font-semibold mt-1">
+                  Siswa: <strong className="text-[#00685f]">{statusModalViolation.studentName}</strong> ({statusModalViolation.studentClass}) • Tiket: #{statusModalViolation.ticketId}
+                </p>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  Kasus: {statusModalViolation.category} (+{statusModalViolation.pointsAdded} Bobot)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStatusModalViolation(null)}
+                className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* 4 Pilihan Tahap Status */}
+            <div className="space-y-2">
+              <label className="text-xs font-black text-gray-700 block uppercase tracking-wider">
+                Pilih Tahap Penanganan Restitusi <span className="text-red-500">*</span>:
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {(['Baru Dicatat', 'Sudah Konseling', 'Proses Restitusi', 'Selesai / Dipantau'] as RestitutionStatusType[]).map((st) => {
+                  const cfg = RESTITUTION_STATUS_CONFIG[st];
+                  const isSelected = modalTargetStatus === st;
+                  return (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => handleSelectStatusInModal(st)}
+                      className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-1 shadow-2xs ${
+                        isSelected
+                          ? `${cfg.colorBadge} ring-2 ring-[#00685f] ring-offset-1 font-black shadow-xs`
+                          : 'bg-white hover:bg-gray-50 text-gray-700 border-gray-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="flex items-center gap-1.5 text-xs font-black">
+                          <span className={`w-2.5 h-2.5 rounded-full ${cfg.colorDot}`} />
+                          <span>{st}</span>
+                        </span>
+                        {isSelected && <Check className="w-4 h-4 text-[#00685f]" />}
+                      </div>
+                      <span className="text-[10px] font-medium opacity-85 leading-tight">
+                        {cfg.description}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Input Khusus Sesuai Status Yang Dipilih */}
+            {modalTargetStatus === 'Proses Restitusi' && (
+              <div className="bg-amber-50/90 border border-amber-200 rounded-xl p-4 space-y-3 animate-in fade-in duration-150">
+                <div className="flex items-center gap-1.5 text-xs font-black text-amber-900 uppercase tracking-wider">
+                  <Sliders className="w-4 h-4 text-amber-600" />
+                  <span>Detail Kesepakatan & Pemantauan Restitusi</span>
+                </div>
+                
+                <div>
+                  <label className="text-xs font-bold text-gray-700 block mb-1">
+                    Isi Kesepakatan <span className="text-red-500">*</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={modalAgreement}
+                    onChange={(e) => setModalAgreement(e.target.value)}
+                    placeholder="Contoh: Siswa berjanji tidak mengulangi dan bersedia merapikan perpustakaan selama 3 hari serta meminta maaf."
+                    className="w-full bg-white border border-amber-300 rounded-xl p-2.5 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-amber-500 text-[#0b1c30]"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-bold text-gray-700 block mb-1">
+                      Deadline Pelaksanaan <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      value={modalDeadline}
+                      onChange={(e) => setModalDeadline(e.target.value)}
+                      className="w-full bg-white border border-amber-300 rounded-xl px-3 py-2 text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-amber-500 cursor-pointer"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-gray-700 block mb-1">
+                      Nama Pemantau <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={modalSupervisor}
+                      onChange={(e) => setModalSupervisor(e.target.value)}
+                      placeholder="Contoh: Wali Kelas 8A & Guru BK"
+                      className="w-full bg-white border border-amber-300 rounded-xl px-3 py-2 text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {modalTargetStatus === 'Selesai / Dipantau' && (
+              <div className="bg-emerald-50/90 border border-emerald-200 rounded-xl p-4 space-y-2.5 animate-in fade-in duration-150">
+                <div className="flex items-center gap-1.5 text-xs font-black text-emerald-900 uppercase tracking-wider">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>Penyelesaian Kasus & Masa Pantau 2 Minggu</span>
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-gray-700 block mb-1">
+                    Tanggal Selesai (Otomatis Hari Ini) <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    value={modalCompletedDate}
+                    onChange={(e) => setModalCompletedDate(e.target.value)}
+                    className="w-full bg-white border border-emerald-300 rounded-xl px-3 py-2 text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+                  />
+                  <p className="text-[11px] text-emerald-700 font-semibold mt-1.5 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>Tanggal otomatis terisi hari ini. Kasus dinyatakan selesai dan masuk periode pemantauan 2 minggu.</span>
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {modalTargetStatus === 'Sudah Konseling' && (
+              <div className="bg-blue-50/80 border border-blue-200 rounded-xl p-3.5 text-xs text-blue-900 space-y-1 animate-in fade-in duration-150">
+                <p className="font-bold flex items-center gap-1.5 text-blue-950">
+                  <span>💬 Sudah Bicara dengan Siswa</span>
+                </p>
+                <p className="text-[11px] text-blue-700 font-medium">
+                  Konseling awal telah terlaksana. Siswa telah didengar keterangannya dan sedang diarahkan untuk menetapkan solusi restitusi.
+                </p>
+              </div>
+            )}
+
+            {modalTargetStatus === 'Baru Dicatat' && (
+              <div className="bg-gray-100/80 border border-gray-200 rounded-xl p-3.5 text-xs text-gray-700 space-y-1 animate-in fade-in duration-150">
+                <p className="font-bold flex items-center gap-1.5 text-gray-900">
+                  <span>⏳ Baru Masuk, Belum Dipanggil</span>
+                </p>
+                <p className="text-[11px] text-gray-500 font-medium">
+                  Catatan pembinaan baru terdaftar dalam arsip dan belum dijadwalkan sesi dialog/konseling bersama siswa.
+                </p>
+              </div>
+            )}
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => setStatusModalViolation(null)}
+                className="px-4 py-2 text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveStatusModal}
+                className="px-5 py-2 text-xs font-black text-white bg-[#00685f] hover:bg-[#005049] rounded-xl shadow-xs transition-all active:scale-97 cursor-pointer flex items-center gap-1.5"
+              >
+                <Check className="w-4 h-4" />
+                <span>Simpan Perubahan Status</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL DETAIL KASUS & AUTO-SAVE PDF GOOGLE DRIVE                           */}
+      {/* ========================================================================= */}
+      {detailViolation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0b1c30]/60 backdrop-blur-xs p-4 sm:p-6 overflow-y-auto">
+          <div
+            className="relative bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden border border-[#bcc9c6]/40 my-auto animate-in fade-in zoom-in-95 duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="bg-[#f8faf9] border-b border-[#bcc9c6]/30 px-6 py-4 flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="px-2.5 py-0.5 rounded-lg text-xs font-black bg-red-100 text-red-900 border border-red-200">
+                    Tiket #{detailViolation.ticketId || detailViolation.id}
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded-lg text-xs font-extrabold bg-[#00685f]/10 text-[#00685f] border border-[#00685f]/20">
+                    Kelas {detailViolation.studentClass}
+                  </span>
+                </div>
+                <h3 className="text-lg font-black text-[#0b1c30]">
+                  {detailViolation.studentName}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setDetailViolation(null);
+                  setCaseDriveFailed(false);
+                }}
+                className="p-2 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-4 max-h-[65vh] overflow-y-auto">
+              {/* Alert jika Drive upload failed */}
+              {caseDriveFailed && (
+                <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-900 animate-in fade-in">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span className="font-bold">PDF berhasil dibuat, tapi gagal simpan ke Drive. Klik [Coba Lagi ke Drive]</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleProcessCaseDrivePdf(detailViolation)}
+                    disabled={isProcessingDrivePdf}
+                    className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-black rounded-lg text-xs transition cursor-pointer shrink-0 shadow-2xs"
+                  >
+                    Coba Lagi ke Drive
+                  </button>
+                </div>
+              )}
+
+              {/* Grid Data Ringkasan Kasus */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="p-3 bg-[#f8faf9] rounded-xl border border-gray-200">
+                  <span className="text-gray-500 font-bold block mb-0.5">Kategori Pelanggaran:</span>
+                  <span className="font-black text-[#0b1c30] text-sm">{detailViolation.category}</span>
+                </div>
+                <div className="p-3 bg-red-50/60 rounded-xl border border-red-200">
+                  <span className="text-red-700 font-bold block mb-0.5">Bobot Poin Pembinaan:</span>
+                  <span className="font-black text-red-700 text-sm">+{detailViolation.pointsAdded} Poin</span>
+                </div>
+                <div className="p-3 bg-[#f8faf9] rounded-xl border border-gray-200">
+                  <span className="text-gray-500 font-bold block mb-0.5">Waktu Kejadian:</span>
+                  <span className="font-semibold text-gray-800">{detailViolation.date} • {detailViolation.time || '-'}</span>
+                </div>
+                <div className="p-3 bg-[#f8faf9] rounded-xl border border-gray-200">
+                  <span className="text-gray-500 font-bold block mb-0.5">Status Restitusi:</span>
+                  <span className="font-bold text-[#00685f]">{detailViolation.restitutionStatus || 'Baru Dicatat'}</span>
+                </div>
+              </div>
+
+              {/* Kronologi & Catatan */}
+              <div>
+                <label className="block text-xs font-black uppercase text-gray-700 mb-1">
+                  Uraian Kejadian / Kronologi Kasus
+                </label>
+                <div className="p-3.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm text-gray-800 leading-relaxed whitespace-pre-wrap">
+                  {detailViolation.notes || 'Tidak ada catatan tambahan.'}
+                </div>
+              </div>
+
+              {/* Kesepakatan Restitusi (jika ada) */}
+              {detailViolation.restitutionAgreement && (
+                <div className="p-3.5 bg-emerald-50/60 border border-emerald-200 rounded-xl text-xs text-emerald-950">
+                  <span className="font-black block mb-0.5 text-emerald-900">Kesepakatan Restitusi:</span>
+                  <p className="font-medium italic">"{detailViolation.restitutionAgreement}"</p>
+                  {detailViolation.restitutionDeadline && (
+                    <span className="block mt-1 text-[11px] font-bold text-emerald-800">
+                      Batas Waktu (Deadline): {detailViolation.restitutionDeadline}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Pelapor & Penanganan */}
+              <div className="flex flex-wrap items-center justify-between text-xs text-gray-500 border-t border-gray-100 pt-3">
+                <span>Dilaporkan oleh: <strong className="text-gray-800">{detailViolation.reportedBy || 'Piket / Wali Kelas'}</strong></span>
+                <span>Ditangani oleh: <strong className="text-gray-800">{detailViolation.handledBy || 'Guru BK'}</strong></span>
+              </div>
+            </div>
+
+            {/* Modal Footer Actions */}
+            <div className="px-6 py-4 bg-[#f8faf9] border-t border-[#bcc9c6]/30 flex flex-wrap items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setDetailViolation(null);
+                  setCaseDriveFailed(false);
+                }}
+                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-xl text-xs font-bold transition cursor-pointer"
+              >
+                Tutup
+              </button>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* 1. Tombol [Lihat PDF di Drive] */}
+                {detailViolation.pdfUrl && (
+                  <a
+                    href={detailViolation.pdfUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 rounded-xl text-xs font-black transition shadow-2xs"
+                    title="Buka dokumen PDF bukti kasus di Google Drive"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Lihat PDF di Drive</span>
+                  </a>
+                )}
+
+                {/* 2. Tombol [Coba Lagi ke Drive] jika gagal */}
+                {caseDriveFailed && (
+                  <button
+                    type="button"
+                    onClick={() => handleProcessCaseDrivePdf(detailViolation)}
+                    disabled={isProcessingDrivePdf}
+                    className="inline-flex items-center gap-1 px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-black transition shadow-2xs cursor-pointer"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>Coba Lagi ke Drive</span>
+                  </button>
+                )}
+
+                {/* 3. Tombol [Download Ulang] jika sudah ada PDF */}
+                {detailViolation.pdfUrl ? (
+                  <button
+                    type="button"
+                    onClick={() => handleProcessCaseDrivePdf(detailViolation)}
+                    disabled={isProcessingDrivePdf}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-teal-50 text-[#00685f] border border-[#00685f]/30 hover:bg-teal-100 rounded-xl text-xs font-black transition shadow-2xs cursor-pointer"
+                    title="Download ulang dokumen PDF bukti kasus ini"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download Ulang</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleProcessCaseDrivePdf(detailViolation)}
+                    disabled={isProcessingDrivePdf}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-black transition shadow-2xs cursor-pointer active:scale-97"
+                    title="Generate PDF resmi dan auto-save ke Google Drive"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>{isProcessingDrivePdf ? 'Menyimpan ke Drive...' : 'Generate Layanan'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirmDeleteTarget && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus 1 Data</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">{confirmDeleteTarget.message}</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteTarget(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = confirmDeleteTarget;
+                  setConfirmDeleteTarget(null);
+                  if (!isValidDeleteId(target.id)) {
+                    showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+                    return;
+                  }
+                  if (target.type === 'violation' && onDeleteViolation) {
+                    onDeleteViolation(target.id);
+                  } else if (target.type === 'student' && onDeleteStudent) {
+                    onDeleteStudent(target.id);
+                    setSelectedStudentForEdit(null);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Ya, Hapus 1 Ini Saja
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
 
 // Inline mini close icon replacement
 function XIcon({ className }: { className: string }) {

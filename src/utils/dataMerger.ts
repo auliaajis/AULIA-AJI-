@@ -11,14 +11,31 @@ export function mergeLists<T extends Record<string, any>>(
   customMerge?: (local: T, remote: T) => T
 ): T[] {
   const mergedMap = new Map<any, T>();
-  const deletedIds = getDeletedIds();
+  const deletedIds = new Set(getDeletedIds());
   const syncedIds = getSyncedIds();
+
+  // Track any soft-deleted IDs coming from remote or local so they never resurface
+  remoteList.forEach(item => {
+    if (!item) return;
+    const key = item[keyField];
+    if (item.isDeleted === true && key !== undefined && key !== null) {
+      deletedIds.add(String(key));
+    }
+  });
+  localList.forEach(item => {
+    if (!item) return;
+    const key = item[keyField];
+    if (item.isDeleted === true && key !== undefined && key !== null) {
+      deletedIds.add(String(key));
+    }
+  });
 
   // Add all remote items first, filtering out any that were deleted in the app
   remoteList.forEach(item => {
+    if (!item || item.isDeleted === true) return;
     const key = item[keyField];
     if (key !== undefined && key !== null) {
-      if (deletedIds.includes(String(key))) {
+      if (deletedIds.has(String(key))) {
         return; // Filter out app-deleted items
       }
       mergedMap.set(key, item);
@@ -27,12 +44,12 @@ export function mergeLists<T extends Record<string, any>>(
 
   // Merge local items
   localList.forEach(localItem => {
-    if (!localItem) return;
+    if (!localItem || localItem.isDeleted === true) return;
     const key = localItem[keyField];
     if (key === undefined || key === null || key === '') return;
 
     const stringKey = String(key);
-    if (deletedIds.includes(stringKey)) {
+    if (deletedIds.has(stringKey)) {
       return; // Filter out app-deleted items
     }
 

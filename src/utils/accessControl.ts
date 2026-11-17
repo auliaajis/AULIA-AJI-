@@ -1,5 +1,14 @@
 import { Student, ViolationRecord, CounselingService, ActivityLog, Counselor, StudentAchievement } from '../types';
-import { sanitizeSchoolId, getActiveSchoolId, isSmpSchool } from './schoolConfig';
+import { sanitizeSchoolId, getActiveSchoolId, isSmpSchool, matchesSchoolOrLegacy } from './schoolConfig';
+import { isDummyStudent } from './purgeDummyData';
+import { getDeletedIds } from './deletionTracker';
+
+function isRecordActive(item: any, deletedSet: Set<string>): boolean {
+  if (!item || typeof item !== 'object') return false;
+  if (item.isDeleted === true) return false;
+  if (item.id && deletedSet.has(String(item.id).trim())) return false;
+  return true;
+}
 
 /**
  * Extracts and normalizes the list of allowed classes for a counselor.
@@ -135,27 +144,20 @@ export function filterStudents(students: Student[], counselor: Counselor): Stude
   const counselorSchoolId = counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : getActiveSchoolId();
   const isSmp = isSmpSchool(counselorSchoolId);
 
-  // Strict School Partition Check
+  const deletedSet = new Set(getDeletedIds());
+
+  // Dual-Condition School Partition Check: tampilkan schoolId === sekolahSaya OR schoolId kosong/null/missing
   const schoolMatched = students.filter(s => {
-    if (!s) return false;
-    if (s.schoolId && sanitizeSchoolId(s.schoolId) !== counselorSchoolId) {
-      return false;
-    }
-    const cleanCls = String(s.class || '').replace(/kelas\s*/i, '').replace(/\s+/g, '').toUpperCase();
-    if (isSmp && /^(10|11|12|X|XI|XII)/i.test(cleanCls)) {
-      return false;
-    }
-    return true;
+    if (!isRecordActive(s, deletedSet)) return false;
+    return matchesSchoolOrLegacy(s, counselorSchoolId);
   });
 
-  // Full Administrator & Koordinator BK (Bapak Aulia Aji Sasongko) has unrestricted access to all classes
+  // Full Administrator & Koordinator BK has unrestricted access to all school students
   if (isAdministrator(counselor)) {
     return schoolMatched;
   }
 
   const allowed = getAllowedClassesList(counselor);
-
-  // If counselor explicitly selected specific classes to filter in profile, respect that selection
   if (allowed.length > 0 && !allowed.includes('ALL') && !allowed.includes('SEMUA')) {
     return schoolMatched.filter(s => isClassAllowed(s.class, allowed));
   }
@@ -173,13 +175,12 @@ export function filterViolations(violations: ViolationRecord[], counselor: Couns
 
   const counselorSchoolId = counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : getActiveSchoolId();
 
-  // 1. Strict School Boundary Isolation
+  const deletedSet = new Set(getDeletedIds());
+
+  // 1. Dual-Condition School Isolation: tampilkan schoolId === sekolahSaya OR schoolId kosong/null/missing
   const schoolIsolated = violations.filter(v => {
-    if (!v) return false;
-    if (v.schoolId && sanitizeSchoolId(v.schoolId) !== counselorSchoolId) {
-      return false;
-    }
-    return true;
+    if (!isRecordActive(v, deletedSet)) return false;
+    return matchesSchoolOrLegacy(v, counselorSchoolId);
   });
 
   // Full Administrator & Koordinator BK has unrestricted access to all school records
@@ -188,20 +189,11 @@ export function filterViolations(violations: ViolationRecord[], counselor: Couns
   }
 
   const allowed = getAllowedClassesList(counselor);
-
-  // If counselor explicitly selected specific classes, filter strictly by selected classes or authored/handled
   if (allowed.length > 0 && !allowed.includes('ALL') && !allowed.includes('SEMUA')) {
     const counselorNameLower = (counselor.name || '').toLowerCase().trim();
     const counselorUsernameLower = (counselor.username || '').toLowerCase().trim();
 
-    const isSmp = isSmpSchool(counselorSchoolId);
-
     return schoolIsolated.filter(v => {
-      const cleanCls = String(v.studentClass || '').replace(/kelas\s*/i, '').replace(/\s+/g, '').toUpperCase();
-      if (isSmp && /^(10|11|12|X|XI|XII)/i.test(cleanCls)) {
-        return false;
-      }
-
       const isAssignedClass = isClassAllowed(v.studentClass, allowed);
       const isAuthorOrHandler = Boolean(
         (v.counselorId && v.counselorId === counselor.id) ||
@@ -228,29 +220,22 @@ export function filterServices(services: CounselingService[], counselor: Counsel
 
   const counselorSchoolId = counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : getActiveSchoolId();
 
+  const deletedSet = new Set(getDeletedIds());
+
   const schoolIsolated = services.filter(srv => {
-    if (!srv) return false;
-    const srvAny = srv as any;
-    if (srvAny.schoolId && sanitizeSchoolId(srvAny.schoolId) !== counselorSchoolId) {
-      return false;
-    }
-    return true;
+    if (!isRecordActive(srv, deletedSet)) return false;
+    return matchesSchoolOrLegacy(srv, counselorSchoolId);
   });
 
+  // Full Administrator & Koordinator BK has unrestricted access to all services
   if (isAdministrator(counselor)) {
     return schoolIsolated;
   }
 
   const allowed = getAllowedClassesList(counselor);
-
-  // If counselor explicitly selected specific classes, filter strictly
   if (allowed.length > 0 && !allowed.includes('ALL') && !allowed.includes('SEMUA')) {
     const counselorNameLower = (counselor.name || '').toLowerCase().trim();
-    const isSmp = isSmpSchool(counselorSchoolId);
     return schoolIsolated.filter(srv => {
-      if (isSmp && Array.isArray(srv.students) && srv.students.some(st => /^(10|11|12|X|XI|XII)/i.test(String(st.class || '').replace(/kelas\s*/i, '').trim()))) {
-        return false;
-      }
       const studentMatch = Array.isArray(srv.students) && srv.students.some(st => isClassAllowed(st.class, allowed));
       const counselorMatch = Boolean(
         (srv as any).counselorId === counselor.id ||
@@ -275,13 +260,11 @@ export function filterAchievements(achievements: StudentAchievement[], counselor
 
   const counselorSchoolId = counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : getActiveSchoolId();
 
+  const deletedSet = new Set(getDeletedIds());
+
   const schoolIsolated = achievements.filter(a => {
-    if (!a) return false;
-    const aAny = a as any;
-    if (aAny.schoolId && sanitizeSchoolId(aAny.schoolId) !== counselorSchoolId) {
-      return false;
-    }
-    return true;
+    if (!isRecordActive(a, deletedSet)) return false;
+    return matchesSchoolOrLegacy(a, counselorSchoolId);
   });
 
   if (isAdministrator(counselor)) {
@@ -306,12 +289,11 @@ export function filterHomeVisits(homeVisits: any[], counselor: Counselor): any[]
 
   const counselorSchoolId = counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : getActiveSchoolId();
 
+  const deletedSet = new Set(getDeletedIds());
+
   const schoolIsolated = homeVisits.filter(hv => {
-    if (!hv) return false;
-    if (hv.schoolId && sanitizeSchoolId(hv.schoolId) !== counselorSchoolId) {
-      return false;
-    }
-    return true;
+    if (!isRecordActive(hv, deletedSet)) return false;
+    return matchesSchoolOrLegacy(hv, counselorSchoolId);
   });
 
   if (isAdministrator(counselor)) {
@@ -348,12 +330,11 @@ export function filterAttendanceHistory(history: any[], counselor: Counselor): a
 
   const counselorSchoolId = counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : getActiveSchoolId();
 
+  const deletedSet = new Set(getDeletedIds());
+
   const schoolIsolated = history.filter(item => {
-    if (!item) return false;
-    if (item.schoolId && sanitizeSchoolId(item.schoolId) !== counselorSchoolId) {
-      return false;
-    }
-    return true;
+    if (!isRecordActive(item, deletedSet)) return false;
+    return matchesSchoolOrLegacy(item, counselorSchoolId);
   });
 
   if (isAdministrator(counselor)) {
@@ -381,12 +362,11 @@ export function filterLogs(logs: ActivityLog[], counselor: Counselor): ActivityL
 
   const counselorSchoolId = counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : getActiveSchoolId();
 
+  const deletedSet = new Set(getDeletedIds());
+
   const schoolIsolated = logs.filter(log => {
-    if (!log) return false;
-    if (log.schoolId && sanitizeSchoolId(log.schoolId) !== counselorSchoolId) {
-      return false;
-    }
-    return true;
+    if (!isRecordActive(log, deletedSet)) return false;
+    return matchesSchoolOrLegacy(log, counselorSchoolId);
   });
 
   if (isAdministrator(counselor)) {

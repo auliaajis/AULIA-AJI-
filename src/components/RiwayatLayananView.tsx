@@ -18,34 +18,71 @@ import {
   Printer, 
   ArrowLeft,
   ChevronRight,
-  UserCheck
+  UserCheck,
+  ExternalLink,
+  AlertCircle,
+  Tag
 } from 'lucide-react';
-import { Student, CounselingService, Counselor } from '../types';
+import {
+  BKComponentType,
+  Student,
+  CounselingService,
+  Counselor,
+  ProgramEvaluation,
+  EvaluationJenisMasalah,
+  EvaluationTeknikType,
+  EvaluationTujuanType,
+} from '../types';
+import {
+  EVALUATION_JENIS_MASALAH,
+  EVALUATION_TEKNIK_OPTIONS,
+  EVALUATION_TUJUAN_OPTIONS,
+  LEGACY_PROBLEM_LABELS,
+  getEffectiveServiceEvalScore,
+  inferJenisMasalahFromService,
+  inferTeknikFromService,
+  inferTujuanFromService,
+  isLegacyJenisMasalah,
+  mapJenisMasalahToBidang,
+  mapLegacyProblemToStandardJenisMasalah,
+} from '../utils/evaluationHelpers';
+import { buildLocalContextAwareRecommendation } from './ServiceFormSharedBlocks';
 import { 
   generateServicePDF, 
   downloadRekapSemuaLayananPDF, 
   downloadRekapLayananPerSiswaPDF 
 } from '../utils/pdfGenerator';
 import { showToast } from '../utils/toast';
+import { formatCardDateTime, formatCardDate, formatCardTime } from '../utils/dateFormatter';
 
 interface RiwayatLayananViewProps {
   services: CounselingService[];
   students: Student[];
+  serviceEvaluations?: ProgramEvaluation[];
   activeCounselor?: Counselor;
   onNavigateToTab?: (tab: string, query?: string) => void;
   onNavigateToForm?: (form: string, studentId?: string) => void;
   onEditService?: (service: CounselingService) => void;
+  onUpdateService?: (service: CounselingService) => void;
+  onSaveServiceEvaluation?: (evaluation: ProgramEvaluation) => void;
   onDeleteService?: (serviceId: string) => void;
+  onEvaluateService?: (service: CounselingService) => void;
+  embeddedMode?: boolean;
 }
 
 export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
   services = [],
   students = [],
+  serviceEvaluations = [],
   activeCounselor,
   onNavigateToTab,
   onNavigateToForm,
   onEditService,
+  onUpdateService,
+  onSaveServiceEvaluation,
   onDeleteService,
+  onEvaluateService,
+  embeddedMode = false,
 }) => {
   // Filter States
   const [searchTerm, setSearchTerm] = useState('');
@@ -61,6 +98,175 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
   const [aiStudentSummary, setAiStudentSummary] = useState('');
   const [isGeneratingAiSummary, setIsGeneratingAiSummary] = useState(false);
 
+  // Perbaiki Klasifikasi Modal State (data lama tidak dihapus)
+  const [fixClassifyTarget, setFixClassifyTarget] = useState<CounselingService | null>(null);
+  const [fixJenisMasalah, setFixJenisMasalah] = useState<EvaluationJenisMasalah>('Terlambat');
+  const [fixAlasanLainnya, setFixAlasanLainnya] = useState('');
+  const [fixTujuan, setFixTujuan] = useState<EvaluationTujuanType>('Mengubah Perilaku');
+  const [fixTeknik, setFixTeknik] = useState<EvaluationTeknikType>('Konseling Kelompok');
+  const [fixKeparahan, setFixKeparahan] = useState(3);
+  const [fixFrekuensi, setFixFrekuensi] = useState(3);
+  const [fixMotivasiAwal, setFixMotivasiAwal] = useState(3);
+
+  const isLegacyServiceRecord = (srv: CounselingService, linkedEval?: ProgramEvaluation): boolean => {
+    const blokB = srv.specificDetails?.blokB;
+    if (blokB?.jenisMasalah) {
+      if (isLegacyJenisMasalah(blokB.jenisMasalah)) return true;
+      if (blokB.jenisMasalah === 'Lainnya' && !String(blokB.alasanMasalahLainnya || '').trim()) return true;
+      return false;
+    }
+    const lowerType = String(srv.serviceType || '').toLowerCase();
+    const isFourRevisedType =
+      lowerType.includes('kelompok') ||
+      lowerType.includes('mediasi') ||
+      lowerType.includes('klasikal') ||
+      lowerType.includes('observasi') ||
+      lowerType.includes('wawancara') ||
+      lowerType.includes('alih tangan') ||
+      lowerType.includes('referral');
+    if (isFourRevisedType) return true;
+    const probLower = String(srv.problem || '').toLowerCase();
+    if (LEGACY_PROBLEM_LABELS.some((lbl) => probLower.includes(lbl.toLowerCase()))) return true;
+    if (linkedEval && (isLegacyJenisMasalah(linkedEval.jenisMasalah) || linkedEval.jenisMasalah === 'Lainnya')) {
+      return true;
+    }
+    return false;
+  };
+
+  const openFixClassifyModal = (srv: CounselingService) => {
+    const linkedEval = evalByServiceId.get(srv.id);
+    const blokB = srv.specificDetails?.blokB;
+    const rawCandidate = blokB?.jenisMasalah || linkedEval?.jenisMasalah || srv.problem || '';
+    const mapped =
+      EVALUATION_JENIS_MASALAH.includes(rawCandidate as EvaluationJenisMasalah)
+        ? (rawCandidate as EvaluationJenisMasalah)
+        : mapLegacyProblemToStandardJenisMasalah(rawCandidate) !== 'Lainnya'
+          ? mapLegacyProblemToStandardJenisMasalah(rawCandidate)
+          : inferJenisMasalahFromService(srv);
+
+    setFixJenisMasalah(mapped);
+    setFixAlasanLainnya(blokB?.alasanMasalahLainnya || linkedEval?.alasanMasalahLainnya || '');
+    setFixTujuan(blokB?.tujuanLayanan || linkedEval?.tujuanLayanan || inferTujuanFromService(srv));
+    setFixTeknik(blokB?.teknik || linkedEval?.teknikDipakai || inferTeknikFromService(srv));
+    setFixKeparahan(blokB?.baseline?.keparahan ?? linkedEval?.baseline?.keparahan ?? 3);
+    setFixFrekuensi(blokB?.baseline?.frekuensi ?? linkedEval?.baseline?.frekuensi ?? 3);
+    setFixMotivasiAwal(blokB?.baseline?.motivasiAwal ?? linkedEval?.baseline?.motivasiAwal ?? 3);
+    setFixClassifyTarget(srv);
+  };
+
+  const handleSaveFixClassification = () => {
+    if (!fixClassifyTarget || !onUpdateService) return;
+    if (fixJenisMasalah === 'Lainnya' && !fixAlasanLainnya.trim()) {
+      showToast('⚠️ Jika memilih "Lainnya", wajib mengisi 1 kalimat alasan.', 'warning');
+      return;
+    }
+
+    const prevDetails = fixClassifyTarget.specificDetails || {};
+    const nextBlokB = {
+      jenisMasalah: fixJenisMasalah,
+      alasanMasalahLainnya: fixJenisMasalah === 'Lainnya' ? fixAlasanLainnya.trim() : undefined,
+      tujuanLayanan: fixTujuan,
+      teknik: fixTeknik,
+      baseline: {
+        keparahan: fixKeparahan,
+        frekuensi: fixFrekuensi,
+        motivasiAwal: fixMotivasiAwal,
+        baselineDariIngatan: true as const,
+      },
+    };
+    const nextBidang = mapJenisMasalahToBidang(fixJenisMasalah);
+    const mappedBkComp: BKComponentType =
+      nextBidang === 'Perencanaan Individual'
+        ? 'Peminatan & Perencanaan Individual'
+        : nextBidang === 'Dukungan Sistem'
+          ? 'Layanan Dukungan Sistem'
+          : nextBidang;
+    const updatedService: CounselingService = {
+      ...fixClassifyTarget,
+      bkComponent: fixClassifyTarget.bkComponent || mappedBkComp,
+      specificDetails: {
+        ...prevDetails,
+        blokB: nextBlokB,
+      },
+    };
+
+    onUpdateService(updatedService);
+    if (detailService?.id === updatedService.id) {
+      setDetailService(updatedService);
+    }
+
+    const linkedEval = evalByServiceId.get(fixClassifyTarget.id);
+    if (linkedEval && onSaveServiceEvaluation) {
+      onSaveServiceEvaluation({
+        ...linkedEval,
+        bidang: nextBidang,
+        jenisMasalah: fixJenisMasalah,
+        alasanMasalahLainnya: fixJenisMasalah === 'Lainnya' ? fixAlasanLainnya.trim() : undefined,
+        tujuanLayanan: fixTujuan,
+        teknikDipakai: fixTeknik,
+        baseline: {
+          ...linkedEval.baseline,
+          keparahan: fixKeparahan,
+          frekuensi: fixFrekuensi,
+          motivasiAwal: fixMotivasiAwal,
+          baselineDariIngatan: true,
+        },
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    showToast('✅ Klasifikasi layanan lama berhasil diperbarui tanpa menghapus data.', 'success');
+    setFixClassifyTarget(null);
+  };
+
+  const getDetailContextualAiText = (srv: CounselingService): string => {
+    if (srv.specificDetails?.aiContextualRecommendation) {
+      return srv.specificDetails.aiContextualRecommendation;
+    }
+    const lowerType = String(srv.serviceType || '').toLowerCase();
+    const formKind: 'kelompok' | 'mediasi' | 'klasikal' | 'observasi-wawancara-referal' | null =
+      lowerType.includes('kelompok')
+        ? 'kelompok'
+        : lowerType.includes('mediasi')
+          ? 'mediasi'
+          : lowerType.includes('klasikal')
+            ? 'klasikal'
+            : lowerType.includes('observasi') ||
+                lowerType.includes('wawancara') ||
+                lowerType.includes('alih tangan') ||
+                lowerType.includes('referral')
+              ? 'observasi-wawancara-referal'
+              : null;
+
+    if (formKind) {
+      return buildLocalContextAwareRecommendation({
+        formKind,
+        blokB: srv.specificDetails?.blokB || {
+          jenisMasalah: inferJenisMasalahFromService(srv),
+          tujuanLayanan: inferTujuanFromService(srv),
+          teknik: inferTeknikFromService(srv),
+          baseline: { keparahan: 3, frekuensi: 3, motivasiAwal: 3, baselineDariIngatan: true },
+        },
+        blokC: {
+          kelompokParticipants: srv.specificDetails?.blokC?.kelompokParticipants,
+          mediasi: srv.specificDetails?.blokC?.mediasi || srv.specificDetails?.mediasi,
+          klasikal: srv.specificDetails?.blokC?.klasikal || srv.specificDetails?.klasikal,
+          observasiWawancaraReferal:
+            srv.specificDetails?.blokC?.observasiWawancaraReferal ||
+            srv.specificDetails?.observasiWawancaraReferal,
+        },
+        blokD: {
+          apa: srv.specificDetails?.tindakLanjutPlan?.tindakLanjutApa || srv.followUp,
+          tanggal: srv.specificDetails?.tindakLanjutPlan?.tindakLanjutTanggal,
+          penanggungJawab: srv.specificDetails?.tindakLanjutPlan?.penanggungJawab || srv.counselorName,
+        },
+        sasaranLabel: (srv.students || []).map((st) => st.name).join(', ') || 'Siswa',
+      });
+    }
+
+    return `Layanan ${srv.serviceType} topik "${srv.problem}" (${srv.status || 'Selesai'}): Fokuskan tindak lanjut pada "${srv.followUp || 'monitoring perkembangan bersama wali kelas'}" dan cek perubahan perilaku secara terukur pada sesi evaluasi berikutnya.`;
+  };
+
   // Available Classes
   const availableClasses = useMemo(() => {
     const set = new Set<string>();
@@ -69,6 +275,15 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
     });
     return Array.from(set).sort();
   }, [students]);
+
+  // Map evaluated serviceId -> ProgramEvaluation (locked badge check)
+  const evalByServiceId = useMemo(() => {
+    const map = new Map<string, ProgramEvaluation>();
+    (serviceEvaluations || []).forEach((ev) => {
+      if (ev && ev.serviceId) map.set(ev.serviceId, ev);
+    });
+    return map;
+  }, [serviceEvaluations]);
 
   // Available Service Types
   const availableServiceTypes = useMemo(() => {
@@ -81,6 +296,9 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
 
   // Filtered Services List (Sorted Newest First)
   const filteredServices = useMemo(() => {
+    if (embeddedMode) {
+      return [...services].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    }
     return [...services]
       .filter((srv) => {
         // 1. Search term (student name, problem, topic, description)
@@ -122,7 +340,7 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
         return true;
       })
       .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  }, [services, searchTerm, selectedServiceType, selectedClass, selectedDate]);
+  }, [services, searchTerm, selectedServiceType, selectedClass, selectedDate, embeddedMode]);
 
   // Helper for Meta AI Student Summary
   const handleGenerateStudentAiSummary = (st: Student) => {
@@ -159,11 +377,31 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
   }, [students, studentSearchForPdf]);
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto pb-16 animate-in fade-in duration-200">
-      
-      {/* ========================================================================= */}
-      {/* HEADER UTAMA & TOMBOL EXPORT PDF                                           */}
-      {/* ========================================================================= */}
+    <div className={embeddedMode ? 'space-y-4' : 'space-y-6 max-w-7xl mx-auto pb-16 animate-in fade-in duration-200'}>
+      {embeddedMode ? (
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-extrabold text-[#0b1c30]">
+            Daftar Riwayat Layanan BK
+          </h3>
+          <button
+            type="button"
+            onClick={() => {
+              setShowStudentPdfModal(true);
+              if (!selectedStudentForPdf && students.length > 0) {
+                setSelectedStudentForPdf(students[0]);
+                handleGenerateStudentAiSummary(students[0]);
+              }
+            }}
+            className="px-3 py-1.5 bg-[#f8faf9] hover:bg-[#e6f4f1] text-[#00685f] border border-[#bcc9c6]/50 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <UserCheck className="w-3.5 h-3.5" />
+            <span>PDF Per Siswa</span>
+          </button>
+        </div>
+      ) : (
+      /* ========================================================================= */
+      /* HEADER UTAMA & TOMBOL EXPORT PDF                                           */
+      /* ========================================================================= */
       <div className="bg-white p-5 sm:p-6 rounded-3xl border border-[#bcc9c6]/40 shadow-xs space-y-4">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
@@ -339,6 +577,7 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
 
         </div>
       </div>
+      )}
 
       {/* ========================================================================= */}
       {/* DAFTAR KARTU RIWAYAT LAYANAN                                              */}
@@ -374,6 +613,7 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
               .map((st) => `${st.name} (${st.class || '-'})`)
               .join(', ') || 'Siswa';
             const isCompleted = srv.status === 'Selesai';
+            const linkedEval = evalByServiceId.get(srv.id);
 
             return (
               <div
@@ -390,12 +630,29 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                       <span className="text-xs font-black text-[#00685f] bg-[#00685f]/10 px-2.5 py-0.5 rounded-lg border border-[#00685f]/15">
                         {srv.serviceType}
                       </span>
+                      {!linkedEval ? (
+                        <span
+                          className="text-[10px] font-black text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-md"
+                          title="Badge terkunci sampai Evaluasi Layanan diisi"
+                        >
+                          Belum Dievaluasi
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-black text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md tabular-nums">
+                          Sudah Dievaluasi &middot; {getEffectiveServiceEvalScore(linkedEval).toFixed(1)}/5
+                        </span>
+                      )}
                       <span className="text-sm font-black text-[#0b1c30] group-hover:text-[#00685f] transition-colors truncate">
                         {studentText}
                       </span>
                       <span className="text-xs font-bold text-gray-500">
-                        • {srv.date}
+                        • {formatCardDateTime(srv.date, srv.startTime)}
                       </span>
+                      {((srv as any).isLegacyUnmigrated || !srv.schoolId) && (
+                        <span className="text-[10px] font-black text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-md shadow-2xs">
+                          Data Lama - Perlu Migrasi
+                        </span>
+                      )}
                     </div>
 
                     <p className="text-xs font-bold text-gray-700">
@@ -403,8 +660,8 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                     </p>
                   </div>
 
-                  {/* Status Badge & 3 Tombol Kecil: [Lihat] [Edit] [PDF] */}
-                  <div className="flex items-center gap-2 shrink-0 self-end md:self-center">
+                  {/* Status Badge & Tombol Aksi */}
+                  <div className="flex items-center flex-wrap gap-2 shrink-0 self-end md:self-center">
                     <span
                       className={`text-[10px] font-black px-2.5 py-1 rounded-full border ${
                         isCompleted
@@ -414,6 +671,30 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                     >
                       {srv.status || 'Selesai'}
                     </span>
+
+                    {!linkedEval && onEvaluateService && (
+                      <button
+                        type="button"
+                        onClick={() => onEvaluateService(srv)}
+                        className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
+                        title="Isi Form Evaluasi Layanan sekarang"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Nilai Layanan</span>
+                      </button>
+                    )}
+
+                    {onUpdateService && isLegacyServiceRecord(srv, linkedEval) && (
+                      <button
+                        type="button"
+                        onClick={() => openFixClassifyModal(srv)}
+                        className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
+                        title="Perbaiki klasifikasi masalah lama ke format standar tanpa menghapus data"
+                      >
+                        <Tag className="w-3.5 h-3.5" />
+                        <span>Perbaiki Klasifikasi</span>
+                      </button>
+                    )}
 
                     {/* Tombol [Lihat] */}
                     <button
@@ -439,18 +720,33 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                       </button>
                     )}
 
-                    {/* Tombol [PDF] */}
+                    {/* Tombol Lihat PDF di Drive jika ada */}
+                    {srv.pdfUrl && (
+                      <a
+                        href={srv.pdfUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
+                        title="Buka dokumen PDF di Google Drive"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Drive</span>
+                      </a>
+                    )}
+
+                    {/* Tombol [PDF] / [Download Ulang] */}
                     <button
                       type="button"
                       onClick={() => generateServicePDF(srv)}
                       className="px-2.5 py-1.5 bg-[#e6f4f1] hover:bg-[#d0ebe6] text-[#00685f] hover:text-[#005049] border border-[#00685f]/30 rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
-                      title="Cetak lembar bukti laporan sesi ini ke format PDF resmi"
+                      title={srv.pdfUrl ? "Download ulang PDF bukti layanan ini" : "Cetak lembar bukti laporan sesi ini ke format PDF resmi"}
                     >
                       <FileText className="w-3.5 h-3.5" />
-                      <span>PDF</span>
+                      <span>{srv.pdfUrl ? 'Download Ulang' : 'PDF'}</span>
                     </button>
                   </div>
                 </div>
+
 
                 {/* Deskripsi & Cerita Singkat */}
                 <div
@@ -523,11 +819,11 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
                   <span className="text-[10px] uppercase font-bold text-gray-500 block">Tanggal:</span>
-                  <span className="font-black text-[#0b1c30]">{detailService.date}</span>
+                  <span className="font-black text-[#0b1c30]">{formatCardDate(detailService.date)}</span>
                 </div>
                 <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
                   <span className="text-[10px] uppercase font-bold text-gray-500 block">Waktu Sesi:</span>
-                  <span className="font-black text-[#0b1c30]">{detailService.startTime || '08:00'} WIB</span>
+                  <span className="font-black text-[#0b1c30]">{formatCardTime(detailService.startTime)}</span>
                 </div>
                 <div className="p-3 bg-gray-50 rounded-xl border border-gray-200 col-span-2 sm:col-span-1">
                   <span className="text-[10px] uppercase font-bold text-gray-500 block">Status:</span>
@@ -557,30 +853,48 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                 </p>
               </div>
 
-              {/* Rekomendasi Cerdas Meta AI */}
+              {/* Rekomendasi Cerdas Meta AI (Kontekstual Blok B + Blok C) */}
               <div className="p-3.5 bg-gradient-to-br from-indigo-50 via-purple-50 to-teal-50 rounded-2xl border border-indigo-200 space-y-1.5">
                 <div className="flex items-center gap-1.5 text-indigo-950">
                   <Sparkles className="w-4 h-4 text-indigo-600" />
                   <span className="text-xs font-black">Rekomendasi Cerdas Meta AI ✨</span>
                 </div>
                 <p className="text-xs text-indigo-900 font-semibold leading-relaxed">
-                  Berdasarkan penanganan topik "{detailService.problem}", direkomendasikan untuk mendokumentasikan perkembangan selama 1 minggu ke depan dan mengonfirmasi komitmen siswa secara persuasif.
+                  {getDetailContextualAiText(detailService)}
                 </p>
               </div>
             </div>
 
             {/* Modal Actions */}
-            <div className="flex items-center justify-between pt-3 border-t border-gray-100 gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  generateServicePDF(detailService);
-                }}
-                className="px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer shadow-md"
-              >
-                <Download className="w-4 h-4" />
-                <span>Unduh PDF Sesi Ini</span>
-              </button>
+            <div className="flex items-center justify-between pt-3 border-t border-gray-100 gap-3 flex-wrap">
+              <div className="flex items-center gap-2 flex-wrap">
+                {detailService.pdfUrl && (
+                  <a
+                    href={detailService.pdfUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-4 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer shadow-sm"
+                    title="Buka dokumen PDF di Google Drive"
+                  >
+                    <ExternalLink className="w-4 h-4 text-emerald-700" />
+                    <span>Lihat PDF di Drive</span>
+                  </a>
+                )}
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const res = await generateServicePDF(detailService);
+                    if (res?.success && res.pdfUrl) {
+                      setDetailService(prev => prev ? { ...prev, pdfUrl: res.pdfUrl } : null);
+                    }
+                  }}
+                  className="px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer shadow-md active:scale-97"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{detailService.pdfUrl ? 'Download Ulang' : 'Generate Layanan'}</span>
+                </button>
+              </div>
 
               <button
                 type="button"
@@ -590,6 +904,7 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                 Tutup
               </button>
             </div>
+
           </div>
         </div>
       )}
@@ -770,6 +1085,163 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
               >
                 <Download className="w-4 h-4 text-white" />
                 <span>Unduh PDF Siswa Ini</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL PERBAIKI KLASIFIKASI DATA LAMA (TANPA MENGHAPUS DATA)               */}
+      {/* ========================================================================= */}
+      {fixClassifyTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-6 border border-[#bcc9c6]/40 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-wider text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md">
+                  Migrasi Klasifikasi Terstandar
+                </span>
+                <h3 className="text-base sm:text-lg font-black text-[#0b1c30] mt-1">
+                  Perbaiki Klasifikasi Layanan
+                </h3>
+                <p className="text-xs text-gray-500">
+                  {fixClassifyTarget.serviceType} · Data lama tetap tersimpan utuh.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFixClassifyTarget(null)}
+                className="p-2 text-gray-400 hover:text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-full cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-gray-50 rounded-xl border border-gray-200 text-xs">
+              <span className="font-bold text-gray-500">Catatan Topik Lama: </span>
+              <span className="font-black text-[#0b1c30]">{fixClassifyTarget.problem || '-'}</span>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="font-extrabold text-[#0b1c30] block mb-1">
+                  Jenis Masalah (Daftar Standar 9 Kategori)
+                </label>
+                <select
+                  value={fixJenisMasalah}
+                  onChange={(e) => setFixJenisMasalah(e.target.value as EvaluationJenisMasalah)}
+                  className="w-full px-3 py-2 rounded-xl border border-gray-300 bg-white font-bold text-[#0b1c30]"
+                >
+                  {EVALUATION_JENIS_MASALAH.map((jm) => (
+                    <option key={jm} value={jm}>
+                      {jm}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {fixJenisMasalah === 'Lainnya' && (
+                <div>
+                  <label className="font-extrabold text-amber-900 block mb-1">
+                    Alasan Memilih &quot;Lainnya&quot; (Wajib 1 Kalimat)
+                  </label>
+                  <input
+                    type="text"
+                    value={fixAlasanLainnya}
+                    onChange={(e) => setFixAlasanLainnya(e.target.value)}
+                    placeholder="Contoh: Kesulitan penyesuaian siswa pindahan dari luar kota."
+                    className="w-full px-3 py-2 rounded-xl border border-amber-300 bg-amber-50/40 font-semibold text-[#0b1c30]"
+                  />
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="font-extrabold text-[#0b1c30] block mb-1">Tujuan Layanan</label>
+                  <select
+                    value={fixTujuan}
+                    onChange={(e) => setFixTujuan(e.target.value as EvaluationTujuanType)}
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 bg-white font-bold text-[#0b1c30]"
+                  >
+                    {EVALUATION_TUJUAN_OPTIONS.map((tj) => (
+                      <option key={tj} value={tj}>
+                        {tj}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="font-extrabold text-[#0b1c30] block mb-1">Teknik Dipakai</label>
+                  <select
+                    value={fixTeknik}
+                    onChange={(e) => setFixTeknik(e.target.value as EvaluationTeknikType)}
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 bg-white font-bold text-[#0b1c30]"
+                  >
+                    {EVALUATION_TEKNIK_OPTIONS.map((tk) => (
+                      <option key={tk} value={tk}>
+                        {tk}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-[#f8faf9] border border-[#00685f]/20 space-y-2">
+                <p className="font-extrabold text-[#00685f]">Baseline Retrospektif (Skala 1–5)</p>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="text-[11px] font-bold text-gray-600 block mb-1">Keparahan</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={5}
+                      value={fixKeparahan}
+                      onChange={(e) => setFixKeparahan(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 bg-white font-black text-center"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold text-gray-600 block mb-1">Frekuensi</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={5}
+                      value={fixFrekuensi}
+                      onChange={(e) => setFixFrekuensi(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 bg-white font-black text-center"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold text-gray-600 block mb-1">Motivasi Awal</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={5}
+                      value={fixMotivasiAwal}
+                      onChange={(e) => setFixMotivasiAwal(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 bg-white font-black text-center"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => setFixClassifyTarget(null)}
+                className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveFixClassification}
+                className="px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Simpan Klasifikasi</span>
               </button>
             </div>
           </div>

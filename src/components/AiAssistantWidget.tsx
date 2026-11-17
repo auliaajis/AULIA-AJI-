@@ -17,7 +17,8 @@ import {
   Clock,
   Layers,
   ArrowRight,
-  UserCheck
+  UserCheck,
+  X
 } from 'lucide-react';
 import { Counselor, Student, CounselingService, ViolationRecord } from '../types';
 import { downloadRplBecikPDF } from '../utils/pdfGenerator';
@@ -31,6 +32,10 @@ interface AiAssistantWidgetProps {
   onNavigateToTab?: (tab: string, searchQuery?: string) => void;
   onNavigateToForm?: (form: string, selectStudentId?: string) => void;
   isOpenModalOnStart?: boolean;
+  fabEnabled?: boolean;
+  onToggleFabEnabled?: (next: boolean) => void;
+  onInputFocusChange?: (focused: boolean) => void;
+  onClose?: () => void;
 }
 
 export interface ChatMessage {
@@ -86,6 +91,10 @@ export default function AiAssistantWidget({
   students = [],
   onNavigateToTab,
   onNavigateToForm,
+  fabEnabled = true,
+  onToggleFabEnabled,
+  onInputFocusChange,
+  onClose,
 }: AiAssistantWidgetProps) {
   // Mode selection: 1. Rapikan Laporan, 2. Buatkan RPL, 3. Tanya Teknik BK
   const [activeMode, setActiveMode] = useState<'rapikan-laporan' | 'buatkan-rpl' | 'tanya-teknik'>('tanya-teknik');
@@ -94,6 +103,7 @@ export default function AiAssistantWidget({
   const [userQuery, setUserQuery] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [showClearChatConfirm, setShowClearChatConfirm] = useState(false);
 
   // RPL specific fields
   const [rplTopic, setRplTopic] = useState('');
@@ -214,13 +224,12 @@ export default function AiAssistantWidget({
 
   // 🗑️ Clear Chat for logged-in counselor
   const handleClearChat = () => {
-    if (window.confirm('Hapus seluruh riwayat chat Si Becik untuk akun Anda?')) {
-      setChatHistory([]);
-      try {
-        localStorage.removeItem(storageKey);
-      } catch {}
-      showToast('Riwayat chat berhasil dibersihkan', 'info');
-    }
+    setShowClearChatConfirm(false);
+    setChatHistory([]);
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {}
+    showToast('Riwayat chat berhasil dibersihkan', 'info');
   };
 
   // 🚀 Send message handler
@@ -468,18 +477,73 @@ Kesepakatan: Ibu berjanji mengatur waktu agar Siswa A fokus sekolah, sekolah mem
             </div>
           </div>
 
-          {/* Action Header: Hapus Chat */}
-          <div className="flex items-center gap-2 self-end sm:self-center">
-            <button
-              type="button"
-              onClick={handleClearChat}
-              disabled={chatHistory.length === 0}
-              className="px-3.5 py-2 bg-white/10 hover:bg-red-500/80 disabled:opacity-40 disabled:hover:bg-white/10 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer active:scale-95 border border-white/15"
-              title="Bersihkan riwayat percakapan untuk akun Anda"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>Hapus Chat</span>
-            </button>
+          {/* Action Header: Toggle FAB + Hapus Chat + Tutup */}
+          <div className="flex flex-wrap items-center gap-2 self-end sm:self-center">
+            {onToggleFabEnabled && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={fabEnabled}
+                onClick={() => onToggleFabEnabled(!fabEnabled)}
+                className="px-3 py-1.5 bg-white/10 hover:bg-white/15 text-white rounded-xl text-[11px] font-bold transition-all flex items-center gap-2 cursor-pointer border border-white/20"
+                title="Atur apakah tombol Si Becik melayang tampil di semua halaman"
+              >
+                <span className="text-teal-100 hidden sm:inline">Tombol melayang di semua halaman:</span>
+                <span className="text-teal-100 sm:hidden">Tombol Melayang:</span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-black tracking-wide transition-colors ${
+                    fabEnabled
+                      ? 'bg-emerald-400 text-[#0b1c30]'
+                      : 'bg-slate-600 text-slate-200'
+                  }`}
+                >
+                  {fabEnabled ? 'ON' : 'OFF'}
+                </span>
+              </button>
+            )}
+
+            {showClearChatConfirm ? (
+              <div className="inline-flex items-center gap-1.5 bg-red-950/60 border border-red-300/40 px-2.5 py-1.5 rounded-xl">
+                <span className="text-[11px] font-bold text-white">Hapus riwayat chat?</span>
+                <button
+                  type="button"
+                  onClick={handleClearChat}
+                  className="px-2 py-0.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-extrabold cursor-pointer"
+                >
+                  Ya, Hapus
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowClearChatConfirm(false)}
+                  className="px-2 py-0.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold cursor-pointer"
+                >
+                  Batal
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowClearChatConfirm(true)}
+                disabled={chatHistory.length === 0}
+                className="px-3.5 py-2 bg-white/10 hover:bg-red-500/80 disabled:opacity-40 disabled:hover:bg-white/10 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer active:scale-95 border border-white/15"
+                title="Bersihkan riwayat percakapan untuk akun Anda"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Hapus Chat</span>
+              </button>
+            )}
+
+            {onClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Tutup Si Becik"
+                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-xl transition-all cursor-pointer border border-white/20 active:scale-95"
+                title="Tutup chat Si Becik"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -621,6 +685,8 @@ Kesepakatan: Ibu berjanji mengatur waktu agar Siswa A fokus sekolah, sekolah mem
                   type="text"
                   value={rplTopic}
                   onChange={(e) => setRplTopic(e.target.value)}
+                  onFocus={() => onInputFocusChange?.(true)}
+                  onBlur={() => onInputFocusChange?.(false)}
                   placeholder="Contoh: Anti Bullying / Manajemen Waktu"
                   className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
                 />
@@ -630,6 +696,8 @@ Kesepakatan: Ibu berjanji mengatur waktu agar Siswa A fokus sekolah, sekolah mem
                 <select
                   value={rplClass}
                   onChange={(e) => setRplClass(e.target.value)}
+                  onFocus={() => onInputFocusChange?.(true)}
+                  onBlur={() => onInputFocusChange?.(false)}
                   className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
                 >
                   <option value="Kelas 7">Kelas 7</option>
@@ -644,6 +712,8 @@ Kesepakatan: Ibu berjanji mengatur waktu agar Siswa A fokus sekolah, sekolah mem
                   type="text"
                   value={rplDuration}
                   onChange={(e) => setRplDuration(e.target.value)}
+                  onFocus={() => onInputFocusChange?.(true)}
+                  onBlur={() => onInputFocusChange?.(false)}
                   placeholder="Contoh: 1 x 40 Menit / 2 JP"
                   className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
                 />
@@ -820,6 +890,8 @@ Kesepakatan: Ibu berjanji mengatur waktu agar Siswa A fokus sekolah, sekolah mem
           <textarea
             value={userQuery}
             onChange={(e) => setUserQuery(e.target.value)}
+            onFocus={() => onInputFocusChange?.(true)}
+            onBlur={() => onInputFocusChange?.(false)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();

@@ -575,6 +575,26 @@ export default function Sidebar({
                   </span>
                 </button>
 
+                {/* 4.1b Evaluasi Program BK */}
+                <button
+                  onClick={() => onNavigate('evaluasi-program')}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
+                    currentView === 'evaluasi-program'
+                      ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
+                      : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <FileCheck className="w-4 h-4 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Evaluasi BK</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'evaluasi-program' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Evaluasi Layanan &amp; Program
+                      </span>
+                    </div>
+                  </div>
+                </button>
+
                 {/* 4.2 Integrasi Google */}
                 <button
                   onClick={() => onNavigate('google-sync')}

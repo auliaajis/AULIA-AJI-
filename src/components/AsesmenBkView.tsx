@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { showToast } from '../utils/toast';
+import { isValidDeleteId, safeGuardMassDrop, generateUniqueId } from '../utils/safeDelete';
 import {
   FileText,
   CheckCircle2,
@@ -106,6 +107,12 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
   const [showRespondenModal, setShowRespondenModal] = useState(false);
   const [showStudentFillModal, setShowStudentFillModal] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [pendingAkpdConfirm, setPendingAkpdConfirm] = useState<{
+    kind: 'delete-sub' | 'reset-class';
+    classId: string;
+    subId?: string;
+    studentName?: string;
+  } | null>(null);
 
   // Manual Entry Form State
   const [entryStudentName, setEntryStudentName] = useState('');
@@ -269,17 +276,7 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
 
   // Handler: Reset Class Session
   const handleResetClass = (classId: string) => {
-    if (confirm(`Apakah Anda yakin ingin mereset seluruh data instrumen AKPD Kelas ${classId}?`)) {
-      updateAkpdSessions((prev) => ({
-        ...prev,
-        [classId]: {
-          classId,
-          status: 'draft',
-          submissions: []
-        }
-      }));
-      setAkpdAiAnalysis(null);
-    }
+    setPendingAkpdConfirm({ kind: 'reset-class', classId });
   };
 
   // Handler: Generate Class Simulation (30 Students)
@@ -342,7 +339,7 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
     const itemsToSave = customSelectedItems !== undefined ? customSelectedItems : entrySelectedItems;
 
     if (!nameToSave.trim()) {
-      alert('Silakan masukkan nama siswa.');
+      showToast('Silakan masukkan nama siswa.', 'error');
       return;
     }
 
@@ -351,7 +348,7 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
     });
 
     const newSub: AkpdStudentSubmission = {
-      studentId: `m-${Date.now()}`,
+      studentId: generateUniqueId('m'),
       studentName: nameToSave.trim(),
       submittedAt: now,
       selectedItems: itemsToSave
@@ -378,7 +375,7 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
   // Handler: Submit Student Fill Simulator
   const handleSaveStudentFill = () => {
     if (!studentFillName.trim()) {
-      alert('Silakan masukkan nama Anda (siswa).');
+      showToast('Silakan masukkan nama Anda (siswa).', 'error');
       return;
     }
 
@@ -387,7 +384,7 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
     });
 
     const newSub: AkpdStudentSubmission = {
-      studentId: `sfill-${Date.now()}`,
+      studentId: generateUniqueId('sfill'),
       studentName: studentFillName.trim(),
       submittedAt: now,
       selectedItems: studentFillSelectedItems
@@ -408,24 +405,21 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
     setStudentFillName('');
     setStudentFillSelectedItems({});
     setShowStudentFillModal(false);
-    alert(`Terima kasih, ${newSub.studentName}! Hasil AKPD Anda telah tersimpan dan terhitung otomatis.`);
+    showToast(`Terima kasih, ${newSub.studentName}! Hasil AKPD tersimpan.`, 'success');
   };
 
   // Handler: Delete Single Submission
-  const handleDeleteSubmission = (classId: string, subId: string) => {
-    if (confirm('Hapus respon siswa ini dari pengolahan AKPD?')) {
-      updateAkpdSessions((prev) => {
-        const current = prev[classId];
-        if (!current) return prev;
-        return {
-          ...prev,
-          [classId]: {
-            ...current,
-            submissions: current.submissions.filter((s) => s.studentId !== subId)
-          }
-        };
-      });
+  const handleDeleteSubmission = (classId: string, subId: string, studentName?: string) => {
+    if (!isValidDeleteId(subId)) {
+      showToast('Gagal: ID respon siswa tidak valid, hapus dibatalkan', 'error');
+      return;
     }
+    setPendingAkpdConfirm({
+      kind: 'delete-sub',
+      classId,
+      subId,
+      studentName,
+    });
   };
 
   // Trigger AI AKPD Analysis
@@ -455,7 +449,7 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
   // Trigger AI RPL Generation
   const handleGenerateRplAi = async () => {
     if (!aiTopic.trim()) {
-      alert('Silakan masukkan topik layanan BK terlebih dahulu.');
+      showToast('Silakan masukkan topik layanan BK terlebih dahulu.', 'error');
       return;
     }
     setIsGeneratingRpl(true);
@@ -3016,7 +3010,7 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
                         </td>
                         <td className="p-3 text-right">
                           <button
-                            onClick={() => handleDeleteSubmission(selectedClass, sub.studentId)}
+                            onClick={() => handleDeleteSubmission(selectedClass, sub.studentId, sub.studentName)}
                             className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg cursor-pointer"
                             title="Hapus Respon Ini"
                           >
@@ -3036,7 +3030,7 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
                 className="text-red-600 font-bold hover:underline cursor-pointer flex items-center gap-1"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>Reset / Hapus Semua Respon Kelas {selectedClass}</span>
+                <span>Reset Instrumen Kelas {selectedClass}</span>
               </button>
 
               <button
@@ -3140,7 +3134,7 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
               <button
                 onClick={() => {
                   if (!entryStudentName.trim()) {
-                    alert('Mohon masukkan nama siswa terlebih dahulu!');
+                    showToast('Mohon masukkan nama siswa terlebih dahulu!', 'error');
                     return;
                   }
                   handleSaveStudentEntry(entryStudentName, entrySelectedItems);
@@ -3152,6 +3146,79 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
               >
                 <Send className="w-4 h-4 text-amber-300" />
                 <span>Kirim Jawaban Angket Siswa</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingAkpdConfirm && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">
+                  {pendingAkpdConfirm.kind === 'delete-sub' ? 'Konfirmasi Hapus Respon' : 'Reset Instrumen Kelas'}
+                </h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+                  {pendingAkpdConfirm.kind === 'delete-sub'
+                    ? `Hapus respon AKPD milik ${pendingAkpdConfirm.studentName || 'siswa ini'} saja? Respon siswa lain tidak akan terhapus.`
+                    : `Reset seluruh respon AKPD untuk Kelas ${pendingAkpdConfirm.classId}?`}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingAkpdConfirm(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const act = pendingAkpdConfirm;
+                  setPendingAkpdConfirm(null);
+                  if (act.kind === 'delete-sub') {
+                    if (!isValidDeleteId(act.subId)) {
+                      showToast('Gagal: ID respon siswa tidak valid, hapus dibatalkan', 'error');
+                      return;
+                    }
+                    updateAkpdSessions((prev) => {
+                      const current = prev[act.classId];
+                      if (!current) return prev;
+                      const nextSubs = current.submissions.filter((s) => s.studentId !== act.subId);
+                      const guarded = safeGuardMassDrop(current.submissions, nextSubs);
+                      if (!guarded.ok) return prev;
+                      return {
+                        ...prev,
+                        [act.classId]: {
+                          ...current,
+                          submissions: guarded.next
+                        }
+                      };
+                    });
+                    showToast('Respon AKPD siswa dihapus', 'info');
+                  } else if (act.kind === 'reset-class') {
+                    updateAkpdSessions((prev) => ({
+                      ...prev,
+                      [act.classId]: {
+                        classId: act.classId,
+                        status: 'draft',
+                        submissions: []
+                      }
+                    }));
+                    setAkpdAiAnalysis(null);
+                    showToast(`Instrumen AKPD Kelas ${act.classId} direset`, 'info');
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                {pendingAkpdConfirm.kind === 'delete-sub' ? 'Ya, Hapus 1 Ini Saja' : 'Ya, Reset Kelas'}
               </button>
             </div>
           </div>

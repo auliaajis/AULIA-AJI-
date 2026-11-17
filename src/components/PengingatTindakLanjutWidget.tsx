@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { CounselingService, Counselor, Student } from '../types';
 import { showToast } from '../utils/toast';
+import { formatTanggalIndonesia } from '../utils/evaluationHelpers';
 
 interface PengingatTindakLanjutWidgetProps {
   services: CounselingService[];
@@ -35,6 +36,7 @@ export interface FollowUpReminderItem {
   followUpText: string;
   dueDate: string;
   isOverdue: boolean;
+  overdueDays: number;
   isToday: boolean;
 }
 
@@ -87,10 +89,11 @@ export default function PengingatTindakLanjutWidget({
     }
   }, [snoozedMap]);
 
-  // Today in YYYY-MM-DD format
+  // Today in local YYYY-MM-DD format
   const todayStr = useMemo(() => {
     const now = new Date();
-    return now.toISOString().split('T')[0];
+    const tzOffset = now.getTimezoneOffset() * 60000;
+    return new Date(now.getTime() - tzOffset).toISOString().slice(0, 10);
   }, []);
 
   // Compute reminder list
@@ -100,6 +103,7 @@ export default function PengingatTindakLanjutWidget({
 
     // Counselor filter: only include current logged in counselor's records
     const counselorName = (activeCounselor?.name || '').trim().toLowerCase();
+    const todayMs = new Date(`${todayStr}T00:00:00`).getTime();
 
     services.forEach((s) => {
       // Ensure service belongs to this counselor if counselor is logged in
@@ -113,10 +117,23 @@ export default function PengingatTindakLanjutWidget({
       // If marked complete, skip
       if (completedSet.has(s.id)) return;
 
-      // Extract follow-up text
-      let followUp = (s.followUp || '').trim();
       const spec = (s.specificDetails || {}) as Record<string, any>;
-      
+      const plan = spec.tindakLanjutPlan as
+        | { tindakLanjutApa?: string; tindakLanjutTanggal?: string; statusTindakLanjut?: string }
+        | undefined;
+
+      if (
+        plan?.statusTindakLanjut === 'Selesai' ||
+        plan?.statusTindakLanjut === 'Sudah Ditindaklanjuti'
+      ) {
+        return;
+      }
+
+      // Extract follow-up text (check Blok D tindakLanjutPlan first)
+      let followUp =
+        String(plan?.tindakLanjutApa || '').trim() ||
+        (s.followUp || '').trim();
+
       if (!followUp && spec.tindakLanjut) {
         if (Array.isArray(spec.tindakLanjut)) {
           followUp = spec.tindakLanjut.join(', ');
@@ -125,15 +142,21 @@ export default function PengingatTindakLanjutWidget({
         }
       }
 
-      // If still no follow-up text, skip
+      const hasExplicitPlanDate =
+        Boolean(plan?.tindakLanjutTanggal && /^\d{4}-\d{2}-\d{2}$/.test(plan.tindakLanjutTanggal));
+
+      // If still no follow-up text and no explicit Blok D schedule, skip
       if (!followUp || followUp === '-' || followUp.toLowerCase() === 'selesai' || followUp.toLowerCase() === 'tidak ada') {
-        return;
+        if (!hasExplicitPlanDate) return;
+        followUp = `Tindak lanjut terjadwal (${s.serviceType || 'Layanan BK'})`;
       }
 
-      // Determine due date
+      // Determine due date (snooze -> Blok D tindakLanjutTanggal -> legacy fields -> +7d default)
       let dueDate = '';
       if (snoozedMap[s.id]) {
         dueDate = snoozedMap[s.id];
+      } else if (plan?.tindakLanjutTanggal && /^\d{4}-\d{2}-\d{2}$/.test(plan.tindakLanjutTanggal)) {
+        dueDate = plan.tindakLanjutTanggal;
       } else if (spec.jadwalEvaluasi && /^\d{4}-\d{2}-\d{2}$/.test(spec.jadwalEvaluasi)) {
         dueDate = spec.jadwalEvaluasi;
       } else if (spec.jadwalPantau && /^\d{4}-\d{2}-\d{2}$/.test(spec.jadwalPantau)) {
@@ -158,6 +181,8 @@ export default function PengingatTindakLanjutWidget({
 
       // Only include if due today or past due
       if (dueDate <= todayStr) {
+        const dueMs = new Date(`${dueDate}T00:00:00`).getTime();
+        const overdueDays = Math.max(0, Math.floor((todayMs - dueMs) / (1000 * 60 * 60 * 24)));
         list.push({
           serviceId: s.id,
           studentName,
@@ -168,6 +193,7 @@ export default function PengingatTindakLanjutWidget({
           followUpText: followUp,
           dueDate,
           isOverdue: dueDate < todayStr,
+          overdueDays,
           isToday: dueDate === todayStr,
         });
       }
@@ -176,6 +202,11 @@ export default function PengingatTindakLanjutWidget({
     // Sort: Overdue first (oldest due date first), then today's
     return list.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   }, [services, activeCounselor, completedIds, snoozedMap, todayStr]);
+
+  const overdueItemsCount = useMemo(
+    () => reminderItems.filter((item) => item.isOverdue).length,
+    [reminderItems]
+  );
 
   // Actions
   const handleComplete = (item: FollowUpReminderItem, index: number) => {
@@ -199,7 +230,7 @@ export default function PengingatTindakLanjutWidget({
 
   const handleViewStudentHistory = (item: FollowUpReminderItem) => {
     setIsModalOpen(false);
-    onNavigateToTab('data-siswa', item.studentName);
+    onNavigateToTab('profil-siswa', item.studentId || item.studentName);
   };
 
   const hasDueItems = reminderItems.length > 0;
@@ -225,11 +256,16 @@ export default function PengingatTindakLanjutWidget({
                   <BellRing className="w-6 h-6 animate-bounce" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="px-2 py-0.5 bg-red-600 text-white text-[10px] font-black rounded-full uppercase tracking-wider shadow-2xs">
                       Perlu Pantau Hari Ini
                     </span>
-                    <span className="text-xs font-bold text-red-700">
+                    {overdueItemsCount > 0 && (
+                      <span className="px-2 py-0.5 bg-red-100 text-red-800 border border-red-300 text-[10px] font-black rounded-full uppercase tracking-wider tabular-nums">
+                        {overdueItemsCount} Terlewat
+                      </span>
+                    )}
+                    <span className="text-xs font-bold text-red-700 tabular-nums">
                       Jatuh Tempo: {reminderItems.length} Siswa
                     </span>
                   </div>
@@ -254,12 +290,18 @@ export default function PengingatTindakLanjutWidget({
             <div className="mt-3.5 pt-3 border-t border-red-200/70 flex items-center gap-2 flex-wrap text-xs">
               <span className="text-[11px] font-bold text-red-900">Siswa:</span>
               {reminderItems.slice(0, 3).map((item, idx) => (
-                <span
+                <button
                   key={item.serviceId}
-                  className="px-2.5 py-1 bg-white/90 text-red-900 rounded-lg text-xs font-bold border border-red-200 flex items-center gap-1 shadow-2xs"
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onNavigateToTab('profil-siswa', item.studentId || item.studentName);
+                  }}
+                  className="px-2.5 py-1 bg-white hover:bg-red-50 text-red-900 rounded-lg text-xs font-bold border border-red-200 flex items-center gap-1 shadow-2xs transition-all cursor-pointer active:scale-95"
+                  title={`Klik untuk membuka Profil Siswa ${idx + 1}`}
                 >
                   <span>Siswa {idx + 1} ({item.studentClass}) - {item.serviceType}</span>
-                </span>
+                </button>
               ))}
               {reminderItems.length > 3 && (
                 <span className="text-[11px] font-extrabold text-red-700">
@@ -327,7 +369,7 @@ export default function PengingatTindakLanjutWidget({
                     Daftar Siswa Perlu Dipantau Hari Ini
                   </h3>
                   <p className="text-xs text-teal-100/90 font-medium mt-0.5">
-                    Guru BK: <span className="font-bold text-amber-300">{activeCounselor?.name || 'Guru BK'}</span> • Tanggal: {todayStr}
+                    Guru BK: <span className="font-bold text-amber-300">{activeCounselor?.name || 'Guru BK'}</span> • Tanggal: {formatTanggalIndonesia(todayStr)}
                   </p>
                 </div>
               </div>
@@ -371,11 +413,11 @@ export default function PengingatTindakLanjutWidget({
                           {/* Student Header & Class */}
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-sm sm:text-base font-black text-[#0b1c30]">
-                              Siswa {idx + 1} ({item.studentClass}) - {item.serviceType}
+                              {isPrivacyMode ? `Siswa ${idx + 1}` : item.studentName} ({item.studentClass}) - {item.serviceType}
                             </span>
                             {item.isOverdue ? (
-                              <span className="px-2 py-0.5 bg-red-600 text-white rounded-md text-[10px] font-black uppercase">
-                                Terlewat
+                              <span className="px-2 py-0.5 bg-red-600 text-white rounded-md text-[10px] font-black uppercase tabular-nums">
+                                Terlewat {item.overdueDays} hari
                               </span>
                             ) : (
                               <span className="px-2 py-0.5 bg-amber-500 text-white rounded-md text-[10px] font-black uppercase">
@@ -386,7 +428,7 @@ export default function PengingatTindakLanjutWidget({
 
                           {/* Detail Layanan Terakhir */}
                           <p className="text-xs text-gray-500 font-medium">
-                            Sesi Layanan: <span className="font-semibold text-gray-700">{item.serviceDate}</span>
+                            Sesi Layanan: <span className="font-semibold text-gray-700">{formatTanggalIndonesia(item.serviceDate)}</span>
                           </p>
 
                           {/* Apa Tindak Lanjutnya */}
@@ -402,7 +444,7 @@ export default function PengingatTindakLanjutWidget({
                           {/* Tanggal Janji Pantau */}
                           <div className="flex items-center gap-2 text-xs font-semibold text-gray-600 pt-1">
                             <Clock className="w-3.5 h-3.5 text-[#00685f]" />
-                            <span>Jatuh Tempo Pantau: <strong className="text-[#0b1c30]">{item.dueDate}</strong></span>
+                            <span>Jatuh Tempo Pantau: <strong className="text-[#0b1c30]">{formatTanggalIndonesia(item.dueDate)}</strong></span>
                           </div>
                         </div>
                       </div>

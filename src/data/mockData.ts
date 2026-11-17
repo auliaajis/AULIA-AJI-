@@ -1,6 +1,5 @@
 import { Student, ViolationRecord, CounselingService, ActivityLog, HomeVisitRecord, Counselor, ClassAttendanceRecord } from '../types';
 import { CANONICAL_ATTENDANCE_HISTORY } from './canonicalAttendance';
-import { CANONICAL_AULIA_STUDENTS } from './canonicalStudents';
 import { CANONICAL_AULIA_VIOLATIONS, CANONICAL_AULIA_SERVICES, CANONICAL_AULIA_HOME_VISITS } from './canonicalAuliaData';
 // @ts-ignore
 import auliaAvatar from '../assets/images/aulia_aji_sasongko_1783735129196.jpg';
@@ -9,10 +8,10 @@ export const counselors: Counselor[] = [
   {
     id: 'c1',
     name: 'Aulia Aji Sasongko, S.Pd.',
-    role: 'Koordinator BK & Administrator Sekolah',
+    role: 'Koordinator BK & Guru Pembimbing Kelas 8',
     nip: 'NIP. 19931231 202221 1 002',
     avatar: auliaAvatar,
-    allowedClasses: ['7A', '7B', '7C', '7D', '7E', '7F', '8A', '8B', '8C', '8D', '8E', '8F', '8G', '9A', '9B', '9C', '9D', '9E', '9F', '9G'],
+    allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
     username: 'aulia',
     password: 'aulia',
     email: 'auliasasongko12@guru.smp.belajar.id',
@@ -88,7 +87,7 @@ export const counselors: Counselor[] = [
   }
 ];
 
-export const initialStudents: Student[] = CANONICAL_AULIA_STUDENTS;
+export const initialStudents: Student[] = [];
 
 export const initialViolations: ViolationRecord[] = (CANONICAL_AULIA_VIOLATIONS as ViolationRecord[]) || [];
 

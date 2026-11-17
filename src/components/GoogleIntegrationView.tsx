@@ -18,8 +18,6 @@ import {
   AlertCircle,
   Download,
   ShieldCheck,
-  ShieldAlert,
-  X,
   UserCheck
 } from 'lucide-react';
 import { 
@@ -29,12 +27,16 @@ import {
   saveSpreadsheetConfig,
   testConnection, 
   pushDataToGoogle, 
-  pullDataFromGoogle,
   getLocalDatabaseData,
-  ensureDriveFolderStructure
+  ensureDriveFolderStructure,
+  GoogleBackupStatus,
+  getGoogleBackupStatusLocal,
+  loadGoogleBackupStatusFromFirestore,
+  saveGoogleBackupStatusToFirestore,
+  formatBackupTimestampId
 } from '../utils/googleSync';
 import { Counselor } from '../types';
-import { saveSchoolData, getActiveSchoolId } from '../utils/schoolConfig';
+import { getActiveSchoolId } from '../utils/schoolConfig';
 import {
   initAuth,
   googleSignIn,
@@ -44,13 +46,14 @@ import {
 } from '../utils/firebaseAuth';
 import {
   getOrCreateSpreadsheet,
-  pushDataDirect,
-  pullDataDirect
+  pushDataDirect
 } from '../utils/googleSheetsDirect';
-import { mergeFullDatabase } from '../utils/dataMerger';
+import { showToast } from '../utils/toast';
+
+// DINONAKTIFKAN: Dilarang tarik dari Sheet, Firestore adalah sumber kebenaran
 
 interface GoogleIntegrationViewProps {
-  onDataImported: (data: {
+  onDataImported?: (data: {
     students?: any[];
     violations?: any[];
     services?: any[];
@@ -62,8 +65,9 @@ interface GoogleIntegrationViewProps {
   activeCounselor?: Counselor;
 }
 
-export default function GoogleIntegrationView({ onDataImported, activeCounselor }: GoogleIntegrationViewProps) {
+export default function GoogleIntegrationView({ activeCounselor }: GoogleIntegrationViewProps) {
   const userKey = activeCounselor?.email || activeCounselor?.username || activeCounselor?.id;
+  const activeSchoolId = activeCounselor?.schoolId || getActiveSchoolId();
   const [spreadsheetScope, setSpreadsheetScope] = useState<'personal' | 'shared'>(() => {
     if (userKey) {
       const config = getSavedSpreadsheetConfig(userKey);
@@ -94,14 +98,16 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
   const [user, setUser] = useState<any>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const [showAccessBlockedModal, setShowAccessBlockedModal] = useState(false);
   const [spreadsheetId, setSpreadsheetId] = useState<string | null>(null);
   const [spreadsheetUrl, setSpreadsheetUrl] = useState<string | null>(null);
   const [directSyncStatus, setDirectSyncStatus] = useState<'idle' | 'connecting' | 'connected' | 'syncing' | 'success' | 'error'>('idle');
   const [directSyncMessage, setDirectSyncMessage] = useState('');
   const [downloadingHtml, setDownloadingHtml] = useState(false);
   const [activeTab, setActiveTab] = useState<'webapp' | 'oauth' | 'custom_id'>('webapp');
-  const [syncHistory, setSyncHistory] = useState<{ type: 'push' | 'pull'; time: string; status: 'success' | 'failed' }[]>(() => {
+  const [backupStatus, setBackupStatus] = useState<GoogleBackupStatus>(() =>
+    getGoogleBackupStatusLocal(activeSchoolId)
+  );
+  const [syncHistory, setSyncHistory] = useState<{ type: 'push'; time: string; status: 'success' | 'failed' }[]>(() => {
     const saved = localStorage.getItem('bk_google_direct_history');
     return saved ? JSON.parse(saved) : [];
   });
@@ -109,10 +115,10 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
   const handleShareDatabaseLink = () => {
     const url = scriptUrl || spreadsheetUrl || '';
     const id = spreadsheetId || '';
-    const text = `📌 LINK SINKRONISASI DATABASE BK SMPN 2 SUSUKAN\n\nHalo Bapak/Ibu Guru BK & Staf,\n\nBerikut link basis data Google Apps Script yang dapat Anda gunakan bersama untuk sinkronisasi data siswa, rekam pelanggaran, layanan BK, dan absensi di HP/Laptop masing-masing:\n\n🔗 Web App URL Database:\n${url || '(Belum diset - silakan buka menu Integrasi Google)'}\n\n📄 ID Spreadsheet (Opsional):\n${id || '-'}\n\nCARA PENGGUNAAN PADA HP / LAPTOP ANDA:\n1. Buka Portal BK SMPN 2 Susukan.\n2. Buka menu "Integrasi Google".\n3. Pilih "Mode 1: Apps Script (Multi-Guru / Beda Email)".\n4. Tempelkan Web App URL di atas, lalu klik "Simpan URL" & "Tarik via Apps Script".\n\nSeluruh data akan tersambung dan tersinkronisasi secara otomatis tanpa kendala otorisasi email!`;
+    const text = `📌 LINK BACKUP DATABASE BK SMPN 2 SUSUKAN\n\nHalo Bapak/Ibu Guru BK & Staf,\n\nBerikut link Google Apps Script untuk mengirim salinan backup data siswa, pelanggaran, layanan BK, dan absensi ke Google Spreadsheet:\n\n🔗 Web App URL Database:\n${url || '(Belum diset - silakan buka menu Integrasi Google)'}\n\n📄 ID Spreadsheet (Opsional):\n${id || '-'}\n\nCARA PENGGUNAAN:\n1. Buka Portal BK SMPN 2 Susukan.\n2. Buka menu "Integrasi Google".\n3. Pilih "Mode 1: Apps Script (Multi-Guru / Beda Email)".\n4. Tempelkan Web App URL di atas, lalu klik "Simpan URL" & "Kirim Data Ke Spreadsheet".`;
 
     navigator.clipboard.writeText(text);
-    alert('Pesan informasi Database berhasil disalin!\n\nSilakan tempel (paste) dan kirim pesan ini melalui WhatsApp ke rekan guru lain.');
+    showToast('Pesan informasi URL berhasil disalin ke clipboard.', 'success');
   };
 
   const [isSessionExpired, setIsSessionExpired] = useState(false);
@@ -121,8 +127,12 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
     return typeof localStorage !== 'undefined' ? localStorage.getItem('bk_drive_folders_verified_at') : null;
   });
 
-  // Load configuration on mount
+  // Load configuration & Firestore backup status on mount
   useEffect(() => {
+    loadGoogleBackupStatusFromFirestore(activeSchoolId)
+      .then(setBackupStatus)
+      .catch(() => {});
+
     if (userKey) {
       const config = getSavedSpreadsheetConfig(userKey);
       setSpreadsheetScope(config.isPersonal ? 'personal' : 'shared');
@@ -148,15 +158,19 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
     };
     window.addEventListener('bk_drive_folders_updated', handleFoldersUpdated);
 
-    // Unsubscribe listener for Firebase Auth
+    // SATU ARAH: Login hanya menyimpan token untuk keperluan KIRIM, dilarang menarik/menimpa data Firestore.
     const unsubscribe = initAuth(
       (currentUser, token) => {
         setUser(currentUser);
         setAccessToken(token);
         if (token) {
           setIsSessionExpired(false);
-          handleAutoSetupSpreadsheet(token);
-          ensureDriveFolderStructure(token).catch(console.warn);
+          setDirectSyncStatus('connected');
+          setDirectSyncMessage('Terhubung ke Google, siap untuk Kirim ke Spreadsheet.');
+          if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('bk_google_redirect_pending') === '1') {
+            sessionStorage.removeItem('bk_google_redirect_pending');
+            showToast('Terhubung ke Google, siap untuk Kirim ke Spreadsheet', 'success');
+          }
         }
       },
       () => {
@@ -173,7 +187,7 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
         unsubscribe();
       }
     };
-  }, [userKey]);
+  }, [userKey, activeSchoolId]);
 
   const handleToggleScope = (newScope: 'personal' | 'shared') => {
     setSpreadsheetScope(newScope);
@@ -199,70 +213,20 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
     }
   };
 
-  const handleAutoSetupSpreadsheet = async (token: string) => {
+  // Siapkan target spreadsheet hanya saat tombol Kirim ditekan (tanpa menarik data)
+  const prepareSpreadsheetIdForPush = async (token: string): Promise<string | null> => {
     setDirectSyncStatus('connecting');
-    setDirectSyncMessage('Mencari atau membuat file basis data "Database BK Sekolah" di Google Drive Anda...');
-    
-    const oldId = localStorage.getItem('bk_google_spreadsheet_id');
+    setDirectSyncMessage('Menyiapkan file "Database BK Sekolah" di Google Drive untuk tujuan backup...');
     const result = await getOrCreateSpreadsheet(token);
     if (result.success && result.spreadsheetId) {
-      if (oldId !== result.spreadsheetId) {
-        localStorage.removeItem('bk_google_sync_verified');
-        window.dispatchEvent(new Event('storage'));
-      }
       setSpreadsheetId(result.spreadsheetId);
       setSpreadsheetUrl(result.spreadsheetUrl || null);
       saveSpreadsheetConfig(result.spreadsheetId, result.spreadsheetUrl || '', userKey, spreadsheetScope === 'personal');
-
-      // AUTO-PULL FOR MULTI-DEVICE PROTECTION:
-      // If this device hasn't been verified/synced yet, try to pull the data from Google Sheets automatically.
-      // This protects the user from overwriting their cloud data with local empty/mock data when logging in from a different device.
-      if (localStorage.getItem('bk_google_sync_verified') !== 'true') {
-        setDirectSyncStatus('syncing');
-        setDirectSyncMessage('Mendeteksi data di Google Sheets Anda. Sedang sinkronisasi data riwayat...');
-        try {
-          const pullResult = await pullDataDirect(token, result.spreadsheetId);
-          if (pullResult.success && pullResult.data) {
-            const d = pullResult.data;
-            const remoteStudentCount = d.students?.length || 0;
-            const remoteViolationCount = d.violations?.length || 0;
-            const remoteServiceCount = d.services?.length || 0;
-            const hasRemoteData = remoteStudentCount > 0 || remoteViolationCount > 0 || remoteServiceCount > 0;
-
-            if (hasRemoteData) {
-              onDataImported(d);
-              localStorage.setItem('bk_google_sync_verified', 'true');
-              window.dispatchEvent(new Event('storage'));
-              setDirectSyncStatus('success');
-              setDirectSyncMessage('Berhasil menyinkronkan data riwayat dari Google Sheets secara otomatis!');
-              alert('Koneksi Berhasil!\n\nKami mendeteksi adanya data riwayat Anda di Google Sheets. Data tersebut telah berhasil diunduh secara otomatis ke perangkat ini agar aman dan tidak tertimpa.');
-              return;
-            } else {
-              localStorage.setItem('bk_google_sync_verified', 'true');
-              window.dispatchEvent(new Event('storage'));
-              
-              const localData = getLocalDatabaseData();
-              await pushDataDirect(token, result.spreadsheetId, {
-                students: localData.students,
-                violations: localData.violations,
-                services: localData.services,
-                attendance: localData.attendance,
-                journals: localData.journals,
-                homeVisits: localData.homeVisits
-              }, true);
-            }
-          }
-        } catch (pullErr) {
-          console.error('Auto-pull error during setup:', pullErr);
-        }
-      }
-
-      setDirectSyncStatus('connected');
-      setDirectSyncMessage('Basis Data Terhubung langsung dengan Google Sheets!');
-    } else {
-      setDirectSyncStatus('error');
-      setDirectSyncMessage(result.message || 'Gagal menyambungkan basis data Google Sheets.');
+      return result.spreadsheetId;
     }
+    setDirectSyncStatus('error');
+    setDirectSyncMessage(result.message || 'Gagal menyiapkan file Google Spreadsheet tujuan.');
+    return null;
   };
 
   const handleSaveSpreadsheetCustomId = () => {
@@ -274,7 +238,7 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
       setSpreadsheetUrl(url);
       const isPersonal = spreadsheetScope === 'personal';
       saveSpreadsheetConfig(cleanId, url, userKey, isPersonal);
-      alert(`ID Spreadsheet ${isPersonal ? 'Pribadi' : 'Bersama'} berhasil disimpan!`);
+      showToast(`ID Spreadsheet ${isPersonal ? 'Pribadi' : 'Bersama'} berhasil disimpan!`, 'success');
     }
   };
 
@@ -283,10 +247,13 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
     try {
       const result = await googleSignIn();
       if (result) {
+        // SATU ARAH: Hanya simpan token untuk keperluan KIRIM. Dilarang menarik/sinkron/menimpa data.
         setUser(result.user);
         setAccessToken(result.accessToken);
-        await handleAutoSetupSpreadsheet(result.accessToken);
-        await ensureDriveFolderStructure(result.accessToken);
+        setIsSessionExpired(false);
+        setDirectSyncStatus('connected');
+        setDirectSyncMessage('Terhubung ke Google, siap untuk Kirim ke Spreadsheet.');
+        showToast('Terhubung ke Google, siap untuk Kirim ke Spreadsheet', 'success');
       }
     } catch (error: any) {
       const errMsg = error?.message || String(error);
@@ -296,7 +263,7 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
         errMsg.includes('verification process') || 
         errMsg.includes('developer-approved')
       ) {
-        setShowAccessBlockedModal(true);
+        showToast('Login OAuth tidak diizinkan untuk email ini. Gunakan Mode 1: Apps Script untuk mengirim backup.', 'info');
       } else if (
         errMsg.includes('popup-closed-by-user') || 
         errMsg.includes('auth/popup-closed-by-user') || 
@@ -309,7 +276,7 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
           return;
         }
       } else {
-        alert(`Gagal Masuk Google: ${errMsg}`);
+        showToast(`Gagal Masuk Google: ${errMsg}`, 'error');
       }
     } finally {
       setIsLoggingIn(false);
@@ -319,8 +286,14 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
   const handleGoogleRedirectLogin = async () => {
     setIsLoggingIn(true);
     try {
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('bk_google_redirect_pending', '1');
+      }
       await googleSignInRedirect();
     } catch (error: any) {
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.removeItem('bk_google_redirect_pending');
+      }
       const errMsg = error?.message || String(error);
       if (
         errMsg.includes('403') || 
@@ -328,9 +301,9 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
         errMsg.includes('verification process') || 
         errMsg.includes('developer-approved')
       ) {
-        setShowAccessBlockedModal(true);
+        showToast('Login OAuth tidak diizinkan untuk email ini. Gunakan Mode 1: Apps Script untuk mengirim backup.', 'info');
       } else {
-        alert(`Gagal Masuk via Redirect: ${errMsg}`);
+        showToast(`Gagal Masuk via Redirect: ${errMsg}`, 'error');
       }
       setIsLoggingIn(false);
     }
@@ -392,137 +365,47 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
     }
   };
 
+  // SATU ARAH: Hanya Kirim ke Sheet. Dilarang Tarik dari Sheet.
   const handleDirectExport = async () => {
     const token = accessToken || await getAccessToken();
     if (!token) {
-      alert('Sesi Google Anda kedaluwarsa. Silakan masuk kembali.');
-      handleGoogleLogin();
-      return;
-    }
-    if (!spreadsheetId) {
-      alert('ID Spreadsheet tidak ditemukan. Sistem akan mencoba menyetel ulang.');
-      await handleAutoSetupSpreadsheet(token);
+      showToast('Sesi Google Anda berakhir. Silakan login kembali.', 'warning');
       return;
     }
 
-    if (!confirm('Apakah Anda yakin ingin mengekspor data aplikasi ini? Sistem akan menyinkronkan data awan saat ini dengan data lokal Anda terlebih dahulu, lalu mengunggah hasil penggabungan yang aman (tanpa menghapus catatan dari perangkat lain).')) {
-      return;
+    let targetId = spreadsheetId;
+    if (!targetId) {
+      targetId = await prepareSpreadsheetIdForPush(token);
+      if (!targetId) return;
     }
 
     setDirectSyncStatus('syncing');
-    setDirectSyncMessage('Sedang mengunduh data awan untuk digabungkan secara aman...');
+    setDirectSyncMessage('Sedang mengirim salinan backup dari aplikasi ke Google Spreadsheet...');
 
     const localData = getLocalDatabaseData();
-    let finalStudents = localData.students;
-    let finalViolations = localData.violations;
-    let finalServices = localData.services;
-    let finalAttendance = localData.attendance;
-    let finalJournals = localData.journals;
-    let finalHomeVisits = localData.homeVisits;
-    let finalAchievements = localData.achievements;
 
     try {
-      const pullRes = await pullDataDirect(token, spreadsheetId);
-      if (pullRes.success && pullRes.data) {
-        const d = pullRes.data;
-        const merged = mergeFullDatabase(
-          {
-            students: finalStudents,
-            violations: finalViolations,
-            services: finalServices,
-            attendance: finalAttendance,
-            journals: finalJournals,
-            homeVisits: finalHomeVisits,
-            achievements: finalAchievements
-          },
-          {
-            students: d.students || [],
-            violations: d.violations || [],
-            services: d.services || [],
-            attendance: d.attendance || [],
-            journals: d.journals || [],
-            homeVisits: d.homeVisits || [],
-            achievements: d.achievements || []
-          }
-        );
-        finalStudents = merged.students;
-        finalViolations = merged.violations;
-        finalServices = merged.services;
-        finalAttendance = merged.attendance;
-        finalJournals = merged.journals;
-        finalHomeVisits = merged.homeVisits;
-        finalAchievements = merged.achievements;
-
-        // Save merged data locally per school partition
-        const targetSchoolId = activeCounselor?.schoolId || getActiveSchoolId();
-        saveSchoolData('bk_students', finalStudents, targetSchoolId);
-        saveSchoolData('bk_violations', finalViolations, targetSchoolId);
-        saveSchoolData('bk_services', finalServices, targetSchoolId);
-        saveSchoolData('bk_attendance_history', finalAttendance, targetSchoolId);
-        saveSchoolData('bk_daily_journals', finalJournals, targetSchoolId);
-        saveSchoolData('bk_home_visits', finalHomeVisits, targetSchoolId);
-        saveSchoolData('bk_achievements', finalAchievements, targetSchoolId);
-        
-        // Pass merged data to App state
-        onDataImported({
-          students: finalStudents,
-          violations: finalViolations,
-          services: finalServices,
-          attendance: finalAttendance,
-          journals: finalJournals,
-          homeVisits: finalHomeVisits,
-          achievements: finalAchievements
-        });
-      }
-    } catch (err) {
-      console.warn('Ekspor: Gagal menarik data untuk penggabungan langsung:', err);
-    }
-
-    setDirectSyncMessage('Sedang menyinkronkan dan mengekspor data tergabung ke Google Sheets...');
-
-    try {
-      let result = await pushDataDirect(token, spreadsheetId, {
-        students: finalStudents,
-        violations: finalViolations,
-        services: finalServices,
-        attendance: finalAttendance,
-        journals: finalJournals,
-        homeVisits: finalHomeVisits,
-        achievements: finalAchievements
-      });
-
-      if (!result.success && result.message.includes('OVERWRITE_PREVENTION')) {
-        const confirmationWord = prompt(
-          "⚠️ PERINGATAN KERAS: OVERWRITE DATABASE!\n\n" +
-          "Sistem mendeteksi ada data riwayat tersimpan di Google Sheets Anda, sementara perangkat ini belum disinkronisasi (belum mengimpor data).\n\n" +
-          "Jika Anda melanjutkan, SEMUA DATA LAMA DI GOOGLE SHEETS AKAN TERHAPUS DAN DIGANTI data di perangkat ini.\n\n" +
-          "Kami SANGAT MENYARANKAN untuk membatalkan dan melakukan 'Tarik Data dari Google Sheets' terlebih dahulu.\n\n" +
-          "Jika Anda tetap ingin memaksa menimpa data awan, ketik kata 'TIMPA' di bawah ini untuk mengonfirmasi:"
-        );
-        if (confirmationWord === 'TIMPA') {
-          setDirectSyncStatus('syncing');
-          setDirectSyncMessage('Memaksa menulis data ke Google Sheets...');
-          result = await pushDataDirect(token, spreadsheetId, {
-            students: finalStudents,
-            violations: finalViolations,
-            services: finalServices,
-            attendance: finalAttendance,
-            journals: finalJournals,
-            homeVisits: finalHomeVisits,
-            achievements: finalAchievements
-          }, true);
-        } else {
-          setDirectSyncStatus('idle');
-          setDirectSyncMessage('Sinkronisasi dibatalkan demi perlindungan basis data.');
-          alert('Proses dibatalkan. Data awan Anda aman.');
-          return;
-        }
-      }
+      const result = await pushDataDirect(token, targetId, {
+        students: localData.students,
+        violations: localData.violations,
+        services: localData.services,
+        attendance: localData.attendance,
+        journals: localData.journals,
+        homeVisits: localData.homeVisits,
+        achievements: localData.achievements
+      }, true);
 
       if (result.success) {
         setDirectSyncStatus('success');
-        setDirectSyncMessage(result.message);
-        
+        setDirectSyncMessage('Salinan backup berhasil dikirim ke Google Spreadsheet. Data di aplikasi tetap aman.');
+
+        const updatedStatus = await saveGoogleBackupStatusToFirestore({
+          status: 'Berhasil',
+          mode: 'oauth',
+          pushedBy: activeCounselor?.name || user?.email || 'Guru BK'
+        }, activeSchoolId);
+        setBackupStatus(updatedStatus);
+
         const newHistoryItem = {
           type: 'push' as const,
           time: new Date().toLocaleString('id-ID'),
@@ -531,13 +414,20 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
         const updatedHistory = [newHistoryItem, ...syncHistory].slice(0, 10);
         setSyncHistory(updatedHistory);
         localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
-        alert('Ekspor Berhasil! Data di Google Sheets Anda kini sudah up-to-date.');
+        showToast('Salinan backup berhasil dikirim ke Spreadsheet!', 'success');
       } else {
         throw new Error(result.message);
       }
     } catch (err: any) {
       setDirectSyncStatus('error');
-      setDirectSyncMessage(err.message || 'Terjadi kesalahan ekspor.');
+      setDirectSyncMessage(err.message || 'Terjadi kesalahan saat mengirim backup.');
+      const updatedStatus = await saveGoogleBackupStatusToFirestore({
+        status: 'Gagal',
+        mode: 'oauth',
+        pushedBy: activeCounselor?.name || user?.email || 'Guru BK'
+      }, activeSchoolId);
+      setBackupStatus(updatedStatus);
+
       const newHistoryItem = {
         type: 'push' as const,
         time: new Date().toLocaleString('id-ID'),
@@ -547,111 +437,27 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
       setSyncHistory(updatedHistory);
       localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
       if (err.message === 'UNAUTHENTICATED_SESSION') {
-        alert('Sesi Google Anda telah berakhir demi keamanan (kedaluwarsa otomatis setiap 1 jam). Silakan klik tombol "Hubungkan Kembali & Segarkan Sesi" yang muncul di layar untuk memperbarui koneksi.');
+        showToast('Sesi Google berakhir. Silakan klik "Segarkan Sesi (1-Klik)".', 'warning');
       } else {
-        alert(`Ekspor Gagal: ${err.message}`);
+        showToast(`Gagal mengirim backup: ${err.message}`, 'error');
       }
     }
   };
 
-  const handleDirectImport = async () => {
-    const token = accessToken || await getAccessToken();
-    if (!token) {
-      alert('Sesi Google Anda kedaluwarsa. Silakan masuk kembali.');
-      handleGoogleLogin();
-      return;
-    }
-    if (!spreadsheetId) {
-      alert('ID Spreadsheet tidak ditemukan. Sistem akan mencoba menyetel ulang.');
-      await handleAutoSetupSpreadsheet(token);
-      return;
-    }
+  // DINONAKTIFKAN: Dilarang tarik dari Sheet, Firestore adalah sumber kebenaran
 
-    if (!confirm('Peringatan Keras: Ini akan menimpa seluruh data lokal Siswa, Pelanggaran, Jurnal Layanan BK, Absensi, Jurnal Harian, dan Dokumentasi Home Visit di browser Anda dengan data yang ada di Google Spreadsheet. Lanjutkan?')) {
-      return;
-    }
-
-    setDirectSyncStatus('syncing');
-    setDirectSyncMessage('Sedang membaca dan mengunduh data terbaru dari Google Sheets...');
-
-    try {
-      const result = await pullDataDirect(token, spreadsheetId);
-      if (result.success && result.data) {
-        onDataImported(result.data);
-        setDirectSyncStatus('success');
-        setDirectSyncMessage('Database lokal berhasil disinkronkan dari Google Sheets!');
-
-        const newHistoryItem = {
-          type: 'pull' as const,
-          time: new Date().toLocaleString('id-ID'),
-          status: 'success' as const
-        };
-        const updatedHistory = [newHistoryItem, ...syncHistory].slice(0, 10);
-        setSyncHistory(updatedHistory);
-        localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
-        alert('Impor Berhasil! Seluruh database lokal browser Anda telah diperbarui dari Google Sheets.');
-      } else {
-        throw new Error(result.message);
-      }
-    } catch (err: any) {
-      setDirectSyncStatus('error');
-      setDirectSyncMessage(err.message || 'Terjadi kesalahan impor.');
-      const newHistoryItem = {
-        type: 'pull' as const,
-        time: new Date().toLocaleString('id-ID'),
-        status: 'failed' as const
-      };
-      const updatedHistory = [newHistoryItem, ...syncHistory].slice(0, 10);
-      setSyncHistory(updatedHistory);
-      localStorage.setItem('bk_google_direct_history', JSON.stringify(updatedHistory));
-      if (err.message === 'UNAUTHENTICATED_SESSION') {
-        alert('Sesi Google Anda telah berakhir demi keamanan (kedaluwarsa otomatis setiap 1 jam). Silakan klik tombol "Hubungkan Kembali & Segarkan Sesi" yang muncul di layar untuk memperbarui koneksi.');
-      } else {
-        alert(`Impor Gagal: ${err.message}`);
-      }
-    }
-  };
-
-  // Traditional Apps Script Handlers (Fallback)
+  // Traditional Apps Script URL Saver (tanpa auto-pull)
   const handleSaveUrl = async () => {
     const url = scriptUrl.trim();
     if (!url) {
-      alert('Silakan masukkan URL Apps Script terlebih dahulu.');
+      showToast('Silakan masukkan URL Apps Script terlebih dahulu.', 'warning');
       return;
     }
     const isPersonal = spreadsheetScope === 'personal';
     saveScriptUrl(url, userKey, isPersonal);
-    
-    // Auto-pull check for Apps Script URL
-    if (localStorage.getItem('bk_google_sync_verified') !== 'true') {
-      setConnectionStatus('testing');
-      setStatusMessage('Menguji koneksi dan mendeteksi data lama di Google Sheets Anda...');
-      const result = await testConnection(url);
-      if (result.success) {
-        const pullResult = await pullDataFromGoogle(url);
-        if (pullResult.success && pullResult.data) {
-          const d = pullResult.data;
-          const remoteStudentCount = d.students?.length || 0;
-          const remoteViolationCount = d.violations?.length || 0;
-          const remoteServiceCount = d.services?.length || 0;
-          const hasRemoteData = remoteStudentCount > 0 || remoteViolationCount > 0 || remoteServiceCount > 0;
-          
-          if (hasRemoteData) {
-            onDataImported(d);
-            localStorage.setItem('bk_google_sync_verified', 'true');
-            window.dispatchEvent(new Event('storage'));
-            setConnectionStatus('success');
-            setStatusMessage('Data berhasil disinkronkan secara otomatis!');
-            alert('Koneksi & Sinkronisasi Berhasil!\n\nKami mendeteksi adanya data riwayat Anda di Google Sheets. Data tersebut telah berhasil diunduh secara otomatis ke perangkat ini agar aman dan tidak tertimpa.');
-            return;
-          }
-        }
-      }
-    }
-    
-    alert('URL Google Apps Script berhasil disimpan secara lokal!');
     setConnectionStatus('idle');
     setStatusMessage('');
+    showToast('URL Google Apps Script berhasil disimpan! Siap untuk Kirim ke Spreadsheet.', 'success');
   };
 
   const handleTestConnection = async () => {
@@ -757,10 +563,10 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
         if (json) {
           if (json.status === 'success' || (json.message && (json.message.includes('Koneksi berhasil') || json.message.includes('Terhubung ke Spreadsheet')))) {
             isCodeMatched = true;
-            details = `Selamat! Koneksi browser ke Google Apps Script berjalan dengan sempurna. Apps Script Anda aktif dan siap menerima ekspor/impor data.`;
+            details = `Selamat! Koneksi browser ke Google Apps Script berjalan dengan sempurna. Apps Script Anda aktif dan siap menerima kirim backup satu arah.`;
             actionItems.push(
-              'Aplikasi Web Apps Script Anda siap digunakan untuk ekspor/impor!',
-              'Anda bisa mulai melakukan "Kirim via Apps Script" atau "Tarik via Apps Script" untuk mencadangkan data.'
+              'Aplikasi Web Apps Script Anda siap digunakan untuk mengirim salinan backup!',
+              'Klik tombol "Kirim Data Ke Spreadsheet" untuk mengirim salinan data dari aplikasi ke Google Spreadsheet sekolah.'
             );
           } else if (json.status === 'error' || (json.message && (json.message.includes('Action tidak dikenali') || json.message.includes('tidak dikenal') || json.message.includes('tidak dikenali')))) {
             isCodeMatched = false;
@@ -802,69 +608,38 @@ export default function GoogleIntegrationView({ onDataImported, activeCounselor 
     });
   };
 
+  // SATU ARAH: Hanya Kirim ke Sheet. Dilarang Tarik dari Sheet.
   const handleExportData = async () => {
-    const url = scriptUrl.trim() || getSavedScriptUrl();
+    const url = scriptUrl.trim() || getSavedScriptUrl(userKey);
     if (!url) {
-      alert('Silakan simpan URL Apps Script Anda terlebih dahulu.');
-      return;
-    }
-
-    if (!confirm('Apakah Anda yakin ingin mengekspor seluruh data lokal aplikasi ini ke Google Spreadsheet via Apps Script?')) {
+      showToast('Silakan simpan URL Apps Script Anda terlebih dahulu.', 'warning');
       return;
     }
 
     setIsSyncing(true);
-    let result = await pushDataToGoogle(url);
-    
-    if (!result.success && result.message.includes('OVERWRITE_PREVENTION')) {
-      setIsSyncing(false);
-      const confirmationWord = prompt(
-        "⚠️ PERINGATAN KERAS: OVERWRITE DATABASE!\n\n" +
-        "Sistem mendeteksi ada data riwayat tersimpan di Google Sheets Anda, sementara perangkat ini belum disinkronisasi (belum mengimpor data).\n\n" +
-        "Jika Anda melanjutkan, SEMUA DATA LAMA DI GOOGLE SHEETS AKAN TERHAPUS DAN DIGANTI data di perangkat ini.\n\n" +
-        "Kami SANGAT MENYARANKAN untuk membatalkan dan melakukan 'Tarik via Apps Script' terlebih dahulu.\n\n" +
-        "Jika Anda tetap ingin memaksa menimpa data awan, ketik kata 'TIMPA' di bawah ini untuk mengonfirmasi:"
-      );
-      if (confirmationWord === 'TIMPA') {
-        setIsSyncing(true);
-        result = await pushDataToGoogle(url, true);
-      } else {
-        alert('Ekspor dibatalkan. Data awan Anda aman.');
-        return;
-      }
-    }
-    
+    const result = await pushDataToGoogle(url, true);
     setIsSyncing(false);
-    
+
     if (result.success) {
-      alert('Ekspor Berhasil! ' + result.message);
+      const updated = await saveGoogleBackupStatusToFirestore({
+        status: 'Berhasil',
+        mode: 'apps_script',
+        pushedBy: activeCounselor?.name || 'Guru BK'
+      }, activeSchoolId);
+      setBackupStatus(updated);
+      showToast('Salinan backup berhasil dikirim ke Spreadsheet!', 'success');
     } else {
-      alert('Ekspor Gagal: ' + result.message);
+      const updated = await saveGoogleBackupStatusToFirestore({
+        status: 'Gagal',
+        mode: 'apps_script',
+        pushedBy: activeCounselor?.name || 'Guru BK'
+      }, activeSchoolId);
+      setBackupStatus(updated);
+      showToast('Gagal mengirim backup: ' + result.message, 'error');
     }
   };
 
-  const handleImportData = async () => {
-    const url = scriptUrl.trim() || getSavedScriptUrl();
-    if (!url) {
-      alert('Silakan simpan URL Apps Script Anda terlebih dahulu.');
-      return;
-    }
-
-    if (!confirm('Peringatan: Ini akan menimpa data siswa, pelanggaran, rekam layanan, dan absensi di browser Anda dengan data dari Google Spreadsheet via Apps Script. Lanjutkan?')) {
-      return;
-    }
-
-    setIsSyncing(true);
-    const result = await pullDataFromGoogle(url);
-    setIsSyncing(false);
-
-    if (result.success && result.data) {
-      onDataImported(result.data);
-      alert('Impor Berhasil! Seluruh database lokal Anda telah diperbarui.');
-    } else {
-      alert('Impor Gagal: ' + result.message);
-    }
-  };
+  // DINONAKTIFKAN: Dilarang tarik dari Sheet, Firestore adalah sumber kebenaran
 
   const handleCopyCode = () => {
     navigator.clipboard.writeText(googleAppsScriptCode);
@@ -1307,45 +1082,43 @@ function readTab(ss, tabName, headers) {
                 </div>
               </div>
 
-              {/* Push & Pull Action Buttons */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 border border-teal-100 bg-teal-50/50 rounded-2xl flex flex-col justify-between space-y-3">
-                  <div className="space-y-1">
-                    <span className="text-[9px] font-extrabold bg-[#00685f] text-white px-2 py-0.5 rounded uppercase tracking-wider">Kirim</span>
-                    <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">Kirim Data ke Apps Script</h4>
-                    <p className="text-xs text-gray-600 font-medium leading-relaxed">
-                      Unggah seluruh data lokal dari browser ini ke Google Spreadsheet sekolah.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleExportData}
-                    disabled={isSyncing}
-                    className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
-                  >
-                    {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
-                    <span>Kirim Data Ke Spreadsheet</span>
-                  </button>
+              {/* Push-Only Action (SATU ARAH: Firestore -> Spreadsheet) */}
+              <div className="p-5 border border-teal-200/80 bg-teal-50/50 rounded-2xl space-y-3.5">
+                <div className="space-y-1.5">
+                  <span className="text-[10px] font-extrabold bg-[#00685f] text-white px-2.5 py-0.5 rounded uppercase tracking-wider">Kirim Satu Arah</span>
+                  <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">
+                    Kirim Data ke Spreadsheet (Backup untuk Kepala Sekolah)
+                  </h4>
+                  <p className="text-xs text-[#3d4947] font-medium leading-relaxed">
+                    Kirim salinan data dari aplikasi ini ke Google Spreadsheet sekolah. Ini hanya salinan backup. Mengirim tidak akan mengubah data di aplikasi. Data di aplikasi tetap aman.
+                  </p>
                 </div>
-
-                <div className="p-4 border border-purple-100 bg-purple-50/50 rounded-2xl flex flex-col justify-between space-y-3">
-                  <div className="space-y-1">
-                    <span className="text-[9px] font-extrabold bg-purple-600 text-white px-2 py-0.5 rounded uppercase tracking-wider">Tarik</span>
-                    <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">Tarik Data dari Apps Script</h4>
-                    <p className="text-xs text-gray-600 font-medium leading-relaxed">
-                      Unduh dan sinkronkan data terbaru dari Google Spreadsheet sekolah ke browser ini.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleImportData}
-                    disabled={isSyncing}
-                    className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
-                  >
-                    {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                    <span>Tarik Data Dari Spreadsheet</span>
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={handleExportData}
+                  disabled={isSyncing}
+                  className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-sm active:scale-97 cursor-pointer disabled:opacity-50"
+                >
+                  {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
+                  <span>{isSyncing ? 'Mengirim Backup...' : 'Kirim Data Ke Spreadsheet'}</span>
+                </button>
+                <p className="text-[11px] font-semibold text-[#3d4947] flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-teal-200/50">
+                  <span>
+                    Terakhir dikirim: <strong className="text-[#0b1c30]">{formatBackupTimestampId(backupStatus.lastPushAt)}</strong>
+                  </span>
+                  <span>
+                    Status:{' '}
+                    <strong className={
+                      backupStatus.status === 'Berhasil'
+                        ? 'text-emerald-700'
+                        : backupStatus.status === 'Gagal'
+                          ? 'text-red-600'
+                          : 'text-gray-600'
+                    }>
+                      {backupStatus.status}
+                    </strong>
+                  </span>
+                </p>
               </div>
 
               {/* Diagnostics Results */}
@@ -1397,10 +1170,13 @@ function readTab(ss, tabName, headers) {
                   <div className="p-4 bg-teal-50 rounded-full border border-teal-100">
                     <FileSpreadsheet className="w-12 h-12 text-[#00685f]" />
                   </div>
-                  <div className="max-w-md space-y-2">
+                  <div className="max-w-lg space-y-2.5">
                     <h4 className="font-extrabold text-sm text-[#0b1c30]">Sambungkan Akun Google Anda</h4>
-                    <p className="text-xs text-gray-500 leading-relaxed font-medium">
-                      Hubungkan portal BK ini secara langsung dengan Google Drive pribadi Anda. Kami akan secara otomatis mengelola file <strong className="text-gray-700">"Database BK Sekolah"</strong> di Drive Anda.
+                    <p className="text-xs text-gray-600 leading-relaxed font-medium">
+                      Google dihubungkan hanya untuk mengirim salinan backup ke Spreadsheet Anda. Aplikasi tidak akan mengambil / menimpa data dari Drive.
+                    </p>
+                    <p className="text-xs text-[#00685f] bg-teal-50/80 border border-teal-200/70 rounded-xl px-4 py-2.5 leading-relaxed font-semibold">
+                      Login Google di sini HANYA untuk mengirim data ke Spreadsheet. Login tidak akan mengubah / menimpa data di aplikasi. Data di aplikasi (Firestore) selalu yang paling benar.
                     </p>
                   </div>
 
@@ -1427,25 +1203,9 @@ function readTab(ss, tabName, headers) {
                     </button>
                   </div>
 
-                  {/* Access Blocked Warning Box */}
-                  <div className="w-full max-w-xl mt-4 bg-amber-50/80 border border-amber-200/80 rounded-2xl p-4 text-left space-y-3 text-xs">
-                    <div className="flex items-center justify-between gap-2 border-b border-amber-200/80 pb-2">
-                      <div className="flex items-center gap-1.5 font-bold text-red-700 text-[11px]">
-                        <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
-                        <span>Email Teman/Rekan Guru Belum Terdaftar?</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowAccessBlockedModal(true)}
-                        className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-extrabold rounded-lg text-[11px] cursor-pointer shadow-xs transition-colors shrink-0"
-                      >
-                        Solusi "Error 403: access_denied"
-                      </button>
-                    </div>
-                    <p className="text-amber-900/90 font-medium text-[11px] leading-relaxed">
-                      Atau gunakan <strong>"Mode 1: Apps Script"</strong> di tab atas yang dapat dipakai oleh semua email guru tanpa memerlukan izin Google Cloud Console!
-                    </p>
-                  </div>
+                  <p className="text-[11px] text-gray-400 font-medium max-w-md">
+                    Jika akun email institusi belum diizinkan untuk login OAuth, gunakan tab Mode 1: Apps Script di atas untuk mengirim backup.
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-6">
@@ -1678,27 +1438,43 @@ function readTab(ss, tabName, headers) {
                     </div>
                   </div>
 
-                  {/* Push & Pull Actions */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                  {/* Push-Only Action (SATU ARAH: Firestore -> Spreadsheet) */}
+                  <div className="p-5 border border-teal-200/80 bg-teal-50/50 rounded-2xl space-y-3.5">
+                    <div className="space-y-1.5">
+                      <span className="text-[10px] font-extrabold bg-[#00685f] text-white px-2.5 py-0.5 rounded uppercase tracking-wider">Kirim Satu Arah</span>
+                      <h4 className="font-extrabold text-sm text-[#0b1c30] mt-1">
+                        Kirim Data ke Spreadsheet (Backup untuk Kepala Sekolah)
+                      </h4>
+                      <p className="text-xs text-[#3d4947] font-medium leading-relaxed">
+                        Kirim salinan data dari aplikasi ini ke Google Spreadsheet sekolah. Ini hanya salinan backup. Mengirim tidak akan mengubah data di aplikasi. Data di aplikasi tetap aman.
+                      </p>
+                    </div>
                     <button
                       type="button"
                       onClick={handleDirectExport}
-                      disabled={directSyncStatus === 'syncing' || !spreadsheetId}
-                      className="py-3 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                      disabled={directSyncStatus === 'syncing'}
+                      className="w-full py-3 px-4 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                     >
-                      <Database className="w-4 h-4" />
-                      <span>Ekspor & Cadangkan Data</span>
+                      {directSyncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
+                      <span>{directSyncStatus === 'syncing' ? 'Mengirim Backup...' : 'Kirim Data Ke Spreadsheet'}</span>
                     </button>
-
-                    <button
-                      type="button"
-                      onClick={handleDirectImport}
-                      disabled={directSyncStatus === 'syncing' || !spreadsheetId}
-                      className="py-3 px-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                    >
-                      <RefreshCw className="w-4 h-4" />
-                      <span>Impor & Timpa Data Lokal</span>
-                    </button>
+                    <p className="text-[11px] font-semibold text-[#3d4947] flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-teal-200/50">
+                      <span>
+                        Terakhir dikirim: <strong className="text-[#0b1c30]">{formatBackupTimestampId(backupStatus.lastPushAt)}</strong>
+                      </span>
+                      <span>
+                        Status:{' '}
+                        <strong className={
+                          backupStatus.status === 'Berhasil'
+                            ? 'text-emerald-700'
+                            : backupStatus.status === 'Gagal'
+                              ? 'text-red-600'
+                              : 'text-gray-600'
+                        }>
+                          {backupStatus.status}
+                        </strong>
+                      </span>
+                    </p>
                   </div>
                 </div>
               )}
@@ -1768,26 +1544,20 @@ function readTab(ss, tabName, headers) {
               <div className="p-3 bg-teal-50 border border-teal-100 rounded-xl space-y-1.5">
                 <h4 className="font-extrabold text-[#00685f] text-xs flex items-center gap-1">
                   <Sparkles className="w-4 h-4 shrink-0" />
-                  <span>Koneksi Otomatis (Direkomendasikan)</span>
+                  <span>Backup Satu Arah (Kirim ke Drive)</span>
                 </h4>
                 <p className="text-[#3d4947]/90 text-[11px]">
-                  Cukup masuk menggunakan akun Google Anda. Sistem akan mencari file bernama <strong>"Database BK Sekolah"</strong> di Drive Anda atau membuatnya secara otomatis jika belum ada.
-                </p>
-                <p className="text-[#3d4947]/90 text-[11px] font-bold">
-                  Siswa, Pelanggaran, Jurnal Layanan BK, Absensi, Jurnal Harian, dan Home Visit akan langsung diorganisasikan ke dalam tab-tab spreadsheet bersangkutan secara otomatis!
+                  Saat Anda menekan tombol <strong>"Kirim Data Ke Spreadsheet"</strong>, sistem menyiapkan file salinan di Drive dan mengirimkan data Siswa, Pelanggaran, Layanan BK, Absensi, Jurnal Harian, dan Home Visit ke tab spreadsheet bersangkutan.
                 </p>
               </div>
 
               <div className="p-3 bg-emerald-50 border border-emerald-100 rounded-xl space-y-1.5">
                 <h4 className="font-extrabold text-emerald-800 text-xs flex items-center gap-1">
                   <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>Sistem Proteksi Anti-Overwrite Aktif</span>
+                  <span>Firestore adalah Sumber Kebenaran</span>
                 </h4>
                 <p className="text-[#3d4947]/90 text-[11px] leading-relaxed">
-                  Sistem keamanan pintar kami mendeteksi pergantian perangkat secara otomatis. Jika Anda masuk dengan perangkat baru yang datanya kosong, sistem akan memblokir ekspor otomatis agar data lama Anda di Google Sheets tidak terhapus secara tidak sengaja.
-                </p>
-                <p className="text-[#3d4947]/90 text-[11px] font-bold">
-                  Silakan lakukan <strong>"Tarik Data" (Impor)</strong> satu kali pada perangkat baru untuk mengaktifkan kembali fungsi ekspor secara aman!
+                  Alur data terkunci <strong>satu arah (Aplikasi/Firestore &rarr; Spreadsheet)</strong>. Login Google dan pengiriman backup tidak akan pernah menarik atau menimpa data asli di aplikasi Anda.
                 </p>
               </div>
             </div>
@@ -1863,108 +1633,6 @@ function readTab(ss, tabName, headers) {
 
       </div>
 
-      {/* Modal Panduan Solusi Access Blocked / Error 403 */}
-      {showAccessBlockedModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto border border-gray-100 text-left">
-            <div className="flex items-start justify-between gap-4 border-b border-gray-100 pb-4">
-              <div className="flex items-center gap-3">
-                <div className="p-3 bg-red-100 rounded-2xl text-red-600">
-                  <ShieldAlert className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="font-extrabold text-base text-gray-900">Solusi "Access blocked: Error 403: access_denied"</h3>
-                  <p className="text-xs text-gray-500 font-medium">Panduan Mendaftarkan Email Guru / Staf di Google Cloud Console</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowAccessBlockedModal(false)}
-                className="p-2 text-gray-400 hover:text-gray-600 rounded-xl hover:bg-gray-100 cursor-pointer transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-4 text-xs leading-relaxed text-gray-700">
-              <div className="p-4 bg-red-50 border border-red-200 rounded-2xl text-red-900 space-y-1.5 font-medium">
-                <p className="font-bold text-sm">Mengapa Pesan Ini Muncul?</p>
-                <p>
-                  Google memblokir login karena project Google Cloud (<code>gen-lang-client-0064829073</code>) masih berstatus <strong>"Testing" (Pengujian)</strong>. Dalam status ini, Google hanya mengizinkan email yang sudah didaftarkan secara khusus di daftar <strong>Test Users</strong>.
-                </p>
-              </div>
-
-              <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 space-y-1 text-[11px] font-medium">
-                <p className="font-bold text-xs text-amber-950 flex items-center gap-1.5">
-                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                  <span>Mengapa Tombol "+ Add User" di Identity Platform (Layar Anda) Tidak Bisa Diklik?</span>
-                </p>
-                <p>
-                  Menu <em>Identity Platform / Users</em> di Google Cloud Console digunakan untuk registrasi email/password manual bawaan Firebase. Tombol tersebut mati/disabled untuk Google Sign-In.
-                </p>
-                <p className="font-bold text-amber-950">
-                  Tombol yang benar untuk menambah Test User Google OAuth ada di menu: <strong>APIs & Services &rarr; OAuth consent screen &rarr; Test users &rarr; + ADD USERS</strong>.
-                </p>
-              </div>
-
-              <div className="space-y-3 bg-gray-50 p-4 rounded-2xl border border-gray-200">
-                <h4 className="font-extrabold text-gray-900 text-xs uppercase tracking-wider text-[#00685f]">
-                  Langkah Tepat Membuka Akses (Step-by-Step):
-                </h4>
-                
-                <ol className="space-y-2.5 list-decimal list-inside font-medium text-gray-800 leading-relaxed">
-                  <li className="pl-1">
-                    Klik atau buka link berikut: <a href="https://console.cloud.google.com/apis/credentials/consent?project=gen-lang-client-0064829073" target="_blank" rel="noreferrer" className="text-teal-700 underline font-bold">Google Cloud Console - OAuth Consent Screen</a>.
-                  </li>
-                  <li className="pl-1">
-                    Pastikan nama project di bagian atas layar menunjukkan: <code className="bg-emerald-100 text-emerald-900 px-1.5 py-0.5 rounded font-mono font-bold">Default Gemini Project (gen-lang-client-0064829073)</code>.
-                  </li>
-                  <li className="pl-1">
-                    Scroll ke bawah sampai menemukan bagian berlabel <strong>Test users</strong>.
-                  </li>
-                  <li className="pl-1">
-                    Klik tombol biru <strong className="text-teal-800 bg-teal-100 px-2 py-0.5 rounded">+ ADD USERS</strong> yang aktif di bagian Test users tersebut.
-                  </li>
-                  <li className="pl-1">
-                    Ketikkan alamat email: <code className="bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-mono font-bold">binasaptarina58@guru.sma.belajar.id</code> lalu klik <strong>SAVE</strong>.
-                  </li>
-                </ol>
-              </div>
-
-              <div className="p-4 bg-teal-50 border border-teal-200 rounded-2xl space-y-2 text-teal-950">
-                <div className="flex items-center gap-2 font-extrabold text-teal-900">
-                  <Check className="w-4 h-4 text-teal-600 shrink-0" />
-                  <span>Aplikasi Tetap Bisa Digunakan Tanpa Login Google!</span>
-                </div>
-                <p className="font-medium text-[11px] leading-relaxed">
-                  Jika belum sempat menambah email di Google Cloud Console, teman Anda <strong>tetap dapat langsung menggunakan seluruh fitur portal BK SMPN 2 Susukan</strong> (input konseling, catat pelanggaran, survey AKPD, cetak laporan PDF) karena data aplikasi tersimpan otomatis di memori lokal browser.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2 border-t border-gray-100">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('webapp');
-                  setShowAccessBlockedModal(false);
-                }}
-                className="px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-extrabold rounded-xl text-xs cursor-pointer shadow-xs transition-colors flex items-center gap-1.5"
-              >
-                <CloudLightning className="w-4 h-4" />
-                <span>Beralih ke Mode Apps Script (Beda Email)</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowAccessBlockedModal(false)}
-                className="px-5 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white font-extrabold rounded-xl text-xs cursor-pointer shadow-xs transition-colors"
-              >
-                Saya Mengerti
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

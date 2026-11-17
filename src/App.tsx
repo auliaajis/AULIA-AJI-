@@ -6,6 +6,7 @@ import DataSiswaView from './components/DataSiswaView';
 import CatatPelanggaranForm from './components/CatatPelanggaranForm';
 import CatatApresiasiForm from './components/CatatApresiasiForm';
 import TambahLayananForm from './components/TambahLayananForm';
+import ProfilSiswaView from './components/ProfilSiswaView';
 import PengaturanView from './components/PengaturanView';
 import AbsensiView from './components/AbsensiView';
 import GoogleIntegrationView from './components/GoogleIntegrationView';
@@ -23,15 +24,39 @@ import ToastContainer from './components/ToastContainer';
 import BottomNavBar from './components/BottomNavBar';
 import PageHeaderBanner from './components/PageHeaderBanner';
 import LainnyaView from './components/LainnyaView';
+import PeringatanView, { PeringatanFilterTab } from './components/PeringatanView';
 import { RiwayatLayananView } from './components/RiwayatLayananView';
+import EvaluasiProgramView from './components/EvaluasiProgramView';
+import EvaluasiWizardModal from './components/EvaluasiWizardModal';
+import FloatingSiBecik from './components/FloatingSiBecik';
+import AiAssistantWidget from './components/AiAssistantWidget';
+import {
+  getLocalSiBecikFabEnabled,
+  saveSiBecikFabSettings,
+  loadSiBecikFabSettingsFromFirestore,
+  getSiBecikUnread,
+  setSiBecikUnread,
+  getSeenOverdueIds,
+  markOverdueIdsSeen,
+  fetchOverdueFollowUpIdsFromFirestore,
+} from './utils/siBecikSettings';
+import { downloadSingleEvaluationCardPDF } from './utils/evaluationPdfGenerator';
 import { showToast } from './utils/toast';
+import { isValidDeleteId, safeFilterSingleDelete, generateUniqueId } from './utils/safeDelete';
 import { motion, AnimatePresence } from 'motion/react';
 import { downloadServicePDF, generateServicePDF, autoArchiveServiceToDrive, autoArchiveViolationToDrive } from './utils/pdfGenerator';
+import { formatCardDateTime, formatCardDate, formatCardTime } from './utils/dateFormatter';
 import { exportSingleServiceToIcs, exportServicesToIcs } from './utils/calendarSync';
 import { triggerBackgroundAutoSync, ensureDriveFolderStructure } from './utils/googleSync';
-import { registerDeletedId, registerSyncedIds, cleanupSyncedIds, clearCanonicalDeletedIds, resetStudentDeletedIds } from './utils/deletionTracker';
+import { getDeletedIds, registerDeletedId, registerSyncedIds, cleanupSyncedIds } from './utils/deletionTracker';
 import { autoPushToJournal } from './utils/journalAutoLink';
-import { CANONICAL_AULIA_STUDENTS } from './data/canonicalStudents';
+import {
+  CANONICAL_AULIA_VIOLATIONS,
+  CANONICAL_AULIA_SERVICES,
+  CANONICAL_AULIA_HOME_VISITS,
+  CANONICAL_AULIA_PARENT_SUMMONS,
+  CANONICAL_AULIA_JOURNALS
+} from './data/canonicalAuliaData';
 import { 
   initRealtimeFirestoreSync, 
   stopRealtimeFirestoreSync,
@@ -39,28 +64,26 @@ import {
   flushPendingCloudQueue,
   saveBulkToFirestore, 
   saveToFirestore, 
-  deleteFromFirestore,
+  softDeleteFromFirestore,
+  softDeleteBulkStudentsFromFirestore,
   saveAccountRequestToCloud,
   updateAccountRequestInCloud,
-  deleteAccountRequestFromCloud,
-  syncPreviewDataToAuliaAccount
+  deleteAccountRequestFromCloud
 } from './utils/firestoreSync';
-import { getActiveSchoolId, setActiveSchoolId, getSchoolConfig, loadSchoolData, saveSchoolData, sanitizeSchoolId, switchSchoolWorkspace, getRegisteredSchools } from './utils/schoolConfig';
+import { getActiveSchoolId, setActiveSchoolId, getSchoolConfig, loadSchoolData, saveSchoolData, sanitizeSchoolId, switchSchoolWorkspace, getRegisteredSchools, getValidatedSchoolIdentity, buildSchoolStamp, enforceCanonicalSchoolCacheRepair } from './utils/schoolConfig';
 import { runStartupStorageCheck } from './utils/storageQuota';
-import { purgeDummyData, purgeDummyStudents, isDummyStudent } from './utils/purgeDummyData';
+import { purgeDummyData, purgeDummyStudents, isDummyStudent, deduplicateAndPurgeAllData } from './utils/purgeDummyData';
 import { applyTheme, getIsDarkMode } from './utils/theme';
-import { verifyAndEnforceAccountPrivacy } from './utils/privacyVerification';
+import { ensureSchoolDocumentExists } from './utils/multiSchoolMigration';
 
 import {
   counselors,
-  initialStudents,
   initialViolations,
   initialServices,
   initialLogs,
-  initialHomeVisits,
-  initialAttendanceHistory
+  initialHomeVisits
 } from './data/mockData';
-import { Student, ViolationRecord, CounselingService, BKComponentType, ActivityLog, Counselor, StudentAchievement, PresetServiceData } from './types';
+import { Student, ViolationRecord, CounselingService, BKComponentType, ActivityLog, Counselor, StudentAchievement, PresetServiceData, ProgramEvaluation } from './types';
 import { HeartHandshake, Calendar, Clock, Plus, UserCheck, Download, Edit2, Trash2, CheckCircle2, Search, Filter, Home, Mail, Layers, Info, Sparkles, BookOpen, Target, ShieldAlert, Settings, FileText, Printer, ArrowLeft } from 'lucide-react';
 import { filterStudents, filterViolations, filterServices, filterAchievements, filterHomeVisits, filterLogs } from './utils/accessControl';
 import { BK_COMPONENTS_DATA, getBKComponentForService, getComponentColorConfig, getPilarBadge, SIKLUS_LAYANAN_TERPADU } from './utils/bkKomprehensif';
@@ -68,7 +91,12 @@ import { BK_COMPONENTS_DATA, getBKComponentForService, getComponentColorConfig, 
 export default function App() {
   // Navigation Routing States
   const [currentView, setCurrentView] = useState<string>('dashboard');
+  const [peringatanFilter, setPeringatanFilter] = useState<PeringatanFilterTab>('semua');
   const [preSelectedStudentId, setPreSelectedStudentId] = useState<string | undefined>(undefined);
+  const [violationInitialTab, setViolationInitialTab] = useState<'input' | 'arsip'>('input');
+  const [violationInitialSearch, setViolationInitialSearch] = useState('');
+  const [selectedProfileStudentId, setSelectedProfileStudentId] = useState<string | null>(null);
+  const [previousView, setPreviousView] = useState<string>('dashboard');
   const [presetServiceData, setPresetServiceData] = useState<PresetServiceData | null>(null);
   const [presetJournalData, setPresetJournalData] = useState<{
     className?: string;
@@ -91,21 +119,25 @@ export default function App() {
   });
 
   const [allCounselors, setAllCounselors] = useState<Counselor[]>(() => {
+    enforceCanonicalSchoolCacheRepair();
     const currentSchoolId = getActiveSchoolId();
     let list: Counselor[] = loadSchoolData('bk_counselors', counselors, currentSchoolId);
     if (!list || list.length === 0) {
       list = [...counselors];
     }
 
+    const activeCfg = getSchoolConfig(currentSchoolId);
+    const hasManualOverride = typeof localStorage !== 'undefined' && localStorage.getItem('bk_manual_school_override') === 'true';
+
     // Always guarantee Bapak Aulia Aji Sasongko exists with full privileges as Koordinator BK & Administrator
     let auliaIndex = list.findIndex(c => c.id === 'c1' || c.username === 'aulia' || (c.email && c.email.includes('auliasasongko')) || (c.name && c.name.toLowerCase().includes('aulia')));
     const defaultAulia: Counselor = {
       id: 'c1',
       name: 'Aulia Aji Sasongko, S.Pd.',
-      role: 'Koordinator BK & Administrator Sekolah',
+      role: 'Koordinator BK & Guru Pembimbing Kelas 8',
       nip: 'NIP. 19931231 202221 1 002',
       avatar: counselors.find(c => c.id === 'c1')?.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-      allowedClasses: ['7A', '7B', '7C', '7D', '7E', '7F', '8A', '8B', '8C', '8D', '8E', '8F', '8G', '9A', '9B', '9C', '9D', '9E', '9F', '9G'],
+      allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
       username: 'aulia',
       password: 'aulia',
       email: 'auliasasongko12@guru.smp.belajar.id',
@@ -116,17 +148,27 @@ export default function App() {
     };
 
     if (auliaIndex !== -1) {
+      const storedRole = String(list[auliaIndex].role || '').trim();
+      const safeRole = !storedRole || storedRole.toLowerCase().includes('admin & guru')
+        ? defaultAulia.role
+        : storedRole;
+      const safeSchoolName = hasManualOverride && activeCfg?.schoolName && !activeCfg.schoolName.toLowerCase().includes('kroya')
+        ? activeCfg.schoolName
+        : 'SMP N 2 Susukan';
       list[auliaIndex] = {
         ...defaultAulia,
         ...list[auliaIndex],
         id: 'c1',
-        name: 'Aulia Aji Sasongko, S.Pd.',
-        role: list[auliaIndex].role || 'Koordinator BK & Administrator Sekolah',
+        name: hasManualOverride && activeCfg?.koordinatorBkName ? activeCfg.koordinatorBkName : (list[auliaIndex].name || 'Aulia Aji Sasongko, S.Pd.'),
+        role: safeRole,
         nip: list[auliaIndex].nip && list[auliaIndex].nip !== '-' ? list[auliaIndex].nip : 'NIP. 19931231 202221 1 002',
         username: 'aulia',
         email: 'auliasasongko12@guru.smp.belajar.id',
         phone: list[auliaIndex].phone || '089681287339',
-        allowedClasses: Array.isArray(list[auliaIndex].allowedClasses) ? list[auliaIndex].allowedClasses : []
+        schoolId: hasManualOverride ? currentSchoolId : 'sch_20320123',
+        schoolNpsn: hasManualOverride ? (activeCfg?.npsn || '') : '20320123',
+        schoolName: safeSchoolName,
+        allowedClasses: Array.isArray(list[auliaIndex].allowedClasses) ? list[auliaIndex].allowedClasses : defaultAulia.allowedClasses
       };
     } else {
       list.unshift(defaultAulia);
@@ -189,11 +231,19 @@ export default function App() {
     if (found) {
       const isAulia = found.id === 'c1' || found.username === 'aulia' || (found.name && found.name.toLowerCase().includes('aulia')) || (found.email && found.email.includes('auliasasongko'));
       if (isAulia) {
+        const hasManualOverride = typeof localStorage !== 'undefined' && localStorage.getItem('bk_manual_school_override') === 'true';
+        const cfg = getSchoolConfig(hasManualOverride ? getActiveSchoolId() : 'sch_20320123');
+        const safeRole = found.role && !String(found.role).toLowerCase().includes('admin & guru')
+          ? found.role
+          : 'Koordinator BK & Guru Pembimbing Kelas 8';
         return {
           ...found,
           id: 'c1',
-          name: 'Aulia Aji Sasongko, S.Pd.',
-          role: found.role || 'Koordinator BK & Administrator Sekolah',
+          name: hasManualOverride && cfg?.koordinatorBkName ? cfg.koordinatorBkName : (found.name || 'Aulia Aji Sasongko, S.Pd.'),
+          role: safeRole,
+          schoolId: hasManualOverride ? (cfg.schoolId || 'sch_20320123') : 'sch_20320123',
+          schoolNpsn: hasManualOverride ? (cfg.npsn || '') : '20320123',
+          schoolName: hasManualOverride && cfg?.schoolName && !cfg.schoolName.toLowerCase().includes('kroya') ? cfg.schoolName : 'SMP N 2 Susukan',
           allowedClasses: Array.isArray(found.allowedClasses) ? found.allowedClasses : []
         };
       }
@@ -264,15 +314,19 @@ export default function App() {
   };
 
   const handleCreateCounselor = (newCounselorRaw: Counselor, makeActive: boolean = false) => {
+    const currentSchoolId = activeCounselor?.schoolId || getActiveSchoolId();
+    const targetSchoolId = newCounselorRaw.schoolId || currentSchoolId;
+    const targetSchoolName = newCounselorRaw.schoolName || (targetSchoolId === 'sch_20320123' ? 'SMP N 2 Susukan' : (getSchoolConfig(targetSchoolId).schoolName || 'SMP N 2 Susukan'));
+
     const newCounselor: Counselor = {
       ...newCounselorRaw,
+      schoolId: targetSchoolId,
+      schoolName: targetSchoolName,
       allowedClasses: Array.isArray(newCounselorRaw.allowedClasses) ? newCounselorRaw.allowedClasses : [],
       role: newCounselorRaw.role || 'Guru Pembimbing BK',
       nip: newCounselorRaw.nip || '-',
       avatar: newCounselorRaw.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120'
     };
-    const currentSchoolId = getActiveSchoolId();
-    const targetSchoolId = newCounselor.schoolId || currentSchoolId;
 
     if (targetSchoolId === currentSchoolId) {
       const newList = [...allCounselors.filter(c => c.id !== newCounselor.id), newCounselor];
@@ -294,22 +348,50 @@ export default function App() {
   };
 
   const handleDeleteCounselor = (id: string) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
     if (allCounselors.length <= 1) {
-      alert('Tidak dapat menghapus satu-satunya profil guru pembimbing.');
+      showToast('Tidak dapat menghapus satu-satunya profil guru pembimbing.', 'error');
       return;
     }
     const targetCounselor = allCounselors.find(c => c.id === id);
     const targetSchoolId = targetCounselor?.schoolId || getActiveSchoolId();
-    const newList = allCounselors.filter(c => c.id !== id);
-    setAllCounselors(newList);
-    if (activeCounselor.id === id) {
-      setActiveCounselor(newList[0]);
-      localStorage.setItem('bk_active_counselor_id', newList[0].id);
+    let aborted = false;
+    let nextActiveFallback: Counselor | null = null;
+
+    setAllCounselors(prev => {
+      if (prev.length <= 1) {
+        aborted = true;
+        return prev;
+      }
+      const res = safeFilterSingleDelete(prev, id);
+      if (!res.ok || res.next.length === 0) {
+        aborted = true;
+        return prev;
+      }
+      saveSchoolData('bk_counselors', res.next, targetSchoolId);
+      if (activeCounselor.id === id) {
+        nextActiveFallback = res.next[0];
+      }
+      return res.next;
+    });
+
+    if (aborted) return;
+    if (nextActiveFallback) {
+      setActiveCounselor(nextActiveFallback);
+      localStorage.setItem('bk_active_counselor_id', (nextActiveFallback as Counselor).id);
     }
-    saveSchoolData('bk_counselors', newList, targetSchoolId);
-    deleteFromFirestore('bk_counselors', id, targetSchoolId);
+
+    softDeleteFromFirestore('bk_counselors', targetCounselor || id, {
+      customSchoolId: targetSchoolId,
+      deletedBy: activeCounselor?.name || 'Koordinator BK',
+      entityType: 'Akun Konselor'
+    });
     deleteAccountRequestFromCloud(id, targetSchoolId).catch(console.warn);
     window.dispatchEvent(new Event('storage'));
+    showToast(`Akun "${targetCounselor?.name || 'Konselor'}" berhasil dihapus.`, 'success');
   };
 
   const handleResetToFreshSchool = () => {
@@ -359,7 +441,7 @@ export default function App() {
     saveBulkToFirestore('bk_logs', [], currentSchoolId, true);
 
     window.dispatchEvent(new Event('storage'));
-    alert('Database sekolah berhasil disiapkan! Berkas cadangan otomatis telah diunduh ke komputer Anda. Anda kini dapat mulai mengimpor data siswa atau menambahkan siswa baru untuk sekolah Anda.');
+    showToast('Database sekolah siap! Berkas cadangan otomatis telah diunduh.', 'success');
   };
 
   // Search State
@@ -391,133 +473,258 @@ export default function App() {
     }
 
     const isSmp = sId === 'sch_20320123' || (getSchoolConfig().schoolName || '').toLowerCase().includes('smp');
-    const sanitized = isSmp && filtered.length > 0
-      ? filtered.filter(s => !/^(10|11|12|X|XI|XII)/i.test(String(s.class || '').replace(/kelas\s*/i, '').trim()))
-      : filtered;
+    const deletedSet = new Set(getDeletedIds());
+    const cleanNonDummy = filtered.filter((s) => {
+      if (!s || s.isDeleted === true || deletedSet.has(String(s.id)) || isDummyStudent(s)) return false;
+      if (isSmp && /^(10|11|12|X|XI|XII)/i.test(String(s.class || '').replace(/kelas\s*/i, '').trim())) {
+        return false;
+      }
+      return true;
+    });
 
-    if (sanitized.length === 0 && sId === 'sch_20320123') {
-      saveSchoolData('bk_students', CANONICAL_AULIA_STUDENTS, sId);
-      return CANONICAL_AULIA_STUDENTS;
+    if (cleanNonDummy.length !== loaded.length) {
+      saveSchoolData('bk_students', cleanNonDummy, sId);
     }
 
-    return sanitized;
+    return cleanNonDummy;
   });
 
   const [violations, setViolations] = useState<ViolationRecord[]>(() => {
     const sId = getActiveSchoolId();
-    const loaded = loadSchoolData<ViolationRecord[]>('bk_violations', sId === 'sch_20320123' ? initialViolations : [], sId);
+    const deletedSet = new Set(getDeletedIds());
+    const hasSeeded = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${sId}`) === 'true';
+    const loaded = loadSchoolData<ViolationRecord[]>('bk_violations', [], sId);
     const isSmp = sId === 'sch_20320123' || (getSchoolConfig().schoolName || '').toLowerCase().includes('smp');
-    const sanitized = isSmp && Array.isArray(loaded) && loaded.length > 0
-      ? loaded.filter(v => !/^(10|11|12|X|XI|XII)/i.test(String(v.studentClass || '').replace(/kelas\s*/i, '').trim()))
-      : loaded;
+    const sanitized = Array.isArray(loaded)
+      ? loaded.filter(v => {
+          if (!v || v.isDeleted === true || deletedSet.has(String(v.id))) return false;
+          if (isSmp && /^(10|11|12|X|XI|XII)/i.test(String(v.studentClass || '').replace(/kelas\s*/i, '').trim())) return false;
+          return true;
+        })
+      : [];
 
-    if (sId === 'sch_20320123') {
-      if (!sanitized || sanitized.length === 0) {
-        saveSchoolData('bk_violations', initialViolations, sId);
-        return initialViolations;
-      }
+    if (sId === 'sch_20320123' && !hasSeeded && sanitized.length === 0) {
+      const seed = initialViolations.filter(v => !deletedSet.has(String(v.id)));
+      saveSchoolData('bk_violations', seed, sId);
+      return seed;
     }
-    return sanitized || [];
+    return sanitized;
   });
 
   const [services, setServices] = useState<CounselingService[]>(() => {
     const sId = getActiveSchoolId();
-    const loaded = loadSchoolData<CounselingService[]>('bk_services', sId === 'sch_20320123' ? initialServices : [], sId);
-    if (sId === 'sch_20320123') {
-      if (!loaded || loaded.length === 0) {
-        saveSchoolData('bk_services', initialServices, sId);
-        return initialServices;
-      }
+    const deletedSet = new Set(getDeletedIds());
+    const hasSeeded = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${sId}`) === 'true';
+    const loaded = loadSchoolData<CounselingService[]>('bk_services', [], sId);
+    const sanitized = Array.isArray(loaded)
+      ? loaded.filter(s => s && s.isDeleted !== true && !deletedSet.has(String(s.id)))
+      : [];
+    if (sId === 'sch_20320123' && !hasSeeded && sanitized.length === 0) {
+      const seed = initialServices.filter(s => !deletedSet.has(String(s.id)));
+      saveSchoolData('bk_services', seed, sId);
+      return seed;
     }
-    return loaded || [];
+    return sanitized;
   });
 
   const [logs, setLogs] = useState<ActivityLog[]>(() => {
     const sId = getActiveSchoolId();
-    const loaded = loadSchoolData<ActivityLog[]>('bk_logs', sId === 'sch_20320123' ? initialLogs : [], sId);
-    if (sId === 'sch_20320123') {
-      if (!loaded || loaded.length === 0) {
-        saveSchoolData('bk_logs', initialLogs, sId);
-        return initialLogs;
-      }
+    const deletedSet = new Set(getDeletedIds());
+    const hasSeeded = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${sId}`) === 'true';
+    const loaded = loadSchoolData<ActivityLog[]>('bk_logs', [], sId);
+    const sanitized = Array.isArray(loaded)
+      ? loaded.filter(l => l && l.isDeleted !== true && !deletedSet.has(String(l.id)))
+      : [];
+    if (sId === 'sch_20320123' && !hasSeeded && sanitized.length === 0) {
+      const seed = initialLogs.filter(l => !deletedSet.has(String(l.id)));
+      saveSchoolData('bk_logs', seed, sId);
+      return seed;
     }
-    return Array.isArray(loaded) ? loaded.slice(0, 50) : [];
+    return sanitized.slice(0, 50);
   });
 
   const [achievements, setAchievements] = useState<any[]>(() => {
-    return loadSchoolData('bk_achievements', [], getActiveSchoolId());
+    const deletedSet = new Set(getDeletedIds());
+    const loaded = loadSchoolData<any[]>('bk_achievements', [], getActiveSchoolId());
+    return Array.isArray(loaded) ? loaded.filter(a => a && a.isDeleted !== true && !deletedSet.has(String(a.id))) : [];
   });
 
   const [homeVisits, setHomeVisits] = useState<any[]>(() => {
     const sId = getActiveSchoolId();
-    const loaded = loadSchoolData<any[]>('bk_home_visits', sId === 'sch_20320123' ? initialHomeVisits : [], sId);
-    if (sId === 'sch_20320123') {
-      if (!loaded || loaded.length === 0) {
-        saveSchoolData('bk_home_visits', initialHomeVisits, sId);
-        return initialHomeVisits;
-      }
+    const deletedSet = new Set(getDeletedIds());
+    const hasSeeded = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${sId}`) === 'true';
+    const loaded = loadSchoolData<any[]>('bk_home_visits', [], sId);
+    const sanitized = Array.isArray(loaded)
+      ? loaded.filter(h => h && h.isDeleted !== true && !deletedSet.has(String(h.id)))
+      : [];
+    if (sId === 'sch_20320123' && !hasSeeded && sanitized.length === 0) {
+      const seed = initialHomeVisits.filter(h => !deletedSet.has(String(h.id)));
+      saveSchoolData('bk_home_visits', seed, sId);
+      return seed;
     }
-    return loaded || [];
+    return sanitized;
+  });
+
+  const [programEvaluations, setProgramEvaluations] = useState<ProgramEvaluation[]>(() => {
+    const sId = getActiveSchoolId();
+    const deletedSet = new Set(getDeletedIds());
+    const loaded = loadSchoolData<ProgramEvaluation[]>('bk_program_evaluations', [], sId);
+    return Array.isArray(loaded) ? loaded.filter(e => e && e.isDeleted !== true && !deletedSet.has(String(e.id))) : [];
+  });
+
+  const [serviceEvaluations, setServiceEvaluations] = useState<ProgramEvaluation[]>(() => {
+    const sId = getActiveSchoolId();
+    const deletedSet = new Set(getDeletedIds());
+    const loaded = loadSchoolData<ProgramEvaluation[]>('bk_service_evaluations', [], sId);
+    return Array.isArray(loaded) ? loaded.filter(e => e && e.isDeleted !== true && !deletedSet.has(String(e.id))) : [];
   });
 
   // Modal & Filter states for Layanan BK
   const [editingService, setEditingService] = useState<CounselingService | null>(null);
   const [detailService, setDetailService] = useState<CounselingService | null>(null);
+  const [pendingPostSaveService, setPendingPostSaveService] = useState<CounselingService | null>(null);
+  const [globalEvalServiceTarget, setGlobalEvalServiceTarget] = useState<CounselingService | null>(null);
+  const [deleteConfirmModal, setDeleteConfirmModal] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    step: 1 | 2;
+    onConfirm: () => void;
+  } | null>(null);
   const [serviceStatusFilter, setServiceStatusFilter] = useState<'semua' | 'Terjadwal' | 'Selesai' | 'Dibatalkan'>('semua');
   const [servicePillarFilter, setServicePillarFilter] = useState<'semua' | BKComponentType>('semua');
   const [serviceSearchTerm, setServiceSearchTerm] = useState('');
   const [selectedAbsensiClass, setSelectedAbsensiClass] = useState<string | undefined>(undefined);
 
+  // Global Floating Si Becik states (position, visibility, keyboard hide, persistent toggle, real badge)
+  const [isSiBecikOpen, setIsSiBecikOpen] = useState<boolean>(false);
+  const [siBecikFabEnabled, setSiBecikFabEnabled] = useState<boolean>(() => getLocalSiBecikFabEnabled());
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState<boolean>(false);
+  const [siBecikUnread, setSiBecikUnreadState] = useState<boolean>(() => getSiBecikUnread());
+  const [overdueFollowUpIds, setOverdueFollowUpIds] = useState<string[]>([]);
+  const [seenOverdueIds, setSeenOverdueIds] = useState<string[]>(() => getSeenOverdueIds());
+
+  // Global keyboard & input focus listener so FAB auto-hides when user is typing anywhere
+  useEffect(() => {
+    const isEditableElement = (el: EventTarget | null): boolean => {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      return el.isContentEditable;
+    };
+
+    const handleFocusIn = (e: FocusEvent) => {
+      if (isEditableElement(e.target)) {
+        setIsKeyboardOpen(true);
+      }
+    };
+
+    const handleFocusOut = () => {
+      setTimeout(() => {
+        if (!isEditableElement(document.activeElement)) {
+          setIsKeyboardOpen(false);
+        }
+      }, 80);
+    };
+
+    const handleViewportResize = () => {
+      if (typeof window !== 'undefined' && window.visualViewport) {
+        const keyboardVisible = window.visualViewport.height < window.innerHeight * 0.75;
+        if (keyboardVisible) {
+          setIsKeyboardOpen(true);
+        } else if (!isEditableElement(document.activeElement)) {
+          setIsKeyboardOpen(false);
+        }
+      }
+    };
+
+    document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('focusout', handleFocusOut);
+    window.visualViewport?.addEventListener('resize', handleViewportResize);
+
+    return () => {
+      document.removeEventListener('focusin', handleFocusIn);
+      document.removeEventListener('focusout', handleFocusOut);
+      window.visualViewport?.removeEventListener('resize', handleViewportResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isSiBecikOpen) {
+      setIsKeyboardOpen(false);
+    }
+  }, [isSiBecikOpen, currentView]);
+
+  // Sync Si Becik FAB preference from Firestore userSettings & compute real >14 day overdue follow-ups
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    let cancelled = false;
+    const schoolId = activeCounselor?.schoolId || getActiveSchoolId();
+
+    void loadSiBecikFabSettingsFromFirestore(activeCounselor?.id, schoolId).then((remoteVal) => {
+      if (!cancelled && typeof remoteVal === 'boolean') {
+        setSiBecikFabEnabled(remoteVal);
+      }
+    });
+
+    void fetchOverdueFollowUpIdsFromFirestore(schoolId, serviceEvaluations).then((ids) => {
+      if (!cancelled) {
+        setOverdueFollowUpIds(ids);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isLoggedIn, activeCounselor?.id, activeCounselor?.schoolId, serviceEvaluations]);
+
   // Initialize Firebase Realtime Firestore Synchronization, Theme & Data Setup on mount
   useEffect(() => {
-    resetStudentDeletedIds();
-    clearCanonicalDeletedIds();
     runStartupStorageCheck();
     applyTheme(getIsDarkMode());
 
-    // Enforce student data privacy and clean any foreign records
     const initialSchoolId = getActiveSchoolId();
-    verifyAndEnforceAccountPrivacy(initialSchoolId);
+    const isCanonicalSchool = initialSchoolId === 'sch_20320123';
+    const deletedSet = new Set(getDeletedIds());
+    const hasSeededFlag = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${initialSchoolId}`) === 'true';
 
-    if (initialSchoolId === 'sch_20320123') {
-      const checkStudents = loadSchoolData<Student[]>('bk_students', [], initialSchoolId);
-      if (!Array.isArray(checkStudents) || checkStudents.length === 0) {
-        saveSchoolData('bk_students', CANONICAL_AULIA_STUDENTS, initialSchoolId);
-        setStudents(CANONICAL_AULIA_STUDENTS);
-      } else {
-        setStudents(checkStudents.filter((s) => !isDummyStudent(s)));
-      }
-    } else {
-      const checkStudents = loadSchoolData<Student[]>('bk_students', [], initialSchoolId);
-      if (Array.isArray(checkStudents)) {
-        setStudents(checkStudents.filter((s) => !isDummyStudent(s)));
-      }
+    const rawCheckStudents = loadSchoolData<Student[]>('bk_students', [], initialSchoolId);
+    const cleanLocalStudents = Array.isArray(rawCheckStudents)
+      ? rawCheckStudents.filter((s) => s && s.isDeleted !== true && !deletedSet.has(String(s.id)) && !isDummyStudent(s))
+      : [];
+
+    if (!Array.isArray(rawCheckStudents) || cleanLocalStudents.length !== rawCheckStudents.length) {
+      saveSchoolData('bk_students', cleanLocalStudents, initialSchoolId);
     }
+    setStudents(cleanLocalStudents);
 
-    if (initialSchoolId === 'sch_20320123') {
+    if (isCanonicalSchool && !hasSeededFlag) {
       const checkServices = loadSchoolData<CounselingService[]>('bk_services', [], initialSchoolId);
       if (!checkServices || checkServices.length === 0) {
-        saveSchoolData('bk_services', initialServices, initialSchoolId);
-        setServices(initialServices);
+        const seedS = initialServices.filter(s => !deletedSet.has(String(s.id)));
+        saveSchoolData('bk_services', seedS, initialSchoolId);
+        setServices(seedS);
       }
       const checkViolations = loadSchoolData<ViolationRecord[]>('bk_violations', [], initialSchoolId);
       if (!checkViolations || checkViolations.length === 0) {
-        saveSchoolData('bk_violations', initialViolations, initialSchoolId);
-        setViolations(initialViolations);
+        const seedV = initialViolations.filter(v => !deletedSet.has(String(v.id)));
+        saveSchoolData('bk_violations', seedV, initialSchoolId);
+        setViolations(seedV);
       }
       const checkHomeVisits = loadSchoolData<any[]>('bk_home_visits', [], initialSchoolId);
       if (!checkHomeVisits || checkHomeVisits.length === 0) {
-        saveSchoolData('bk_home_visits', initialHomeVisits, initialSchoolId);
-        setHomeVisits(initialHomeVisits);
+        const seedHv = initialHomeVisits.filter(h => !deletedSet.has(String(h.id)));
+        saveSchoolData('bk_home_visits', seedHv, initialSchoolId);
+        setHomeVisits(seedHv);
       }
       const checkLogs = loadSchoolData<ActivityLog[]>('bk_logs', [], initialSchoolId);
       if (!checkLogs || checkLogs.length === 0) {
-        saveSchoolData('bk_logs', initialLogs, initialSchoolId);
-        setLogs(initialLogs);
+        const seedL = initialLogs.filter(l => !deletedSet.has(String(l.id)));
+        saveSchoolData('bk_logs', seedL, initialSchoolId);
+        setLogs(seedL);
       }
-      const checkAttendance = loadSchoolData<any[]>('bk_attendance_history', [], initialSchoolId);
-      if (!checkAttendance || checkAttendance.length === 0) {
-        saveSchoolData('bk_attendance_history', initialAttendanceHistory, initialSchoolId);
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(`bk_initial_seeded_${initialSchoolId}`, 'true');
       }
     }
     const checkCounselors = loadSchoolData<Counselor[]>('bk_counselors', [], initialSchoolId);
@@ -546,6 +753,9 @@ export default function App() {
     // Initialize & verify Google Drive organized folder structure ('SIKAP-BK/Laporan_Layanan', 'SIKAP-BK/Pelanggaran', 'SIKAP-BK/Jurnal', etc.)
     ensureDriveFolderStructure().catch(console.warn);
 
+    // Multi-sekolah: Ensure collection `schools/{schoolId}` exists
+    ensureSchoolDocumentExists(initialSchoolId).catch(console.warn);
+
     const handleGoogleSessionRestored = (e: any) => {
       const tok = e?.detail?.token;
       ensureDriveFolderStructure(tok, true).catch(console.warn);
@@ -553,8 +763,10 @@ export default function App() {
     window.addEventListener('bk_google_session_restored', handleGoogleSessionRestored as EventListener);
 
     const handleRealtimeSync = (e: any) => {
+      const eventType = e.detail?.type;
       const key = e.detail?.key;
       const data = e.detail?.data;
+      const itemId = e.detail?.itemId;
       const schoolId = e.detail?.schoolId;
       const activeSchoolId = getActiveSchoolId();
 
@@ -564,29 +776,71 @@ export default function App() {
       }
       if (!key) return;
 
+      // Surgical 1-item removal for doc_deleted events (never wipe whole state!)
+      if (eventType === 'doc_deleted' && isValidDeleteId(itemId)) {
+        const cleanTarget = String(itemId).trim();
+        if (key === 'bk_students') {
+          setStudents(prev => safeFilterSingleDelete(prev, cleanTarget).next);
+        } else if (key === 'bk_violations' || key === 'bk_cases') {
+          setViolations(prev => safeFilterSingleDelete(prev, cleanTarget).next);
+        } else if (key === 'bk_services' || key === 'bk_counseling') {
+          setServices(prev => safeFilterSingleDelete(prev, cleanTarget).next);
+        } else if (key === 'bk_logs') {
+          setLogs(prev => safeFilterSingleDelete(prev, cleanTarget).next);
+        } else if (key === 'bk_achievements' || key === 'bk_student_achievements') {
+          setAchievements(prev => safeFilterSingleDelete(prev, cleanTarget).next);
+        } else if (key === 'bk_home_visits') {
+          setHomeVisits(prev => safeFilterSingleDelete(prev, cleanTarget).next);
+        } else if (key === 'bk_program_evaluations') {
+          setProgramEvaluations(prev => safeFilterSingleDelete(prev, cleanTarget).next);
+        } else if (key === 'bk_service_evaluations') {
+          setServiceEvaluations(prev => safeFilterSingleDelete(prev, cleanTarget).next);
+        }
+        return;
+      }
+
+      const isExplicitClear = typeof localStorage !== 'undefined' &&
+        (localStorage.getItem(`bk_cleared_${activeSchoolId}`) === 'true' || localStorage.getItem(`bk_students_cleared_${activeSchoolId}`) === 'true');
+
       const getSafeData = (k: string) => {
         if (Array.isArray(data)) return data;
         return loadSchoolData(k, [], activeSchoolId);
       };
 
+      const applyGuardedSync = <T,>(setter: (fn: (prev: T[]) => T[]) => void, val: T[], allowEmpty = true) => {
+        if (!Array.isArray(val)) return;
+        setter(prev => {
+          if (Array.isArray(prev) && prev.length > 5 && val.length === 0 && !allowEmpty) {
+            return prev;
+          }
+          return val;
+        });
+      };
+
       if (key === 'bk_students') {
         const val = getSafeData('bk_students');
-        if (val) setStudents(val);
-      } else if (key === 'bk_violations') {
+        if (val) applyGuardedSync(setStudents, val, isExplicitClear);
+      } else if (key === 'bk_violations' || key === 'bk_cases') {
         const val = getSafeData('bk_violations');
-        if (val) setViolations(val);
-      } else if (key === 'bk_services') {
+        if (val) applyGuardedSync(setViolations, val, isExplicitClear);
+      } else if (key === 'bk_services' || key === 'bk_counseling') {
         const val = getSafeData('bk_services');
-        if (val) setServices(val);
+        if (val) applyGuardedSync(setServices, val, isExplicitClear);
       } else if (key === 'bk_logs') {
         const val = getSafeData('bk_logs');
         if (val) setLogs(Array.isArray(val) ? val.slice(0, 80) : val);
-      } else if (key === 'bk_achievements') {
+      } else if (key === 'bk_achievements' || key === 'bk_student_achievements') {
         const val = getSafeData('bk_achievements');
-        if (val) setAchievements(val);
+        if (val) applyGuardedSync(setAchievements, val, isExplicitClear);
       } else if (key === 'bk_home_visits') {
         const val = getSafeData('bk_home_visits');
-        if (val) setHomeVisits(val);
+        if (val) applyGuardedSync(setHomeVisits, val, isExplicitClear);
+      } else if (key === 'bk_program_evaluations') {
+        const val = getSafeData('bk_program_evaluations');
+        if (val && Array.isArray(val)) applyGuardedSync(setProgramEvaluations, val, isExplicitClear);
+      } else if (key === 'bk_service_evaluations') {
+        const val = getSafeData('bk_service_evaluations');
+        if (val && Array.isArray(val)) applyGuardedSync(setServiceEvaluations, val, isExplicitClear);
       } else if (key === 'bk_counselors') {
         const val = getSafeData('bk_counselors');
         if (val && Array.isArray(val) && val.length > 0) {
@@ -646,20 +900,25 @@ export default function App() {
       }
     };
 
-    // When switching active school, immediately reload school-isolated states
+    // When switching active school, immediately reload school-isolated states (filter soft-deleted!)
     const handleSchoolChanged = (e: any) => {
       const newSchoolId = e.detail?.schoolId || getActiveSchoolId();
-      verifyAndEnforceAccountPrivacy(newSchoolId);
-      const st = loadSchoolData('bk_students', initialStudents, newSchoolId);
-      setStudents(st && st.length > 0 ? st : initialStudents);
-      const vl = loadSchoolData('bk_violations', initialViolations, newSchoolId);
-      setViolations(vl && vl.length > 0 ? vl : initialViolations);
-      const sv = loadSchoolData('bk_services', initialServices, newSchoolId);
-      setServices(sv && sv.length > 0 ? sv : initialServices);
-      const lg = loadSchoolData('bk_logs', initialLogs, newSchoolId);
-      setLogs(lg && lg.length > 0 ? lg.slice(0, 80) : initialLogs);
-      setAchievements(loadSchoolData('bk_achievements', [], newSchoolId));
-      setHomeVisits(loadSchoolData('bk_home_visits', [], newSchoolId));
+      const delSet = new Set(getDeletedIds());
+      const filterActive = <T extends { id?: any; isDeleted?: boolean }>(arr: T[]): T[] =>
+        Array.isArray(arr) ? arr.filter(it => it && it.isDeleted !== true && !delSet.has(String(it.id))) : [];
+
+      const st = loadSchoolData<Student[]>('bk_students', [], newSchoolId);
+      setStudents(filterActive(st).filter(s => !isDummyStudent(s)));
+      const vl = loadSchoolData<ViolationRecord[]>('bk_violations', [], newSchoolId);
+      setViolations(filterActive(vl));
+      const sv = loadSchoolData<CounselingService[]>('bk_services', [], newSchoolId);
+      setServices(filterActive(sv));
+      const lg = loadSchoolData<ActivityLog[]>('bk_logs', [], newSchoolId);
+      setLogs(filterActive(lg).slice(0, 80));
+      setAchievements(filterActive(loadSchoolData<any[]>('bk_achievements', [], newSchoolId)));
+      setHomeVisits(filterActive(loadSchoolData<any[]>('bk_home_visits', [], newSchoolId)));
+      setProgramEvaluations(filterActive(loadSchoolData<ProgramEvaluation[]>('bk_program_evaluations', [], newSchoolId)));
+      setServiceEvaluations(filterActive(loadSchoolData<ProgramEvaluation[]>('bk_service_evaluations', [], newSchoolId)));
       const loadedCounselors = loadSchoolData('bk_counselors', counselors, newSchoolId);
       if (loadedCounselors && loadedCounselors.length > 0) {
         setAllCounselors(loadedCounselors);
@@ -680,7 +939,7 @@ export default function App() {
         if (baseKey.includes('_sch_')) {
           baseKey = baseKey.split('_sch_')[0];
         }
-        if (['bk_students', 'bk_violations', 'bk_services', 'bk_logs', 'bk_achievements', 'bk_home_visits', 'bk_counselors'].includes(baseKey)) {
+        if (['bk_students', 'bk_violations', 'bk_services', 'bk_logs', 'bk_achievements', 'bk_home_visits', 'bk_program_evaluations', 'bk_service_evaluations', 'bk_counselors'].includes(baseKey)) {
           handleRealtimeSync({ detail: { key: baseKey, schoolId: getActiveSchoolId() } });
         }
       }
@@ -734,6 +993,14 @@ export default function App() {
     saveSchoolData('bk_counselors', allCounselors);
   }, [allCounselors]);
 
+  useEffect(() => {
+    saveSchoolData('bk_program_evaluations', programEvaluations);
+  }, [programEvaluations]);
+
+  useEffect(() => {
+    saveSchoolData('bk_service_evaluations', serviceEvaluations);
+  }, [serviceEvaluations]);
+
   // Background Auto-Sync Trigger when core data changes (debounced to avoid network spikes)
   const isInitialMount = useRef(true);
 
@@ -750,6 +1017,27 @@ export default function App() {
 
     return () => clearTimeout(timer);
   }, [students, violations, services, achievements]);
+
+  const handleOpenSiBecik = () => {
+    setIsSiBecikOpen(true);
+    setSiBecikUnreadState(false);
+    setSiBecikUnread(false);
+    if (overdueFollowUpIds.length > 0) {
+      const updatedSeen = markOverdueIdsSeen(overdueFollowUpIds);
+      setSeenOverdueIds(updatedSeen);
+    }
+  };
+
+  const handleToggleSiBecikFab = (next: boolean) => {
+    setSiBecikFabEnabled(next);
+    void saveSiBecikFabSettings(next, activeCounselor?.id, activeCounselor?.schoolId || getActiveSchoolId());
+    showToast(
+      next
+        ? 'Tombol melayang Si Becik aktif di semua halaman.'
+        : 'Tombol melayang Si Becik disembunyikan. Anda tetap bisa membukanya dari Menu Lainnya > Si Becik.',
+      'info'
+    );
+  };
 
   // Global search navigation trigger
   const handleNavigateToStudentTab = () => {
@@ -769,6 +1057,10 @@ export default function App() {
       period?: string;
     }
   ) => {
+    if (tab === 'si-becik') {
+      handleOpenSiBecik();
+      return;
+    }
     if (tab === 'absensi' && searchQueryOrClass) {
       setSelectedAbsensiClass(searchQueryOrClass);
     }
@@ -790,9 +1082,61 @@ export default function App() {
       setCurrentView('layanan-bk');
     } else if (tab === 'tambah-layanan' || tab === 'input-konseling' || tab === 'layanan-konseling' || tab === 'konseling') {
       setCurrentView('tambah-layanan');
+    } else if (tab === 'pelanggaran' || tab === 'catat-pelanggaran' || tab === 'arsip-pelanggaran' || tab === 'arsip-restitusi') {
+      if (searchQueryOrClass) {
+        setViolationInitialSearch(searchQueryOrClass);
+        setViolationInitialTab('arsip');
+      } else {
+        setViolationInitialTab('arsip');
+        setViolationInitialSearch('');
+      }
+      setCurrentView('pelanggaran');
+    } else if (tab === 'profil-siswa' || tab === 'profil' || tab === 'profile') {
+      if (searchQueryOrClass) {
+        const matched = students.find(
+          (s) =>
+            s.id === searchQueryOrClass ||
+            (s.name && s.name.trim().toLowerCase() === searchQueryOrClass.trim().toLowerCase())
+        );
+        if (matched) {
+          setSelectedProfileStudentId(matched.id);
+        } else {
+          const classMatch = searchQueryOrClass.match(/\((\d+[A-Za-z]?)\)/);
+          if (classMatch) {
+            const cls = classMatch[1];
+            const inClass = students.filter((s) => s.class.includes(cls));
+            if (inClass.length > 0) {
+              const numMatch = searchQueryOrClass.match(/Siswa\s+(\d+)/i);
+              const idx = numMatch ? Math.max(0, parseInt(numMatch[1], 10) - 1) : 0;
+              setSelectedProfileStudentId(inClass[idx % inClass.length].id);
+            }
+          } else {
+            setSelectedProfileStudentId(searchQueryOrClass);
+          }
+        }
+      }
+      setPreviousView(currentView);
+      setCurrentView('profil-siswa');
+    } else if (tab === 'peringatan') {
+      if (
+        searchQueryOrClass === 'restitusi' ||
+        searchQueryOrClass === 'belum-dievaluasi' ||
+        searchQueryOrClass === 'followup' ||
+        searchQueryOrClass === 'semua'
+      ) {
+        setPeringatanFilter(searchQueryOrClass);
+      } else {
+        setPeringatanFilter('semua');
+      }
+      setCurrentView('peringatan');
     } else {
       setCurrentView(tab);
     }
+  };
+
+  // Navigasi cepat langsung ke Profil Siswa Khusus Guru BK
+  const handleNavigateToProfile = (studentIdOrName: string) => {
+    handleNavigateToTab('profil-siswa', studentIdOrName);
   };
 
   // Safe navigation form trigger with contextual student parameter binding
@@ -817,15 +1161,22 @@ export default function App() {
 
   // State trigger: Add standard student
   const handleAddStudent = (newStudent: Omit<Student, 'id' | 'initials'>) => {
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return;
+    }
+
     const nameWords = newStudent.name.trim().split(' ');
     const initials = nameWords.map((w) => w[0]).join('').substring(0, 2).toUpperCase();
 
-    const currentSchoolId = getActiveSchoolId();
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
+    const currentSchoolId = schoolValidation.schoolId;
     const added: Student = {
       ...newStudent,
-      id: `s-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      ...stamp,
+      id: generateUniqueId('s'),
       initials,
-      schoolId: currentSchoolId,
     };
 
     setStudents((prev) => {
@@ -839,10 +1190,16 @@ export default function App() {
 
   // State trigger: Update student profile
   const handleUpdateStudent = (updatedStudent: Student) => {
-    const currentSchoolId = getActiveSchoolId();
+    const currentSchoolId = activeCounselor?.schoolId || getActiveSchoolId();
+    const currentSchoolName = activeCounselor?.schoolName || getSchoolConfig(currentSchoolId).schoolName || 'SMP N 2 Susukan';
     const nameWords = updatedStudent.name.trim().split(' ');
     const initials = nameWords.map((w) => w[0]).join('').substring(0, 2).toUpperCase();
-    const studentWithInitials = { ...updatedStudent, initials, schoolId: currentSchoolId };
+    const studentWithInitials: Student = { 
+      ...updatedStudent, 
+      initials, 
+      schoolId: updatedStudent.schoolId || currentSchoolId,
+      schoolName: updatedStudent.schoolName || currentSchoolName
+    };
 
     setStudents((prev) => {
       const updated = prev.map((s) => (s.id === updatedStudent.id ? studentWithInitials : s));
@@ -853,53 +1210,108 @@ export default function App() {
     showToast(`✅ Profil siswa "${studentWithInitials.name}" berhasil diperbarui!`, 'success');
   };
 
-  // State trigger: Delete student
-  const handleDeleteStudent = (id: string) => {
-    registerDeletedId(id);
-    const updated = students.filter((s) => s.id !== id);
-    setStudents(updated);
-    saveSchoolData('bk_students', updated);
-    deleteFromFirestore('bk_students', id);
+  // State trigger: Soft delete student (persists to Firestore + hapusLog)
+  const executeDeleteStudent = (id: string) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const cleanId = String(id).trim();
+    const currentSchoolId = getActiveSchoolId();
+    const targetStudent = students.find((s) => String(s.id).trim() === cleanId);
+    let aborted = false;
+
+    setStudents((prev) => {
+      const res = safeFilterSingleDelete(prev, cleanId);
+      if (!res.ok) {
+        aborted = true;
+        return prev;
+      }
+      saveSchoolData('bk_students', res.next, currentSchoolId);
+      return res.next;
+    });
+
+    if (aborted) return;
+
+    registerDeletedId(cleanId);
+    softDeleteFromFirestore('bk_students', targetStudent || cleanId, {
+      customSchoolId: currentSchoolId,
+      deletedBy: activeCounselor?.name || 'Koordinator BK',
+      entityType: 'Siswa',
+      studentId: cleanId,
+      studentName: targetStudent?.name,
+      studentClass: targetStudent?.class
+    });
     window.dispatchEvent(new Event('storage'));
+    showToast(`Siswa "${targetStudent?.name || 'terpilih'}" dihapus`, 'success');
   };
 
-  // State trigger: Clear all students and start with a clean slate
+  const handleDeleteStudent = (id: string, skipConfirm: boolean = false) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const targetStudent = students.find((s) => String(s.id).trim() === String(id).trim());
+    if (!targetStudent) return;
+    if (skipConfirm) {
+      executeDeleteStudent(id);
+      return;
+    }
+    setDeleteConfirmModal({
+      title: 'Hapus 1 Data Siswa',
+      message: `Hapus ${targetStudent.name} (${targetStudent.class}) saja? Siswa lain tidak akan terhapus.`,
+      confirmLabel: 'Ya, Hapus 1 Ini Saja',
+      step: 1,
+      onConfirm: () => executeDeleteStudent(id)
+    });
+  };
+
+  // State trigger: Clear all students via bulk soft-delete
   const handleClearAllStudents = () => {
     const currentSchoolId = getActiveSchoolId();
+    const toClear = [...students];
 
-    // Strictly clear student records only. Never wipe violations, services, home visits, or logs!
-    students.forEach((s) => registerDeletedId(s.id));
-
+    toClear.forEach((s) => registerDeletedId(s.id));
     setStudents([]);
 
     localStorage.setItem(`bk_students_cleared_${currentSchoolId}`, 'true');
     localStorage.setItem(`bk_cleared_${currentSchoolId}`, 'true');
     localStorage.setItem('bk_dummy_students_purged', 'true');
     saveSchoolData('bk_students', [], currentSchoolId);
-    saveBulkToFirestore('bk_students', [], currentSchoolId, true);
+    softDeleteBulkStudentsFromFirestore(toClear, activeCounselor?.name || 'Koordinator BK', currentSchoolId);
 
-    window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
-      detail: { key: 'bk_students', data: [], schoolId: currentSchoolId }
-    }));
     window.dispatchEvent(new Event('storage'));
   };
 
   const pushActivityLog = (newLog: ActivityLog) => {
-    setLogs((prev) => [newLog, ...prev.slice(0, 79)]);
-    saveToFirestore('bk_logs', newLog);
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    const stampedLog: ActivityLog = schoolValidation.ok
+      ? { ...buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK'), ...newLog }
+      : newLog;
+    setLogs((prev) => [stampedLog, ...prev.slice(0, 79)]);
+    if (schoolValidation.ok) {
+      saveToFirestore('bk_logs', stampedLog, schoolValidation.schoolId);
+    }
   };
 
   // State trigger: Record violation and update scores & activity feeds
   const handleSaveViolation = (newViolation: Omit<ViolationRecord, 'id' | 'ticketId'>) => {
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return;
+    }
+
     const randomTicketNum = Math.floor(1000 + Math.random() * 9000);
     const generatedTicketId = `PLG-${new Date().getFullYear()}-${randomTicketNum}`;
-    const currentSchoolId = getActiveSchoolId();
+    const currentSchoolId = schoolValidation.schoolId;
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || newViolation.reportedBy || 'Guru BK');
 
     const added: ViolationRecord = {
       ...newViolation,
-      id: `v-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      ...stamp,
+      id: generateUniqueId('v'),
       ticketId: generatedTicketId,
-      schoolId: currentSchoolId,
       counselorId: activeCounselor?.id,
       reportedBy: newViolation.reportedBy || activeCounselor?.name || 'Guru BK',
     };
@@ -988,6 +1400,11 @@ export default function App() {
     className: string,
     pointWeight: number
   ) => {
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return 0;
+    }
     let syncedCount = 0;
 
     // Identify alpa students and non-alpa students
@@ -1047,7 +1464,9 @@ export default function App() {
         const randomTicketNum = Math.floor(1000 + Math.random() * 9000);
         const generatedTicketId = `PLG-${new Date().getFullYear()}-${randomTicketNum}`;
 
+        const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
         const newV: ViolationRecord = {
+          ...stamp,
           id: `v-att-${rec.studentId}-${date}-${Date.now()}`,
           ticketId: generatedTicketId,
           studentId: rec.studentId,
@@ -1063,8 +1482,6 @@ export default function App() {
             ? `Absensi Alpa: ${rec.notes}`
             : `Tidak masuk tanpa keterangan pada tanggal ${date} (Diinput via Absensi Harian)`,
           handledBy: 'Belum Ditangani',
-          handlingProgress: 'Disinkronkan otomatis dari Absensi Harian.',
-          schoolId: getActiveSchoolId(),
           counselorId: activeCounselor?.id,
         };
 
@@ -1129,11 +1546,18 @@ export default function App() {
 
   // State trigger: Record counseling session, update services count and activity logs
   const handleSaveService = (newService: Omit<CounselingService, 'id'>) => {
-    const currentSchoolId = getActiveSchoolId();
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return;
+    }
+
+    const currentSchoolId = schoolValidation.schoolId;
+    const stamp = buildSchoolStamp(schoolValidation, newService.counselorName || activeCounselor?.name || 'Guru BK');
     const added: CounselingService = {
       ...newService,
-      id: `srv-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
-      schoolId: currentSchoolId,
+      ...stamp,
+      id: (newService as Partial<CounselingService>).id || generateUniqueId('srv'),
     };
 
     // Update counseling list & sync directly to local school storage
@@ -1237,18 +1661,26 @@ export default function App() {
       console.warn('Auto-archive service to Drive note:', driveErr);
     });
 
-    // Reset pre-selected parameters (do not force dashboard so success screen displays)
+    // Reset pre-selected parameters and IMMEDIATELY show post-save Evaluasi Layanan prompt
     setPreSelectedStudentId(undefined);
+    setPendingPostSaveService(added);
   };
 
   const handleSaveAchievement = (newAchievement: any) => {
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return;
+    }
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
     const added = {
       ...newAchievement,
-      id: `ach-${Date.now()}-${Math.floor(Math.random() * 100000)}`
+      ...stamp,
+      id: generateUniqueId('ach')
     };
 
     setAchievements((prev) => [added, ...prev]);
-    saveToFirestore('bk_achievements', added);
+    saveToFirestore('bk_achievements', added, schoolValidation.schoolId);
 
     // Update associated student achievementPoints
     setStudents((prevStudents) =>
@@ -1411,47 +1843,88 @@ export default function App() {
     }
   };
 
-  const handleDeleteViolation = (id: string) => {
-    const violationToDelete = violations.find(v => v.id === id);
+  const executeDeleteViolation = (id: string) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const cleanId = String(id).trim();
+    const currentSchoolId = getActiveSchoolId();
+    const violationToDelete = violations.find(v => String(v.id).trim() === cleanId);
     if (!violationToDelete) return;
 
-    if (confirm('Apakah Anda yakin ingin menghapus catatan pelanggaran ini? Bobot pelanggaran siswa terkait akan berkurang secara otomatis.')) {
-      registerDeletedId(id);
-      const updatedViolations = violations.filter(v => v.id !== id);
-      setViolations(updatedViolations);
-      saveSchoolData('bk_violations', updatedViolations);
-      deleteFromFirestore('bk_violations', id);
+    let aborted = false;
+    setViolations(prev => {
+      const res = safeFilterSingleDelete(prev, cleanId);
+      if (!res.ok) {
+        aborted = true;
+        return prev;
+      }
+      saveSchoolData('bk_violations', res.next, currentSchoolId);
+      return res.next;
+    });
 
-      const updatedStudents = students.map(student => {
+    if (aborted) return;
+
+    registerDeletedId(cleanId);
+    softDeleteFromFirestore('bk_violations', violationToDelete, {
+      customSchoolId: currentSchoolId,
+      deletedBy: activeCounselor?.name || 'Guru BK',
+      entityType: 'Kasus / Pelanggaran'
+    });
+
+    setStudents(prevStudents => {
+      const updatedStudents = prevStudents.map(student => {
         if (student.id === violationToDelete.studentId) {
           const upd = {
             ...student,
             violationPoints: Math.max(0, student.violationPoints - violationToDelete.pointsAdded)
           };
-          saveToFirestore('bk_students', upd);
+          saveToFirestore('bk_students', upd, currentSchoolId);
           return upd;
         }
         return student;
       });
-      setStudents(updatedStudents);
-      saveSchoolData('bk_students', updatedStudents);
+      saveSchoolData('bk_students', updatedStudents, currentSchoolId);
+      return updatedStudents;
+    });
 
-      const today = new Date();
-      const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(today.getMinutes()).padStart(2, '0')}`;
-      const timeLabel = `HARI INI, ${formattedHour}`;
-      const newLog: ActivityLog = {
-        id: `log-${Date.now()}`,
-        timeLabel,
-        type: 'violation',
-        title: `Hapus Pelanggaran: ${violationToDelete.category}`,
-        description: `Catatan pelanggaran ${violationToDelete.studentName} (${violationToDelete.studentClass}) telah dihapus. Bobot dikurangi: -${violationToDelete.pointsAdded}.`,
-        studentName: violationToDelete.studentName,
-        studentClass: violationToDelete.studentClass,
-        timestamp: new Date(),
-      };
-      pushActivityLog(newLog);
-      window.dispatchEvent(new Event('storage'));
+    const today = new Date();
+    const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(today.getMinutes()).padStart(2, '0')}`;
+    const timeLabel = `HARI INI, ${formattedHour}`;
+    const newLog: ActivityLog = {
+      id: generateUniqueId('log'),
+      timeLabel,
+      type: 'violation',
+      title: `Hapus Pelanggaran: ${violationToDelete.category}`,
+      description: `Catatan pelanggaran ${violationToDelete.studentName} (${violationToDelete.studentClass}) telah dihapus. Bobot dikurangi: -${violationToDelete.pointsAdded}.`,
+      studentName: violationToDelete.studentName,
+      studentClass: violationToDelete.studentClass,
+      timestamp: new Date(),
+    };
+    pushActivityLog(newLog);
+    window.dispatchEvent(new Event('storage'));
+    showToast(`Kasus "${violationToDelete.category}" berhasil dihapus`, 'success');
+  };
+
+  const handleDeleteViolation = (id: string, skipConfirm: boolean = false) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
     }
+    const violationToDelete = violations.find(v => String(v.id).trim() === String(id).trim());
+    if (!violationToDelete) return;
+    if (skipConfirm) {
+      executeDeleteViolation(id);
+      return;
+    }
+    setDeleteConfirmModal({
+      title: 'Hapus 1 Catatan Kasus / Pelanggaran',
+      message: `Hapus kasus "${violationToDelete.category}" milik ${violationToDelete.studentName} (${violationToDelete.studentClass}) saja? Kasus lain tidak akan terhapus.`,
+      confirmLabel: 'Ya, Hapus 1 Ini Saja',
+      step: 1,
+      onConfirm: () => executeDeleteViolation(id)
+    });
   };
 
   const handleUpdateViolation = (updated: ViolationRecord) => {
@@ -1502,50 +1975,92 @@ export default function App() {
     pushActivityLog(newLog);
   };
 
-  const handleDeleteService = (id: string) => {
-    const serviceToDelete = services.find(s => s.id === id);
+  const executeDeleteService = (id: string) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const cleanId = String(id).trim();
+    const currentSchoolId = getActiveSchoolId();
+    const serviceToDelete = services.find(s => String(s.id).trim() === cleanId);
     if (!serviceToDelete) return;
 
-    if (confirm('Apakah Anda yakin ingin menghapus rekam layanan BK ini? Jumlah riwayat layanan siswa terkait akan berkurang secara otomatis.')) {
-      registerDeletedId(id);
-      const updatedServices = services.filter(s => s.id !== id);
-      setServices(updatedServices);
-      saveSchoolData('bk_services', updatedServices);
-      deleteFromFirestore('bk_services', id);
+    let aborted = false;
+    setServices(prev => {
+      const res = safeFilterSingleDelete(prev, cleanId);
+      if (!res.ok) {
+        aborted = true;
+        return prev;
+      }
+      saveSchoolData('bk_services', res.next, currentSchoolId);
+      return res.next;
+    });
 
-      const participantIds = serviceToDelete.students.map(s => s.id);
-      const updatedStudents = students.map(student => {
+    if (aborted) return;
+
+    registerDeletedId(cleanId);
+    softDeleteFromFirestore('bk_services', serviceToDelete, {
+      customSchoolId: currentSchoolId,
+      deletedBy: activeCounselor?.name || 'Guru BK',
+      entityType: 'Layanan BK'
+    });
+
+    const participantIds = (serviceToDelete.students || []).map(s => s.id);
+    setStudents(prevStudents => {
+      const updatedStudents = prevStudents.map(student => {
         if (participantIds.includes(student.id)) {
           const upd = {
             ...student,
             bkServicesCount: Math.max(0, student.bkServicesCount - 1)
           };
-          saveToFirestore('bk_students', upd);
+          saveToFirestore('bk_students', upd, currentSchoolId);
           return upd;
         }
         return student;
       });
-      setStudents(updatedStudents);
-      saveSchoolData('bk_students', updatedStudents);
+      saveSchoolData('bk_students', updatedStudents, currentSchoolId);
+      return updatedStudents;
+    });
 
-      const today = new Date();
-      const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(today.getMinutes()).padStart(2, '0')}`;
-      const timeLabel = `HARI INI, ${formattedHour}`;
-      const primaryStudentName = serviceToDelete.students[0]?.name || 'Siswa';
-      const primaryStudentClass = serviceToDelete.students[0]?.class || '';
-      const newLog: ActivityLog = {
-        id: `log-${Date.now()}`,
-        timeLabel,
-        type: 'counseling',
-        title: `Hapus Layanan BK`,
-        description: `Arsip sesi layanan bimbingan dengan ${primaryStudentName} telah dihapus.`,
-        studentName: primaryStudentName,
-        studentClass: primaryStudentClass,
-        timestamp: new Date(),
-      };
-      pushActivityLog(newLog);
-      window.dispatchEvent(new Event('storage'));
+    const today = new Date();
+    const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(today.getMinutes()).padStart(2, '0')}`;
+    const timeLabel = `HARI INI, ${formattedHour}`;
+    const primaryStudentName = serviceToDelete.students[0]?.name || 'Siswa';
+    const primaryStudentClass = serviceToDelete.students[0]?.class || '';
+    const newLog: ActivityLog = {
+      id: generateUniqueId('log'),
+      timeLabel,
+      type: 'counseling',
+      title: `Hapus Layanan BK`,
+      description: `Arsip sesi layanan bimbingan dengan ${primaryStudentName} telah dihapus.`,
+      studentName: primaryStudentName,
+      studentClass: primaryStudentClass,
+      timestamp: new Date(),
+    };
+    pushActivityLog(newLog);
+    window.dispatchEvent(new Event('storage'));
+    showToast(`Layanan "${serviceToDelete.serviceType}" berhasil dihapus`, 'success');
+  };
+
+  const handleDeleteService = (id: string, skipConfirm: boolean = false) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
     }
+    const serviceToDelete = services.find(s => String(s.id).trim() === String(id).trim());
+    if (!serviceToDelete) return;
+    if (skipConfirm) {
+      executeDeleteService(id);
+      return;
+    }
+    const primaryStudentName = serviceToDelete.students[0]?.name || 'Siswa';
+    setDeleteConfirmModal({
+      title: 'Hapus 1 Rekam Layanan BK',
+      message: `Hapus layanan "${serviceToDelete.serviceType}" untuk ${primaryStudentName} saja? Layanan lain tidak akan terhapus.`,
+      confirmLabel: 'Ya, Hapus 1 Ini Saja',
+      step: 1,
+      onConfirm: () => executeDeleteService(id)
+    });
   };
 
   const handleUpdateService = (updated: CounselingService) => {
@@ -1592,47 +2107,88 @@ export default function App() {
     pushActivityLog(newLog);
   };
 
-  const handleDeleteAchievement = (id: string) => {
-    const achToDelete = achievements.find(a => a.id === id);
+  const executeDeleteAchievement = (id: string) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const cleanId = String(id).trim();
+    const currentSchoolId = getActiveSchoolId();
+    const achToDelete = achievements.find(a => String(a.id).trim() === cleanId);
     if (!achToDelete) return;
 
-    if (confirm('Apakah Anda yakin ingin menghapus bobot apresiasi ini? Bobot apresiasi siswa terkait akan berkurang secara otomatis.')) {
-      registerDeletedId(id);
-      const updatedAchievements = achievements.filter(a => a.id !== id);
-      setAchievements(updatedAchievements);
-      saveSchoolData('bk_achievements', updatedAchievements);
-      deleteFromFirestore('bk_achievements', id);
+    let aborted = false;
+    setAchievements(prev => {
+      const res = safeFilterSingleDelete(prev, cleanId);
+      if (!res.ok) {
+        aborted = true;
+        return prev;
+      }
+      saveSchoolData('bk_achievements', res.next, currentSchoolId);
+      return res.next;
+    });
 
-      const updatedStudents = students.map(student => {
+    if (aborted) return;
+
+    registerDeletedId(cleanId);
+    softDeleteFromFirestore('bk_achievements', achToDelete, {
+      customSchoolId: currentSchoolId,
+      deletedBy: activeCounselor?.name || 'Guru BK',
+      entityType: 'Prestasi / Apresiasi'
+    });
+
+    setStudents(prevStudents => {
+      const updatedStudents = prevStudents.map(student => {
         if (student.id === achToDelete.studentId) {
           const upd = {
             ...student,
             achievementPoints: Math.max(0, (student.achievementPoints || 0) - achToDelete.pointsReward)
           };
-          saveToFirestore('bk_students', upd);
+          saveToFirestore('bk_students', upd, currentSchoolId);
           return upd;
         }
         return student;
       });
-      setStudents(updatedStudents);
-      saveSchoolData('bk_students', updatedStudents);
+      saveSchoolData('bk_students', updatedStudents, currentSchoolId);
+      return updatedStudents;
+    });
 
-      const today = new Date();
-      const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(today.getMinutes()).padStart(2, '0')}`;
-      const timeLabel = `HARI INI, ${formattedHour}`;
-      const newLog: ActivityLog = {
-        id: `log-${Date.now()}`,
-        timeLabel,
-        type: 'attendance',
-        title: `Hapus Apresiasi: ${achToDelete.achievementName}`,
-        description: `Bobot apresiasi untuk ${achToDelete.studentName} (${achToDelete.studentClass}) telah dihapus. Bobot dikurangi: -${achToDelete.pointsReward}.`,
-        studentName: achToDelete.studentName,
-        studentClass: achToDelete.studentClass,
-        timestamp: new Date(),
-      };
-      pushActivityLog(newLog);
-      window.dispatchEvent(new Event('storage'));
+    const today = new Date();
+    const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(today.getMinutes()).padStart(2, '0')}`;
+    const timeLabel = `HARI INI, ${formattedHour}`;
+    const newLog: ActivityLog = {
+      id: generateUniqueId('log'),
+      timeLabel,
+      type: 'attendance',
+      title: `Hapus Apresiasi: ${achToDelete.achievementName}`,
+      description: `Bobot apresiasi untuk ${achToDelete.studentName} (${achToDelete.studentClass}) telah dihapus. Bobot dikurangi: -${achToDelete.pointsReward}.`,
+      studentName: achToDelete.studentName,
+      studentClass: achToDelete.studentClass,
+      timestamp: new Date(),
+    };
+    pushActivityLog(newLog);
+    window.dispatchEvent(new Event('storage'));
+    showToast(`Apresiasi "${achToDelete.achievementName}" berhasil dihapus`, 'success');
+  };
+
+  const handleDeleteAchievement = (id: string, skipConfirm: boolean = false) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
     }
+    const achToDelete = achievements.find(a => String(a.id).trim() === String(id).trim());
+    if (!achToDelete) return;
+    if (skipConfirm) {
+      executeDeleteAchievement(id);
+      return;
+    }
+    setDeleteConfirmModal({
+      title: 'Hapus 1 Bobot Apresiasi',
+      message: `Hapus apresiasi "${achToDelete.achievementName}" milik ${achToDelete.studentName} (${achToDelete.studentClass}) saja? Apresiasi lain tidak akan terhapus.`,
+      confirmLabel: 'Ya, Hapus 1 Ini Saja',
+      step: 1,
+      onConfirm: () => executeDeleteAchievement(id)
+    });
   };
 
   const handleUpdateAchievement = (updated: any) => {
@@ -1673,6 +2229,147 @@ export default function App() {
       timestamp: new Date(),
     };
     pushActivityLog(newLog);
+  };
+
+  const handleSaveEvaluation = (evaluation: ProgramEvaluation) => {
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return;
+    }
+    const currentSchoolId = schoolValidation.schoolId;
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK', evaluation.createdAt);
+    const stamped: ProgramEvaluation = {
+      ...evaluation,
+      ...stamp,
+    };
+    setProgramEvaluations((prev) => {
+      const exists = prev.some((e) => e.id === stamped.id);
+      const next = exists
+        ? prev.map((e) => (e.id === stamped.id ? stamped : e))
+        : [stamped, ...prev];
+      saveSchoolData('bk_program_evaluations', next, currentSchoolId);
+      return next;
+    });
+    saveToFirestore('bk_program_evaluations', stamped, currentSchoolId);
+  };
+
+  const executeDeleteEvaluation = (id: string) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const cleanId = String(id).trim();
+    const currentSchoolId = getActiveSchoolId();
+    const targetEval = programEvaluations.find(e => String(e.id).trim() === cleanId);
+    let aborted = false;
+
+    setProgramEvaluations((prev) => {
+      const res = safeFilterSingleDelete(prev, cleanId);
+      if (!res.ok) {
+        aborted = true;
+        return prev;
+      }
+      saveSchoolData('bk_program_evaluations', res.next, currentSchoolId);
+      return res.next;
+    });
+
+    if (aborted) return;
+
+    registerDeletedId(cleanId);
+    softDeleteFromFirestore('bk_program_evaluations', targetEval || cleanId, {
+      customSchoolId: currentSchoolId,
+      deletedBy: activeCounselor?.name || 'Guru BK',
+      entityType: 'Evaluasi Program'
+    });
+    showToast('1 evaluasi program berhasil dihapus', 'success');
+  };
+
+  const handleDeleteEvaluation = (id: string) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const targetEval = programEvaluations.find(e => String(e.id).trim() === String(id).trim());
+    const label = targetEval?.namaProgram || targetEval?.bidang || 'evaluasi program ini';
+    setDeleteConfirmModal({
+      title: 'Hapus 1 Evaluasi Program',
+      message: `Hapus "${label}" saja? Evaluasi lain tidak akan terhapus.`,
+      confirmLabel: 'Ya, Hapus 1 Ini Saja',
+      step: 1,
+      onConfirm: () => executeDeleteEvaluation(id)
+    });
+  };
+
+  const handleSaveServiceEvaluation = (evaluation: ProgramEvaluation) => {
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
+      return;
+    }
+    const currentSchoolId = schoolValidation.schoolId;
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK', evaluation.createdAt);
+    const stamped: ProgramEvaluation = {
+      ...evaluation,
+      ...stamp,
+      evaluationScope: 'layanan',
+    };
+    setServiceEvaluations((prev) => {
+      const exists = prev.some((e) => e.id === stamped.id);
+      const next = exists
+        ? prev.map((e) => (e.id === stamped.id ? stamped : e))
+        : [stamped, ...prev];
+      saveSchoolData('bk_service_evaluations', next, currentSchoolId);
+      return next;
+    });
+    saveToFirestore('bk_service_evaluations', stamped, currentSchoolId);
+  };
+
+  const executeDeleteServiceEvaluation = (id: string) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const cleanId = String(id).trim();
+    const currentSchoolId = getActiveSchoolId();
+    const targetEval = serviceEvaluations.find(e => String(e.id).trim() === cleanId);
+    let aborted = false;
+
+    setServiceEvaluations((prev) => {
+      const res = safeFilterSingleDelete(prev, cleanId);
+      if (!res.ok) {
+        aborted = true;
+        return prev;
+      }
+      saveSchoolData('bk_service_evaluations', res.next, currentSchoolId);
+      return res.next;
+    });
+
+    if (aborted) return;
+
+    registerDeletedId(cleanId);
+    softDeleteFromFirestore('bk_service_evaluations', targetEval || cleanId, {
+      customSchoolId: currentSchoolId,
+      deletedBy: activeCounselor?.name || 'Guru BK',
+      entityType: 'Evaluasi Layanan'
+    });
+    showToast('1 evaluasi layanan berhasil dihapus', 'success');
+  };
+
+  const handleDeleteServiceEvaluation = (id: string) => {
+    if (!isValidDeleteId(id)) {
+      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+      return;
+    }
+    const targetEval = serviceEvaluations.find(e => String(e.id).trim() === String(id).trim());
+    const label = targetEval?.namaProgram || targetEval?.bidang || 'evaluasi layanan ini';
+    setDeleteConfirmModal({
+      title: 'Hapus 1 Evaluasi Layanan',
+      message: `Hapus "${label}" saja? Evaluasi lain tidak akan terhapus.`,
+      confirmLabel: 'Ya, Hapus 1 Ini Saja',
+      step: 1,
+      onConfirm: () => executeDeleteServiceEvaluation(id)
+    });
   };
 
   // State trigger: Handle imported Google database sync
@@ -1755,12 +2452,17 @@ export default function App() {
             services={filteredServices}
             logs={filteredLogs}
             achievements={filteredAchievements}
+            serviceEvaluations={serviceEvaluations}
+            programEvaluations={programEvaluations}
             activeCounselor={activeCounselor}
             onNavigateToTab={handleNavigateToTab}
             onNavigateToForm={handleNavigateToForm}
             onUpdateViolationStatus={handleUpdateViolationStatus}
             onUpdateServiceStatus={handleUpdateServiceStatus}
             onEditService={(srv) => setEditingService(srv)}
+            onEvaluateService={(srv) => setGlobalEvalServiceTarget(srv)}
+            onSaveServiceEvaluation={handleSaveServiceEvaluation}
+            onLogout={handleLogout}
           />
         );
       case 'absensi':
@@ -1772,6 +2474,7 @@ export default function App() {
             onAddActivityLog={handleAddAttendanceActivityLog}
             onAttendanceChanged={() => triggerBackgroundAutoSync()}
             onSyncAttendanceViolations={handleSyncAttendanceViolations}
+            onBackToDashboard={() => setCurrentView('dashboard')}
           />
         );
       case 'data-siswa':
@@ -1782,18 +2485,20 @@ export default function App() {
             services={filteredServices}
             achievements={filteredAchievements}
             onSaveAchievement={handleSaveAchievement}
-            onDeleteViolation={handleDeleteViolation}
+            onDeleteViolation={(id) => handleDeleteViolation(id, true)}
             onUpdateViolation={handleUpdateViolation}
-            onDeleteService={handleDeleteService}
+            onDeleteService={(id) => handleDeleteService(id, true)}
             onUpdateService={handleUpdateService}
-            onDeleteAchievement={handleDeleteAchievement}
+            onDeleteAchievement={(id) => handleDeleteAchievement(id, true)}
             onUpdateAchievement={handleUpdateAchievement}
             activeCounselor={activeCounselor}
             onAddStudent={handleAddStudent}
             onUpdateStudent={handleUpdateStudent}
-            onDeleteStudent={handleDeleteStudent}
+            onDeleteStudent={(id) => handleDeleteStudent(id, true)}
             onClearAllStudents={handleClearAllStudents}
             onNavigateToForm={handleNavigateToForm}
+            onNavigateToProfile={handleNavigateToProfile}
+            onNavigateToTab={handleNavigateToTab}
             searchQuery={searchQuery}
             setSearchQuery={setSearchQuery}
           />
@@ -1806,11 +2511,14 @@ export default function App() {
             violations={filteredViolations}
             activeCounselor={activeCounselor}
             preSelectedStudentId={preSelectedStudentId}
+            initialTab={violationInitialTab}
+            initialArchiveSearch={violationInitialSearch}
+            onNavigateToProfile={handleNavigateToProfile}
             onSaveViolation={handleSaveViolation}
             onUpdateViolation={handleUpdateViolation}
-            onDeleteViolation={handleDeleteViolation}
+            onDeleteViolation={(id) => handleDeleteViolation(id, true)}
             onUpdateStudent={handleUpdateStudent}
-            onDeleteStudent={handleDeleteStudent}
+            onDeleteStudent={(id) => handleDeleteStudent(id, true)}
             onCreateFollowUpCounseling={(data) => {
               const studentId = data.students[0]?.id;
               setPresetServiceData({
@@ -1847,10 +2555,10 @@ export default function App() {
             activeCounselor={activeCounselor}
             preSelectedStudentId={preSelectedStudentId}
             onSaveAchievement={handleSaveAchievement}
-            onDeleteAchievement={handleDeleteAchievement}
+            onDeleteAchievement={(id) => handleDeleteAchievement(id, true)}
             onUpdateAchievement={handleUpdateAchievement}
             onUpdateStudent={handleUpdateStudent}
-            onDeleteStudent={handleDeleteStudent}
+            onDeleteStudent={(id) => handleDeleteStudent(id, true)}
             onCancel={() => {
               setPreSelectedStudentId(undefined);
               setCurrentView('dashboard');
@@ -2236,6 +2944,7 @@ export default function App() {
 
                           const pilarName = srv.bkComponent || getBKComponentForService(srv.serviceType);
                           const pilarBadgeInfo = getPilarBadge(pilarName);
+                          const isServiceEvaluated = serviceEvaluations.some((ev) => ev.serviceId === srv.id);
 
                           return (
                             <div
@@ -2248,6 +2957,14 @@ export default function App() {
                                     <span className="text-xs bg-[#eff4ff] text-[#00685f] font-extrabold px-2.5 py-1 rounded-lg">
                                       {srv.serviceType}
                                     </span>
+                                    {!isServiceEvaluated && (
+                                      <span
+                                        className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300"
+                                        title="Badge terkunci sampai Evaluasi Layanan diisi"
+                                      >
+                                        Belum Dievaluasi
+                                      </span>
+                                    )}
                                     <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-md border ${pilarBadgeInfo.badgeClass}`}>
                                       {pilarBadgeInfo.pilar}
                                     </span>
@@ -2327,17 +3044,9 @@ export default function App() {
                               </div>
 
                               <div className="mt-4 pt-3 border-t border-[#bcc9c6]/10 space-y-3">
-                                <div className="flex justify-between items-center text-[10px] font-bold text-gray-500">
-                                  <div className="flex items-center gap-1">
-                                    <Calendar className="w-3.5 h-3.5 text-[#00685f]" />
-                                    <span>{srv.date}</span>
-                                  </div>
-                                  <div className="flex items-center gap-1">
-                                    <Clock className="w-3.5 h-3.5 text-[#00685f]" />
-                                    <span>
-                                      {srv.startTime} - {srv.endTime} WIB
-                                    </span>
-                                  </div>
+                                <div className="flex items-center gap-1.5 text-[11px] font-bold text-gray-600">
+                                  <Calendar className="w-3.5 h-3.5 text-[#00685f]" />
+                                  <span>{formatCardDateTime(srv.date, srv.startTime)}</span>
                                 </div>
 
                                 {/* Quick Action Controls */}
@@ -2383,6 +3092,17 @@ export default function App() {
                                       >
                                         <CheckCircle2 className="w-3 h-3" />
                                         <span>Selesaikan</span>
+                                      </button>
+                                    )}
+
+                                    {!isServiceEvaluated && (
+                                      <button
+                                        onClick={() => setGlobalEvalServiceTarget(srv)}
+                                        className="py-1.5 px-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 transition-all cursor-pointer shadow-xs active:scale-97"
+                                        title="Nilai Layanan Ini Sekarang"
+                                      >
+                                        <Sparkles className="w-3 h-3" />
+                                        <span>Nilai</span>
                                       </button>
                                     )}
                                   </div>
@@ -2444,11 +3164,15 @@ export default function App() {
           <RiwayatLayananView
             services={filteredServices}
             students={filteredStudents}
+            serviceEvaluations={serviceEvaluations}
             activeCounselor={activeCounselor}
             onNavigateToTab={handleNavigateToTab}
             onNavigateToForm={handleNavigateToForm}
             onEditService={(srv) => setEditingService(srv)}
+            onUpdateService={handleUpdateService}
+            onSaveServiceEvaluation={handleSaveServiceEvaluation}
             onDeleteService={handleDeleteService}
+            onEvaluateService={(srv) => setGlobalEvalServiceTarget(srv)}
           />
         );
       case 'asesmen-bk':
@@ -2498,9 +3222,44 @@ export default function App() {
             violations={filteredViolations}
             achievements={filteredAchievements}
             homeVisits={filteredHomeVisits}
+            programEvaluations={programEvaluations}
             activeCounselor={activeCounselor}
             onNavigateToForm={handleNavigateToForm}
+            onNavigateToTab={handleNavigateToTab}
             onNavigateToStudioPdf={() => setCurrentView('studio-pdf')}
+            onNavigateToEvaluasi={() => setCurrentView('evaluasi-program')}
+            onUpdateViolationStatus={handleUpdateViolationStatus}
+            onUpdateServiceStatus={handleUpdateServiceStatus}
+          />
+        );
+      case 'peringatan':
+        return (
+          <PeringatanView
+            students={filteredStudents}
+            violations={filteredViolations}
+            services={filteredServices}
+            serviceEvaluations={serviceEvaluations}
+            activeCounselor={activeCounselor}
+            initialFilter={peringatanFilter}
+            onNavigateToTab={handleNavigateToTab}
+            onEvaluateService={(srv) => setGlobalEvalServiceTarget(srv)}
+            onSaveServiceEvaluation={handleSaveServiceEvaluation}
+          />
+        );
+      case 'evaluasi-program':
+      case 'evaluasi':
+        return (
+          <EvaluasiProgramView
+            evaluations={programEvaluations}
+            serviceEvaluations={serviceEvaluations}
+            services={filteredServices}
+            students={filteredStudents}
+            activeCounselor={activeCounselor}
+            onSaveEvaluation={handleSaveEvaluation}
+            onDeleteEvaluation={handleDeleteEvaluation}
+            onSaveServiceEvaluation={handleSaveServiceEvaluation}
+            onDeleteServiceEvaluation={handleDeleteServiceEvaluation}
+            onBack={() => setCurrentView('dashboard')}
           />
         );
       case 'studio-pdf':
@@ -2538,8 +3297,6 @@ export default function App() {
             activeCounselor={activeCounselor}
           />
         );
-      case 'panggilan-ortu':
-      case 'panggilan-orang-tua':
       case 'surat-panggilan':
         return (
           <PanggilanOrangTuaView
@@ -2554,8 +3311,57 @@ export default function App() {
             onNavigate={handleNavigateToTab}
             activeCounselor={activeCounselor}
             onLogout={handleLogout}
+            students={filteredStudents}
+            violations={filteredViolations}
+            services={filteredServices}
+            onClearAllStudents={handleClearAllStudents}
+            onAddStudent={handleAddStudent}
           />
         );
+      case 'profil-siswa':
+      case 'profil': {
+        const targetStudent =
+          filteredStudents.find(
+            (s) =>
+              s.id === selectedProfileStudentId ||
+              (s.name && s.name.trim().toLowerCase() === String(selectedProfileStudentId || '').trim().toLowerCase())
+          ) ||
+          filteredStudents[0];
+
+        if (!targetStudent) {
+          return (
+            <div className="bg-white rounded-2xl p-8 border border-gray-200 text-center max-w-md mx-auto my-12">
+              <p className="text-sm text-gray-500 font-bold">Data siswa tidak ditemukan.</p>
+              <button
+                type="button"
+                onClick={() => setCurrentView('dashboard')}
+                className="mt-3 px-4 py-2 bg-[#00685f] text-white rounded-xl text-xs font-bold"
+              >
+                Kembali ke Beranda
+              </button>
+            </div>
+          );
+        }
+
+        return (
+          <ProfilSiswaView
+            student={targetStudent}
+            students={filteredStudents}
+            violations={filteredViolations}
+            services={filteredServices}
+            achievements={filteredAchievements}
+            homeVisits={filteredHomeVisits}
+            activeCounselor={activeCounselor}
+            onBack={() => {
+              setCurrentView(previousView || 'dashboard');
+            }}
+            onNavigateToForm={handleNavigateToForm}
+            onNavigateToTab={handleNavigateToTab}
+            onUpdateViolation={handleUpdateViolation}
+            onSelectStudent={(sId) => setSelectedProfileStudentId(sId)}
+          />
+        );
+      }
       default:
         return (
           <DashboardView
@@ -2564,12 +3370,16 @@ export default function App() {
             services={filteredServices}
             logs={filteredLogs}
             achievements={filteredAchievements}
+            serviceEvaluations={serviceEvaluations}
             activeCounselor={activeCounselor}
             onNavigateToTab={handleNavigateToTab}
             onNavigateToForm={handleNavigateToForm}
             onUpdateViolationStatus={handleUpdateViolationStatus}
             onUpdateServiceStatus={handleUpdateServiceStatus}
             onEditService={(srv) => setEditingService(srv)}
+            onEvaluateService={(srv) => setGlobalEvalServiceTarget(srv)}
+            onSaveServiceEvaluation={handleSaveServiceEvaluation}
+            onLogout={handleLogout}
           />
         );
     }
@@ -2588,6 +3398,10 @@ export default function App() {
       period?: string;
     }
   ) => {
+    if (tab === 'si-becik') {
+      handleOpenSiBecik();
+      return;
+    }
     if (query) {
       setSearchQuery(query);
     }
@@ -2649,18 +3463,19 @@ export default function App() {
                           (counselor.name && counselor.name.toLowerCase().includes('aulia'));
 
           const cleanNpsn = counselor.schoolNpsn ? String(counselor.schoolNpsn).replace(/[^0-9a-zA-Z]/g, '') : '';
+          const hasCounselorSchool = Boolean(isAulia || cleanNpsn || counselor.schoolId || counselor.schoolName);
           const cSchoolId = isAulia 
             ? 'sch_20320123' 
-            : ((cleanNpsn ? sanitizeSchoolId(cleanNpsn) : '') || (counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : getActiveSchoolId()));
+            : ((cleanNpsn ? sanitizeSchoolId(cleanNpsn) : '') || (counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : (hasCounselorSchool ? getActiveSchoolId() : '')));
 
-          const finalSchoolId = (isAulia || cSchoolId === 'sch_20320123' || cleanNpsn === '20320123') ? 'sch_20320123' : cSchoolId;
+          const finalSchoolId = (isAulia || cSchoolId === 'sch_20320123' || cleanNpsn === '20320123') ? 'sch_20320123' : (cSchoolId || getActiveSchoolId());
 
           // Ensure active school workspace matches target school
-          if (finalSchoolId !== getActiveSchoolId()) {
+          if (hasCounselorSchool && finalSchoolId !== getActiveSchoolId()) {
             const registered = getRegisteredSchools();
             const targetSchool = registered.find(s => s.schoolId === finalSchoolId || (cleanNpsn && s.npsn === cleanNpsn)) || {
               schoolId: finalSchoolId,
-              schoolName: isAulia ? 'SMP N 2 Susukan' : (counselor.schoolName || 'Sekolah Terdaftar'),
+              schoolName: isAulia ? 'SMP N 2 Susukan' : (counselor.schoolName || ''),
               npsn: isAulia ? '20320123' : (cleanNpsn || counselor.schoolNpsn || ''),
               schoolAddress: isAulia ? 'Jl. Kyai Hasan Anwar No. 16, Susukan, Kab. Semarang' : 'Alamat Sekolah',
               principalName: isAulia ? 'Agus Setiawan, S.Pd. Fis' : 'Kepala Sekolah',
@@ -2671,17 +3486,19 @@ export default function App() {
             switchSchoolWorkspace(targetSchool);
           }
 
-          setActiveSchoolId(finalSchoolId);
+          if (hasCounselorSchool) {
+            setActiveSchoolId(finalSchoolId);
+          }
 
-          // Build finalized counselor profile
+          // Build finalized counselor profile (jangan memalsukan schoolName/schoolId jika sekolah user belum diatur)
           const finalizedCounselor: Counselor = isAulia ? {
             ...counselor,
             id: 'c1',
             name: 'Aulia Aji Sasongko, S.Pd.',
-            role: 'Koordinator BK & Administrator Sekolah',
+            role: 'Koordinator BK & Guru Pembimbing Kelas 8',
             nip: counselor.nip && counselor.nip !== '-' ? counselor.nip : 'NIP. 19931231 202221 1 002',
             avatar: counselor.avatar || counselors.find(c => c.id === 'c1')?.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-            allowedClasses: ['7A', '7B', '7C', '7D', '7E', '7F', '8A', '8B', '8C', '8D', '8E', '8F', '8G', '9A', '9B', '9C', '9D', '9E', '9F', '9G'],
+            allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
             username: 'aulia',
             email: 'auliasasongko12@guru.smp.belajar.id',
             phone: '089681287339',
@@ -2690,61 +3507,58 @@ export default function App() {
             schoolName: 'SMP N 2 Susukan'
           } : {
             ...counselor,
-            schoolId: finalSchoolId,
+            schoolId: counselor.schoolId || (cleanNpsn ? sanitizeSchoolId(cleanNpsn) : ''),
             schoolNpsn: cleanNpsn || counselor.schoolNpsn || '',
-            schoolName: counselor.schoolName || 'Sekolah Terdaftar'
+            schoolName: counselor.schoolName || ''
           };
 
-          // 1. Synchronously prepare and set states IMMEDIATELY so user NEVER sees 0 data
+          // 1. Synchronously load non-deleted states WITHOUT resurrecting deleted records!
           const isCanonical = finalSchoolId === 'sch_20320123';
-          const sFallback = isCanonical ? initialStudents : [];
-          const vFallback = isCanonical ? initialViolations : [];
-          const srvFallback = isCanonical ? initialServices : [];
-          const lFallback = isCanonical ? initialLogs : [];
-          const hvFallback = isCanonical ? initialHomeVisits : [];
-
-          if (isCanonical) {
-            resetStudentDeletedIds();
-            if (typeof localStorage !== 'undefined') {
-              localStorage.removeItem('bk_dummy_students_purged');
-              localStorage.removeItem(`bk_cleared_${finalSchoolId}`);
-              localStorage.removeItem(`bk_students_cleared_${finalSchoolId}`);
-            }
-          }
+          const deletedSet = new Set(getDeletedIds());
+          const hasSeededFlag = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${finalSchoolId}`) === 'true';
+          const filterActive = <T extends { id?: any; isDeleted?: boolean }>(arr: T[]): T[] =>
+            Array.isArray(arr) ? arr.filter(it => it && it.isDeleted !== true && !deletedSet.has(String(it.id))) : [];
 
           const loadedStudents = loadSchoolData<Student[]>('bk_students', [], finalSchoolId);
-          const finalStudents = (loadedStudents && loadedStudents.length > 0)
-            ? loadedStudents.filter(s => !isDummyStudent(s))
-            : sFallback;
-          setStudents(finalStudents);
-          saveSchoolData('bk_students', finalStudents, finalSchoolId);
+          const cleanStudents = filterActive(loadedStudents).filter(s => !isDummyStudent(s));
+          setStudents(cleanStudents);
+          saveSchoolData('bk_students', cleanStudents, finalSchoolId);
 
-          const loadedViolations = loadSchoolData<ViolationRecord[]>('bk_violations', vFallback, finalSchoolId);
-          const finalViolations = (loadedViolations && loadedViolations.length > 0 && (!isCanonical || loadedViolations.length >= vFallback.length)) ? loadedViolations : vFallback;
+          const loadedViolations = filterActive(loadSchoolData<ViolationRecord[]>('bk_violations', [], finalSchoolId));
+          const finalViolations = (loadedViolations.length === 0 && isCanonical && !hasSeededFlag)
+            ? initialViolations.filter(v => !deletedSet.has(String(v.id)))
+            : loadedViolations;
           setViolations(finalViolations);
           saveSchoolData('bk_violations', finalViolations, finalSchoolId);
 
-          const loadedServices = loadSchoolData<CounselingService[]>('bk_services', srvFallback, finalSchoolId);
-          const finalServices = (loadedServices && loadedServices.length > 0 && (!isCanonical || loadedServices.length >= srvFallback.length)) ? loadedServices : srvFallback;
+          const loadedServices = filterActive(loadSchoolData<CounselingService[]>('bk_services', [], finalSchoolId));
+          const finalServices = (loadedServices.length === 0 && isCanonical && !hasSeededFlag)
+            ? initialServices.filter(s => !deletedSet.has(String(s.id)))
+            : loadedServices;
           setServices(finalServices);
           saveSchoolData('bk_services', finalServices, finalSchoolId);
 
-          const loadedLogs = loadSchoolData<ActivityLog[]>('bk_logs', lFallback, finalSchoolId);
-          const finalLogs = (loadedLogs && loadedLogs.length > 0) ? loadedLogs : lFallback;
+          const loadedLogs = filterActive(loadSchoolData<ActivityLog[]>('bk_logs', [], finalSchoolId));
+          const finalLogs = (loadedLogs.length === 0 && isCanonical && !hasSeededFlag)
+            ? initialLogs.filter(l => !deletedSet.has(String(l.id)))
+            : loadedLogs;
           setLogs(finalLogs);
           saveSchoolData('bk_logs', finalLogs, finalSchoolId);
 
-          const loadedHomeVisits = loadSchoolData<any[]>('bk_home_visits', hvFallback, finalSchoolId);
-          const finalHomeVisits = (loadedHomeVisits && loadedHomeVisits.length > 0) ? loadedHomeVisits : hvFallback;
+          const loadedHomeVisits = filterActive(loadSchoolData<any[]>('bk_home_visits', [], finalSchoolId));
+          const finalHomeVisits = (loadedHomeVisits.length === 0 && isCanonical && !hasSeededFlag)
+            ? initialHomeVisits.filter(h => !deletedSet.has(String(h.id)))
+            : loadedHomeVisits;
           setHomeVisits(finalHomeVisits);
           saveSchoolData('bk_home_visits', finalHomeVisits, finalSchoolId);
 
-          setAchievements(loadSchoolData('bk_achievements', [], finalSchoolId));
+          if (typeof localStorage !== 'undefined' && isCanonical) {
+            localStorage.setItem(`bk_initial_seeded_${finalSchoolId}`, 'true');
+          }
 
-          const attFallback = isCanonical ? initialAttendanceHistory : [];
-          const loadedAttendance = loadSchoolData<any[]>('bk_attendance_history', attFallback, finalSchoolId);
-          const finalAttendance = (loadedAttendance && loadedAttendance.length > 0) ? loadedAttendance : attFallback;
-          saveSchoolData('bk_attendance_history', finalAttendance, finalSchoolId);
+          setAchievements(filterActive(loadSchoolData<any[]>('bk_achievements', [], finalSchoolId)));
+          setProgramEvaluations(filterActive(loadSchoolData<ProgramEvaluation[]>('bk_program_evaluations', [], finalSchoolId)));
+          setServiceEvaluations(filterActive(loadSchoolData<ProgramEvaluation[]>('bk_service_evaluations', [], finalSchoolId)));
 
           // 2. Set authenticated state
           setActiveCounselor(finalizedCounselor);
@@ -2753,10 +3567,10 @@ export default function App() {
           localStorage.setItem('bk_is_logged_in', 'true');
           localStorage.setItem('bk_active_counselor_id', finalizedCounselor.id);
 
-          // 3. Background asynchronous sync (never blocks UI or resets memory state)
+          // 3. Background cloud sync (strictly respects isDeleted !== true from Firestore)
           (async () => {
             try {
-              verifyAndEnforceAccountPrivacy(finalSchoolId, finalizedCounselor.id);
+              await ensureSchoolDocumentExists(finalSchoolId, finalizedCounselor);
 
               const loadedCounselors = loadSchoolData('bk_counselors', isCanonical ? counselors : [finalizedCounselor], finalSchoolId);
               let mergedCounselors = isCanonical ? [...counselors] : [finalizedCounselor];
@@ -2804,6 +3618,9 @@ export default function App() {
       case 'laporan-rekap':
       case 'laporan':
         return 'Laporan & Rekapitulasi BK';
+      case 'evaluasi-program':
+      case 'evaluasi':
+        return 'Evaluasi Layanan & Program BK';
       case 'jurnal-harian':
       case 'jurnal':
         return 'Jurnal Harian Guru BK';
@@ -2832,10 +3649,55 @@ export default function App() {
       case 'riwayat':
       case 'riwayat-konseling':
         return 'Riwayat Layanan Bimbingan & Konseling';
+      case 'profil-siswa':
+      case 'profil':
+        return 'Profil Siswa Khusus Guru BK';
+      case 'peringatan':
+        return 'Pusat Peringatan & Tindak Lanjut';
       default:
         return 'Bimbingan Konseling';
     }
   };
+
+  const formViewsSet = new Set([
+    'tambah-layanan',
+    'input-konseling',
+    'layanan-konseling',
+    'konseling',
+    'form-layanan',
+    'pelanggaran',
+    'catat-pelanggaran',
+    'apresiasi',
+    'catat-apresiasi',
+    'layanan-bk',
+    'home-visit',
+    'homevisit',
+    'panggilan-orang-tua',
+    'panggilan-ortu',
+    'panggilan',
+    'surat-panggilan',
+  ]);
+
+  const isFormOrModalOpen =
+    formViewsSet.has(currentView) ||
+    editingService !== null ||
+    detailService !== null ||
+    pendingPostSaveService !== null ||
+    globalEvalServiceTarget !== null;
+
+  const showFab =
+    isLoggedIn &&
+    !isSiBecikOpen &&
+    siBecikFabEnabled &&
+    !isKeyboardOpen &&
+    !isFormOrModalOpen;
+
+  const unseenOverdueCount = useMemo(
+    () => overdueFollowUpIds.filter((id) => !seenOverdueIds.includes(id)).length,
+    [overdueFollowUpIds, seenOverdueIds]
+  );
+
+  const siBecikBadgeCount = unseenOverdueCount + (siBecikUnread ? 1 : 0);
 
   return (
     <div className="min-h-screen bg-[#f8fafa] text-[#0b1c30] app-root">
@@ -2934,7 +3796,7 @@ export default function App() {
           setEditingService(null);
         }}
         onDelete={(id) => {
-          handleDeleteService(id);
+          handleDeleteService(id, true);
           setEditingService(null);
         }}
         onClose={() => setEditingService(null)}
@@ -2950,7 +3812,7 @@ export default function App() {
           setEditingService(srv);
         }}
         onDelete={(id) => {
-          handleDeleteService(id);
+          handleDeleteService(id, true);
           setDetailService(null);
         }}
         onUpdateStatus={(id, status) => {
@@ -2959,6 +3821,176 @@ export default function App() {
             setDetailService({ ...detailService, status });
           }
         }}
+      />
+
+      {/* Pop-up Wajib Langsung Setelah Simpan Input Layanan */}
+      {pendingPostSaveService && (
+        <div className="fixed inset-0 z-[75] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-[#e6f4f1] border border-[#00685f]/25 text-[#00685f] flex items-center justify-center shrink-0">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#00685f] bg-[#e6f4f1] px-2 py-0.5 rounded-md">
+                  Konfirmasi Evaluasi Layanan
+                </span>
+                <h3 className="text-lg font-extrabold text-[#0b1c30] mt-1">
+                  Layanan Tersimpan. Nilai Layanan Ini Sekarang?
+                </h3>
+                <p className="text-xs sm:text-sm text-[#3d4947] mt-1 leading-relaxed">
+                  Layanan{' '}
+                  <strong className="text-[#0b1c30]">
+                    {pendingPostSaveService.problem || pendingPostSaveService.serviceType}
+                  </strong>{' '}
+                  sudah tersimpan. Evaluasi Layanan menjadi satu-satunya sumber data untuk Evaluasi Program BK.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => {
+                  showToast(
+                    'Layanan ditandai "Belum Dievaluasi" di pengingat Beranda dan daftar layanan.',
+                    'info'
+                  );
+                  setPendingPostSaveService(null);
+                }}
+                className="px-3 py-2 rounded-xl text-xs font-bold text-[#3d4947] hover:bg-gray-100 cursor-pointer"
+              >
+                Nanti Saja
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = pendingPostSaveService;
+                  setPendingPostSaveService(null);
+                  setGlobalEvalServiceTarget(target);
+                }}
+                className="px-4 py-2.5 rounded-xl bg-[#00685f] hover:bg-[#005049] text-white text-xs sm:text-sm font-extrabold cursor-pointer shadow-xs"
+              >
+                Nilai Sekarang
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Global Evaluasi Layanan Pop-up Form (dipicu dari Post-Save Prompt, Beranda, atau Riwayat) */}
+      {globalEvalServiceTarget && (
+        <EvaluasiWizardModal
+          isOpen={Boolean(globalEvalServiceTarget)}
+          onClose={() => setGlobalEvalServiceTarget(null)}
+          onSave={(savedEval, printPdfAfterSave) => {
+            handleSaveServiceEvaluation(savedEval);
+            setGlobalEvalServiceTarget(null);
+            showToast('Evaluasi Layanan berhasil disimpan!', 'success');
+            if (printPdfAfterSave) {
+              downloadSingleEvaluationCardPDF(savedEval, activeCounselor);
+            }
+          }}
+          services={filteredServices}
+          activeCounselor={activeCounselor}
+          presetService={globalEvalServiceTarget}
+          availableClasses={Array.from(
+            new Set(filteredStudents.map((st) => st.class).filter(Boolean))
+          ).sort()}
+        />
+      )}
+
+      {/* Global Si Becik Chat Modal (Dibuka lewat FloatingSiBecik, Menu Lainnya > Si Becik, atau Header) */}
+      {isSiBecikOpen && (
+        <div
+          className="fixed inset-0 z-[1000] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-2 sm:p-4 overflow-y-auto"
+          onClick={() => setIsSiBecikOpen(false)}
+        >
+          <div
+            className="w-full max-w-3xl my-auto max-h-[92vh] overflow-y-auto rounded-3xl shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <AiAssistantWidget
+              counselor={
+                activeCounselor || {
+                  id: 'c1',
+                  name: 'Guru BK',
+                  nip: '-',
+                  role: 'Bimbingan Konseling',
+                  avatar: '',
+                  allowedClasses: [],
+                }
+              }
+              students={filteredStudents}
+              services={filteredServices}
+              violations={filteredViolations}
+              fabEnabled={siBecikFabEnabled}
+              onToggleFabEnabled={handleToggleSiBecikFab}
+              onInputFocusChange={setIsKeyboardOpen}
+              onClose={() => setIsSiBecikOpen(false)}
+              onNavigateToTab={(tab, q) => {
+                setIsSiBecikOpen(false);
+                handleNavigateToTab(tab, q);
+              }}
+              onNavigateToForm={(form, stId) => {
+                setIsSiBecikOpen(false);
+                handleNavigateToForm(form, stId);
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Global 1-Item Safe Delete Confirmation Modal (Pengganti confirm() native) */}
+      {deleteConfirmModal && (
+        <div className="fixed inset-0 z-[1050] bg-[#0b1c30]/65 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md rounded-2xl border border-red-200 shadow-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-red-50 border border-red-200 text-red-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-red-700 bg-red-50 px-2 py-0.5 rounded-md">
+                  Konfirmasi Hapus 1 Data
+                </span>
+                <h3 className="text-lg font-extrabold text-[#0b1c30] mt-1">
+                  {deleteConfirmModal.title}
+                </h3>
+                <p className="text-xs sm:text-sm text-[#3d4947] mt-1.5 leading-relaxed">
+                  {deleteConfirmModal.message}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmModal(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-[#3d4947] bg-gray-100 hover:bg-gray-200 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const cb = deleteConfirmModal.onConfirm;
+                  setDeleteConfirmModal(null);
+                  cb();
+                }}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs sm:text-sm font-extrabold cursor-pointer shadow-xs"
+              >
+                {deleteConfirmModal.confirmLabel || 'Ya, Hapus 1 Ini Saja'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Global Floating Si Becik Button — HANYA SATU DI APP.TSX */}
+      <FloatingSiBecik
+        visible={showFab}
+        badgeCount={siBecikBadgeCount}
+        onClick={handleOpenSiBecik}
       />
     </div>
   );

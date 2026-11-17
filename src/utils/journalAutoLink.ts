@@ -2,7 +2,7 @@ import { BKJournalEntry } from '../types';
 import { triggerBackgroundAutoSync } from './googleSync';
 import { saveToFirestore } from './firestoreSync';
 import { safeSetItem } from './storageQuota';
-import { loadSchoolData, saveSchoolData } from './schoolConfig';
+import { loadSchoolData, saveSchoolData, getValidatedSchoolIdentity, buildSchoolStamp } from './schoolConfig';
 
 export interface AutoJournalSettings {
   syncViolations: boolean; // default: false (Catatan Pelanggaran TIDAK masuk jurnal)
@@ -47,6 +47,7 @@ export interface AutoJournalInput {
   target: string;
   status?: BKJournalEntry['status'];
   counselorId?: string;
+  counselorName?: string;
   proofPhotoUrl?: string;
   proofPhotoName?: string;
   absentStudents?: string;
@@ -76,7 +77,12 @@ export function autoPushToJournal(input: AutoJournalInput): void {
       return;
     }
 
-    const journals: BKJournalEntry[] = loadSchoolData('bk_daily_journals', []);
+    const schoolCheck = getValidatedSchoolIdentity();
+    if (!schoolCheck.ok) {
+      return;
+    }
+
+    const journals: BKJournalEntry[] = loadSchoolData('bk_daily_journals', [], schoolCheck.schoolId);
 
     const dateStr = input.date || new Date().toISOString().split('T')[0];
     
@@ -90,7 +96,10 @@ export function autoPushToJournal(input: AutoJournalInput): void {
     const currentHour = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
     const endHour = `${String(now.getHours() + 1).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
+    const stamp = buildSchoolStamp(schoolCheck, input.counselorName || 'Guru BK', now.toISOString());
+
     const newJournal: BKJournalEntry = {
+      ...stamp,
       id: `j-auto-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
       date: dateStr,
       startTime: input.startTime || currentHour,
@@ -101,15 +110,15 @@ export function autoPushToJournal(input: AutoJournalInput): void {
       target: input.target,
       status: input.status || 'Selesai',
       counselorId: input.counselorId || 'c1',
-      createdAt: new Date().toISOString(),
+      createdAt: stamp.createdAt,
       proofPhotoUrl: input.proofPhotoUrl,
       proofPhotoName: input.proofPhotoName,
       absentStudents: input.absentStudents
     };
 
     const updated = [newJournal, ...journals];
-    saveSchoolData('bk_daily_journals', updated);
-    saveToFirestore('bk_daily_journals', newJournal);
+    saveSchoolData('bk_daily_journals', updated, schoolCheck.schoolId);
+    saveToFirestore('bk_daily_journals', newJournal, schoolCheck.schoolId);
     triggerBackgroundAutoSync();
   } catch (err) {
     console.error('Error auto-linking activity to Jurnal Harian:', err);

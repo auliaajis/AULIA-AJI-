@@ -1,8 +1,8 @@
 import { jsPDF } from 'jspdf';
 import { showToast } from './toast';
 import { Student, ViolationRecord, CounselingService, ClassAttendanceRecord, StudentAttendance, StudentAchievement, Counselor, SuratPerjanjianRecord, KontrakPerilakuRecord, JurnalPembinaanDisiplinRecord, KomitmenRtlRecord, HomeVisitRecord } from '../types';
-import { getSchoolConfig, getActiveSchoolId, loadSchoolData } from './schoolConfig';
-import { uploadPdfToGoogleDrive, PdfDriveUploadOptions } from './googleDriveUpload';
+import { getSchoolConfig, getKopSuratSchoolName, getActiveSchoolId, loadSchoolData } from './schoolConfig';
+import { uploadPdfToGoogleDrive, PdfDriveUploadOptions, uploadLayananPdfViaCloudFunction, formatLayananPdfFileName, getStudentInitials } from './googleDriveUpload';
 
 export { getSchoolConfig };
 
@@ -266,7 +266,7 @@ export function drawLetterhead(doc: jsPDF, accentColor: number[]) {
   doc.setFont('Helvetica', 'bold');
   doc.setFontSize(13);
   doc.setTextColor(accentColor[0], accentColor[1], accentColor[2]);
-  doc.text(config.schoolName.toUpperCase(), 105, 27, { align: 'center' });
+  doc.text(getKopSuratSchoolName(config).toUpperCase(), 105, 27, { align: 'center' });
 
   doc.setFont('Helvetica', 'normal');
   doc.setFontSize(7);
@@ -854,15 +854,63 @@ export function buildViolationPdfDoc(violation: ViolationRecord): jsPDF {
   return doc;
 }
 
-export function downloadViolationPDF(violation: ViolationRecord) {
+/**
+ * Auto-Save PDF Kasus/Pelanggaran ke Google Drive via Cloud Function generateLayananPdf
+ */
+export async function generateAndUploadCasePdf(
+  violation: ViolationRecord,
+  options?: { silent?: boolean; forceCategory?: string }
+): Promise<{ success: boolean; pdfUrl?: string; driveFileId?: string; isDriveFailed?: boolean; fileName?: string; doc: jsPDF }> {
   const doc = buildViolationPdfDoc(violation);
-  const cleanStudent = violation.studentName.replace(/\s+/g, '_');
-  const filename = `Bukti_Pelanggaran_${violation.ticketId}_${cleanStudent}.pdf`;
-  finalizeAndSavePdf(doc, filename, {
-    category: 'pelanggaran',
-    studentName: violation.studentName,
-    successToastMessage: 'Dokumen PDF Bukti Pelanggaran berhasil diunduh!',
+  const studentName = violation.studentName || 'Siswa';
+  const studentClass = violation.studentClass || '8A';
+  const cleanDate = violation.date || new Date().toISOString().split('T')[0];
+
+  const jenisLayanan = options?.forceCategory || (violation.restitutionStatus ? 'Restitusi' : 'Konseling');
+  const fileName = formatLayananPdfFileName(cleanDate, jenisLayanan, studentClass, studentName);
+
+  // 1. Download lokal instan ke perangkat pengguna
+  doc.save(fileName);
+
+  // 2. Upload otomatis ke Google Drive via Cloud Function generateLayananPdf
+  const uploadRes = await uploadLayananPdfViaCloudFunction({
+    schoolId: violation.schoolId,
+    schoolName: violation.schoolName,
+    jenisLayanan,
+    namaSiswa: studentName,
+    kelas: studentClass,
+    tanggal: cleanDate,
+    pdfBlobOrDoc: doc,
+    docId: violation.id,
+    colName: 'cases',
   });
+
+  if (uploadRes.success) {
+    if (!options?.silent) {
+      showToast('☁️ PDF Bukti Kasus berhasil dibuat dan tersimpan di Google Drive!', 'success');
+    }
+    return {
+      success: true,
+      pdfUrl: uploadRes.pdfUrl,
+      driveFileId: uploadRes.driveFileId,
+      fileName,
+      doc,
+    };
+  } else {
+    if (!options?.silent) {
+      showToast('⚠️ PDF berhasil dibuat, tapi gagal simpan ke Drive. Klik [Coba Lagi ke Drive]', 'warning');
+    }
+    return {
+      success: false,
+      isDriveFailed: true,
+      fileName,
+      doc,
+    };
+  }
+}
+
+export function downloadViolationPDF(violation: ViolationRecord) {
+  return generateAndUploadCasePdf(violation);
 }
 
 /**
@@ -873,14 +921,7 @@ export async function autoArchiveViolationToDrive(
   options?: { silent?: boolean }
 ) {
   try {
-    const doc = buildViolationPdfDoc(violation);
-    const cleanStudent = (violation.studentName || 'Siswa').replace(/\s+/g, '_');
-    const filename = `Bukti_Pelanggaran_${violation.ticketId || Date.now()}_${cleanStudent}.pdf`;
-    return await autoArchiveDocToDrive(doc, filename, {
-      category: 'pelanggaran',
-      studentName: violation.studentName,
-      silent: options?.silent,
-    });
+    return await generateAndUploadCasePdf(violation, { silent: options?.silent });
   } catch (err: any) {
     console.warn('Auto-archive violation to Drive error:', err);
     return { success: false, error: err?.message };
@@ -888,11 +929,86 @@ export async function autoArchiveViolationToDrive(
 }
 
 /**
- * Generates a professional PDF for a Counseling Service (Bukti Layanan BK).
+ * Auto-Save PDF Layanan BK ke Google Drive via Cloud Function generateLayananPdf
+ * Sesuai aturan:
+ * 1. Saat user klik [Generate Layanan], setelah PDF dibuat, WAJIB langsung upload ke Google Drive via CF generateLayananPdf
+ * 2. Format file: YYYY-MM-DD_{jenisLayanan}_{kelas}_{inisial}.pdf
+ * 3. Folder: BK MGMP Kab Semarang / {schoolName} / {jenisLayanan}
+ * 4. Simpan di Firestore counseling/{docId}: pdfUrl, driveFileId, pdfGeneratedAt
+ * 5. Jika gagal: tampilkan "PDF berhasil dibuat, tapi gagal simpan ke Drive. Klik [Coba Lagi ke Drive]"
+ */
+export async function generateAndUploadLayananPdf(
+  service: CounselingService,
+  options?: { silent?: boolean; forceCategory?: string }
+): Promise<{ success: boolean; pdfUrl?: string; driveFileId?: string; isDriveFailed?: boolean; fileName?: string; doc: jsPDF }> {
+  const doc = buildServicePdfDoc(service);
+  const primaryStudent = service.students?.[0];
+  const studentName = primaryStudent?.name || 'Siswa';
+  const studentClass = primaryStudent?.class || '8A';
+  const cleanDate = service.date || new Date().toISOString().split('T')[0];
+
+  let jenisLayanan = options?.forceCategory || 'Konseling';
+  if (!options?.forceCategory) {
+    const sType = (service.serviceType || '').toLowerCase();
+    const fIssue = (service.focusIssue || '').toLowerCase();
+    if (sType.includes('restitusi') || fIssue.includes('restitusi')) {
+      jenisLayanan = 'Restitusi';
+    } else if (sType.includes('panggilan') || sType.includes('orang tua') || sType.includes('wali')) {
+      jenisLayanan = 'Panggilan';
+    } else {
+      jenisLayanan = 'Konseling';
+    }
+  }
+
+  const fileName = formatLayananPdfFileName(cleanDate, jenisLayanan, studentClass, studentName);
+
+  // 1. Download lokal instan ke perangkat pengguna
+  doc.save(fileName);
+
+  // 2. Upload otomatis ke Google Drive via Cloud Function generateLayananPdf
+  const uploadRes = await uploadLayananPdfViaCloudFunction({
+    schoolId: service.schoolId,
+    schoolName: service.schoolName,
+    jenisLayanan,
+    namaSiswa: studentName,
+    kelas: studentClass,
+    tanggal: cleanDate,
+    pdfBlobOrDoc: doc,
+    docId: service.id,
+    colName: 'counseling',
+  });
+
+  if (uploadRes.success) {
+    if (!options?.silent) {
+      showToast('☁️ PDF Layanan berhasil dibuat dan otomatis tersimpan di Google Drive!', 'success');
+    }
+    return {
+      success: true,
+      pdfUrl: uploadRes.pdfUrl,
+      driveFileId: uploadRes.driveFileId,
+      fileName,
+      doc,
+    };
+  } else {
+    if (!options?.silent) {
+      showToast('⚠️ PDF berhasil dibuat, tapi gagal simpan ke Drive. Klik [Coba Lagi ke Drive]', 'warning');
+    }
+    return {
+      success: false,
+      isDriveFailed: true,
+      fileName,
+      doc,
+    };
+  }
+}
+
+/**
+ * Generates a professional PDF for a Counseling Service (Bukti Layanan BK) with Auto-Save to Google Drive.
  */
 export function generateServicePDF(service: CounselingService) {
-  return downloadServicePDF(service);
+  return generateAndUploadLayananPdf(service);
 }
+
 
 export function buildServicePdfDoc(service: CounselingService): jsPDF {
   const doc = new jsPDF({
@@ -1145,15 +1261,9 @@ export function buildServicePdfDoc(service: CounselingService): jsPDF {
 }
 
 export function downloadServicePDF(service: CounselingService) {
-  const doc = buildServicePdfDoc(service);
-  const primaryStudentName = service.students?.[0]?.name || 'Siswa';
-  const filename = `Bukti_Layanan_BK_${service.id}_${service.serviceType.replace(/\s+/g, '_')}.pdf`;
-  finalizeAndSavePdf(doc, filename, {
-    category: 'layanan',
-    studentName: primaryStudentName,
-    successToastMessage: 'Dokumen PDF Bukti Layanan BK berhasil diunduh!',
-  });
+  return generateAndUploadLayananPdf(service);
 }
+
 
 /**
  * Otomatis mengarsipkan PDF Bukti Layanan BK ke Google Drive (SIKAP-BK/Laporan_Layanan) secara background
@@ -2637,15 +2747,30 @@ export function downloadParentAttendancePDF(summon: any, counselor: any) {
   });
 }
 
-// Utility to format Date into concise, clean Indonesian format (e.g., "27 Juli 2026" or "27 Juli 2026, 08:30 WIB")
+// Utility to format Date into concise, clean Indonesian format (e.g., "24 Agustus 2026")
 export function formatIndonesianDate(dateStr: string, includeDayName: boolean = false): string {
   try {
     if (!dateStr) return '-';
-    const cleanStr = String(dateStr).trim();
+    let cleanStr = String(dateStr).trim();
 
-    // Check if YYYY-MM-DD
-    if (/^\d{4}-\d{2}-\d{2}$/.test(cleanStr)) {
-      const [y, m, d] = cleanStr.split('-').map(Number);
+    // If combined string "date • time", take first part
+    if (cleanStr.includes(' • ')) {
+      cleanStr = cleanStr.split(' • ')[0].trim();
+    }
+
+    // Ignore 1899-12-30 default time storage date
+    if (cleanStr.startsWith('1899-12-30')) {
+      return '-';
+    }
+
+    // Match YYYY-MM-DD (with or without T... at the end)
+    const ymdMatch = cleanStr.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+    if (ymdMatch) {
+      const y = parseInt(ymdMatch[1], 10);
+      const m = parseInt(ymdMatch[2], 10);
+      const d = parseInt(ymdMatch[3], 10);
+      if (y === 1899) return '-';
+
       const dateObj = new Date(y, m - 1, d);
       const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
       const months = [
@@ -2661,7 +2786,7 @@ export function formatIndonesianDate(dateStr: string, includeDayName: boolean = 
     }
 
     const dateObj = new Date(cleanStr);
-    if (isNaN(dateObj.getTime())) return dateStr;
+    if (isNaN(dateObj.getTime()) || dateObj.getFullYear() < 1970) return dateStr;
 
     const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
     const months = [
@@ -2677,20 +2802,14 @@ export function formatIndonesianDate(dateStr: string, includeDayName: boolean = 
       formatted = `${days[dateObj.getDay()]}, ${formatted}`;
     }
 
-    // Append clean time if present in timestamp
-    if (cleanStr.includes('T') || (cleanStr.includes(':') && !cleanStr.startsWith('http'))) {
-      const hours = String(dateObj.getHours()).padStart(2, '0');
-      const minutes = String(dateObj.getMinutes()).padStart(2, '0');
-      if (hours !== '00' || minutes !== '00') {
-        formatted += `, ${hours}:${minutes} WIB`;
-      }
-    }
-
     return formatted;
   } catch (e) {
     return dateStr;
   }
 }
+
+// Re-export card date time formatter
+export { formatCardDateTime, formatCardDate, formatCardTime } from './dateFormatter';
 
 // Helper to format date & time together neatly for records and official documents
 export function formatRecordDateTime(dateStr?: string, timeStr?: string): string {
@@ -3975,7 +4094,7 @@ export function drawLandscapeLetterhead(doc: jsPDF, accentColor: number[]) {
   
   doc.setFontSize(13);
   doc.setTextColor(accentColor[0], accentColor[1], accentColor[2]);
-  doc.text(config.schoolName.toUpperCase(), 148.5, 26, { align: 'center' });
+  doc.text(getKopSuratSchoolName(config).toUpperCase(), 148.5, 26, { align: 'center' });
 
   doc.setFont('Helvetica', 'normal');
   doc.setFontSize(7.5);

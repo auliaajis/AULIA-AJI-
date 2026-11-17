@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { CounselingService, ViolationRecord, Student } from '../types';
 import { addToGoogleCalendar, exportSingleServiceToIcs, exportServicesToIcs } from '../utils/calendarSync';
+import { formatCardDate, formatCardTime, formatCardDateTime } from '../utils/dateFormatter';
 import {
   X,
   Calendar as CalendarIcon,
@@ -410,7 +411,7 @@ export default function CalendarModal({
                           <p className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5">
                             <Clock className="w-3 h-3 text-[#00685f]" />
                             <span>
-                              {srv.startTime} - {srv.endTime} WIB
+                              {formatCardTime(srv.startTime).replace(' WIB', '')} - {formatCardTime(srv.endTime || srv.startTime)}
                             </span>
                           </p>
                         </div>

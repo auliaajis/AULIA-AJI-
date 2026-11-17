@@ -50,11 +50,13 @@ import {
 } from '../utils/pdfGenerator';
 import { fetchDisciplineFormAi, DisciplineFormType } from '../utils/geminiDisciplineAi';
 import { autoPushToJournal } from '../utils/journalAutoLink';
-import { registerDeletedId } from '../utils/deletionTracker';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, deleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
+import { saveBulkToFirestore, saveSchoolData, loadSchoolData, softDeleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
 import { DisciplineConfigModal } from './DisciplineConfigModal';
 import { getDisciplineConfig, DisciplineConfig } from '../utils/disciplineConfig';
+import { getValidatedSchoolIdentity, buildSchoolStamp } from '../utils/schoolConfig';
 import { showToast } from '../utils/toast';
+import { isValidDeleteId, safeFilterSingleDelete } from '../utils/safeDelete';
 import PageHeaderBanner from './PageHeaderBanner';
 
 interface PembinaanPendisiplinanViewProps {
@@ -82,24 +84,45 @@ export default function PembinaanPendisiplinanView({
   const [isAiGenerating, setIsAiGenerating] = useState<boolean>(false);
   const [aiActiveSource, setAiActiveSource] = useState<string | null>(null);
 
+  const [pendingDeleteDoc, setPendingDeleteDoc] = useState<{
+    localKey: 'bk_surat_perjanjian_list' | 'bk_kontrak_perilaku_list' | 'bk_jurnal_pembinaan_disiplin_list' | 'bk_komitmen_rtl_list';
+    id: string;
+    label: string;
+    entityType: string;
+    nama: string;
+    kelas?: string;
+  } | null>(null);
+
   // Persistence list state for Surat Perjanjian
   const [perjanjianList, setPerjanjianList] = useState<SuratPerjanjianRecord[]>(() => {
-    return loadSchoolData('bk_surat_perjanjian_list', []);
+    const deletedSet = new Set(getDeletedIds());
+    return loadSchoolData<SuratPerjanjianRecord[]>('bk_surat_perjanjian_list', []).filter(
+      (p) => p && p.isDeleted !== true && !deletedSet.has(String(p.id))
+    );
   });
 
   // Persistence list state for Kontrak Perilaku
   const [kontrakList, setKontrakList] = useState<KontrakPerilakuRecord[]>(() => {
-    return loadSchoolData('bk_kontrak_perilaku_list', []);
+    const deletedSet = new Set(getDeletedIds());
+    return loadSchoolData<KontrakPerilakuRecord[]>('bk_kontrak_perilaku_list', []).filter(
+      (k) => k && k.isDeleted !== true && !deletedSet.has(String(k.id))
+    );
   });
 
   // Persistence list state for Jurnal Pembinaan Disiplin BK
   const [jurnalList, setJurnalList] = useState<JurnalPembinaanDisiplinRecord[]>(() => {
-    return loadSchoolData('bk_jurnal_pembinaan_disiplin_list', []);
+    const deletedSet = new Set(getDeletedIds());
+    return loadSchoolData<JurnalPembinaanDisiplinRecord[]>('bk_jurnal_pembinaan_disiplin_list', []).filter(
+      (j) => j && j.isDeleted !== true && !deletedSet.has(String(j.id))
+    );
   });
 
   // Persistence list state for Lembar Komitmen & RTL
   const [komitmenList, setKomitmenList] = useState<KomitmenRtlRecord[]>(() => {
-    return loadSchoolData('bk_komitmen_rtl_list', []);
+    const deletedSet = new Set(getDeletedIds());
+    return loadSchoolData<KomitmenRtlRecord[]>('bk_komitmen_rtl_list', []).filter(
+      (k) => k && k.isDeleted !== true && !deletedSet.has(String(k.id))
+    );
   });
 
   // LocalStorage Realtime Persist
@@ -124,26 +147,21 @@ export default function PembinaanPendisiplinanView({
     const handleRealtimeUpdate = (e: any) => {
       const key = e.detail?.key;
       const data = e.detail?.data;
+      const deletedSet = new Set(getDeletedIds());
+      const filterActive = <T extends { id: string; isDeleted?: boolean }>(arr: T[]) =>
+        arr.filter((x) => x && x.isDeleted !== true && !deletedSet.has(String(x.id)));
       if (key === 'bk_surat_perjanjian_list') {
-        if (Array.isArray(data)) setPerjanjianList(data);
-        else {
-          setPerjanjianList(loadSchoolData('bk_surat_perjanjian_list', []));
-        }
+        if (Array.isArray(data)) setPerjanjianList(filterActive(data));
+        else setPerjanjianList(filterActive(loadSchoolData('bk_surat_perjanjian_list', [])));
       } else if (key === 'bk_kontrak_perilaku_list') {
-        if (Array.isArray(data)) setKontrakList(data);
-        else {
-          setKontrakList(loadSchoolData('bk_kontrak_perilaku_list', []));
-        }
+        if (Array.isArray(data)) setKontrakList(filterActive(data));
+        else setKontrakList(filterActive(loadSchoolData('bk_kontrak_perilaku_list', [])));
       } else if (key === 'bk_jurnal_pembinaan_disiplin_list') {
-        if (Array.isArray(data)) setJurnalList(data);
-        else {
-          setJurnalList(loadSchoolData('bk_jurnal_pembinaan_disiplin_list', []));
-        }
+        if (Array.isArray(data)) setJurnalList(filterActive(data));
+        else setJurnalList(filterActive(loadSchoolData('bk_jurnal_pembinaan_disiplin_list', [])));
       } else if (key === 'bk_komitmen_rtl_list') {
-        if (Array.isArray(data)) setKomitmenList(data);
-        else {
-          setKomitmenList(loadSchoolData('bk_komitmen_rtl_list', []));
-        }
+        if (Array.isArray(data)) setKomitmenList(filterActive(data));
+        else setKomitmenList(filterActive(loadSchoolData('bk_komitmen_rtl_list', [])));
       }
     };
 
@@ -547,11 +565,18 @@ export default function PembinaanPendisiplinanView({
   // Submissions
   const handleSubmitPerjanjian = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentSpAnalytics?.student) {
-      alert('Pilih siswa terlebih dahulu.');
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
       return;
     }
+    if (!currentSpAnalytics?.student) {
+      showToast('Pilih siswa terlebih dahulu.', 'error');
+      return;
+    }
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
     const newRecord: SuratPerjanjianRecord = {
+      ...stamp,
       id: `sp-${Date.now()}`,
       type: 'perjanjian',
       letterNumber,
@@ -569,10 +594,10 @@ export default function PembinaanPendisiplinanView({
       consequences,
       status: 'Aktif',
       counselorName: activeCounselor.name,
-      createdAt: new Date().toISOString()
+      createdAt: stamp.createdAt
     };
     setPerjanjianList([newRecord, ...perjanjianList]);
-    saveToFirestore('bk_surat_perjanjian_list', newRecord);
+    saveToFirestore('bk_surat_perjanjian_list', newRecord, schoolValidation.schoolId);
     
     // Auto push to Jurnal Harian
     autoPushToJournal({
@@ -588,17 +613,24 @@ export default function PembinaanPendisiplinanView({
       counselorId: activeCounselor.id
     });
 
-    alert(`Surat Perjanjian (${currentSpAnalytics.student.name}) berhasil disimpan!`);
+    showToast(`Surat Perjanjian (${currentSpAnalytics.student.name}) berhasil disimpan!`, 'success');
     setLetterNumber(`SP-${new Date().getFullYear()}/${String(perjanjianList.length + 2).padStart(3, '0')}`);
   };
 
   const handleSubmitKontrak = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentKpAnalytics?.student) {
-      alert('Pilih siswa terlebih dahulu.');
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
       return;
     }
+    if (!currentKpAnalytics?.student) {
+      showToast('Pilih siswa terlebih dahulu.', 'error');
+      return;
+    }
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
     const newRecord: KontrakPerilakuRecord = {
+      ...stamp,
       id: `kp-${Date.now()}`,
       type: 'kontrak',
       contractNumber: kpContractNumber,
@@ -617,10 +649,10 @@ export default function PembinaanPendisiplinanView({
       evaluator: activeCounselor.name,
       status: 'Aktif',
       counselorName: activeCounselor.name,
-      createdAt: new Date().toISOString()
+      createdAt: stamp.createdAt
     };
     setKontrakList([newRecord, ...kontrakList]);
-    saveToFirestore('bk_kontrak_perilaku_list', newRecord);
+    saveToFirestore('bk_kontrak_perilaku_list', newRecord, schoolValidation.schoolId);
 
     // Auto push to Jurnal Harian
     autoPushToJournal({
@@ -636,17 +668,24 @@ export default function PembinaanPendisiplinanView({
       counselorId: activeCounselor.id
     });
 
-    alert(`Kontrak Perilaku (${currentKpAnalytics.student.name}) berhasil disimpan!`);
+    showToast(`Kontrak Perilaku (${currentKpAnalytics.student.name}) berhasil disimpan!`, 'success');
     setKpContractNumber(`KP-${new Date().getFullYear()}/${String(kontrakList.length + 2).padStart(3, '0')}`);
   };
 
   const handleSubmitJurnal = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentJrnAnalytics?.student) {
-      alert('Pilih siswa terlebih dahulu.');
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
       return;
     }
+    if (!currentJrnAnalytics?.student) {
+      showToast('Pilih siswa terlebih dahulu.', 'error');
+      return;
+    }
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
     const newRecord: JurnalPembinaanDisiplinRecord = {
+      ...stamp,
       id: `jrn-${Date.now()}`,
       journalNumber: jrnNumber,
       date: jrnDate,
@@ -662,10 +701,10 @@ export default function PembinaanPendisiplinanView({
       evaluationPlan: jrnEvaluationPlan,
       counselorName: activeCounselor.name,
       status: jrnStatus,
-      createdAt: new Date().toISOString()
+      createdAt: stamp.createdAt
     };
     setJurnalList([newRecord, ...jurnalList]);
-    saveToFirestore('bk_jurnal_pembinaan_disiplin_list', newRecord);
+    saveToFirestore('bk_jurnal_pembinaan_disiplin_list', newRecord, schoolValidation.schoolId);
 
     // Auto push to Jurnal Harian
     autoPushToJournal({
@@ -681,17 +720,24 @@ export default function PembinaanPendisiplinanView({
       counselorId: activeCounselor.id
     });
 
-    alert(`Jurnal Pembinaan BK (${currentJrnAnalytics.student.name}) berhasil disimpan!`);
+    showToast(`Jurnal Pembinaan BK (${currentJrnAnalytics.student.name}) berhasil disimpan!`, 'success');
     setJrnNumber(`JRN-${new Date().getFullYear()}/${String(jurnalList.length + 2).padStart(3, '0')}`);
   };
 
   const handleSubmitRtl = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentRtlAnalytics?.student) {
-      alert('Pilih siswa terlebih dahulu.');
+    const schoolValidation = getValidatedSchoolIdentity(activeCounselor);
+    if (!schoolValidation.ok) {
+      showToast('Gagal: Sekolah belum diatur', 'error');
       return;
     }
+    if (!currentRtlAnalytics?.student) {
+      showToast('Pilih siswa terlebih dahulu.', 'error');
+      return;
+    }
+    const stamp = buildSchoolStamp(schoolValidation, activeCounselor?.name || 'Guru BK');
     const newRecord: KomitmenRtlRecord = {
+      ...stamp,
       id: `rtl-${Date.now()}`,
       commitmentNumber: rtlNumber,
       date: rtlDate,
@@ -705,10 +751,10 @@ export default function PembinaanPendisiplinanView({
       supportNeeded: rtlSupportNeeded,
       reviewDate: rtlReviewDate,
       counselorName: activeCounselor.name,
-      createdAt: new Date().toISOString()
+      createdAt: stamp.createdAt
     };
     setKomitmenList([newRecord, ...komitmenList]);
-    saveToFirestore('bk_komitmen_rtl_list', newRecord);
+    saveToFirestore('bk_komitmen_rtl_list', newRecord, schoolValidation.schoolId);
 
     // Auto push to Jurnal Harian
     autoPushToJournal({
@@ -724,7 +770,7 @@ export default function PembinaanPendisiplinanView({
       counselorId: activeCounselor.id
     });
 
-    alert(`Lembar Komitmen & RTL (${currentRtlAnalytics.student.name}) berhasil disimpan!`);
+    showToast(`Lembar Komitmen & RTL (${currentRtlAnalytics.student.name}) berhasil disimpan!`, 'success');
     setRtlNumber(`RTL-${new Date().getFullYear()}/${String(komitmenList.length + 2).padStart(3, '0')}`);
   };
 
@@ -1631,13 +1677,16 @@ export default function PembinaanPendisiplinanView({
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        if (confirm(`Hapus Surat Perjanjian ${item.letterNumber}?`)) {
-                          registerDeletedId(item.id);
-                          deleteFromFirestore('bk_surat_perjanjian_list', item.id);
-                          setPerjanjianList(perjanjianList.filter((p) => p.id !== item.id));
-                        }
-                      }}
+                      onClick={() =>
+                        setPendingDeleteDoc({
+                          localKey: 'bk_surat_perjanjian_list',
+                          id: item.id,
+                          label: `Hapus Surat Perjanjian ${item.letterNumber}?`,
+                          entityType: 'Surat Perjanjian',
+                          nama: item.studentName || item.letterNumber,
+                          kelas: item.studentClass || '',
+                        })
+                      }
                       className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-all cursor-pointer"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -1893,13 +1942,16 @@ export default function PembinaanPendisiplinanView({
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        if (confirm(`Hapus Kontrak Perilaku ${item.contractNumber}?`)) {
-                          registerDeletedId(item.id);
-                          deleteFromFirestore('bk_kontrak_perilaku_list', item.id);
-                          setKontrakList(kontrakList.filter((k) => k.id !== item.id));
-                        }
-                      }}
+                      onClick={() =>
+                        setPendingDeleteDoc({
+                          localKey: 'bk_kontrak_perilaku_list',
+                          id: item.id,
+                          label: `Hapus Kontrak Perilaku ${item.contractNumber}?`,
+                          entityType: 'Kontrak Perilaku',
+                          nama: item.studentName || item.contractNumber,
+                          kelas: item.studentClass || '',
+                        })
+                      }
                       className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-all cursor-pointer"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -2113,13 +2165,16 @@ export default function PembinaanPendisiplinanView({
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        if (confirm(`Hapus Jurnal Pembinaan ${item.journalNumber}?`)) {
-                          registerDeletedId(item.id);
-                          deleteFromFirestore('bk_jurnal_pembinaan_disiplin_list', item.id);
-                          setJurnalList(jurnalList.filter((j) => j.id !== item.id));
-                        }
-                      }}
+                      onClick={() =>
+                        setPendingDeleteDoc({
+                          localKey: 'bk_jurnal_pembinaan_disiplin_list',
+                          id: item.id,
+                          label: `Hapus Jurnal Pembinaan ${item.journalNumber}?`,
+                          entityType: 'Jurnal Pembinaan',
+                          nama: item.studentName || item.journalNumber,
+                          kelas: item.studentClass || '',
+                        })
+                      }
                       className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-all cursor-pointer"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -2342,13 +2397,16 @@ export default function PembinaanPendisiplinanView({
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        if (confirm(`Hapus Lembar Komitmen ${item.commitmentNumber}?`)) {
-                          registerDeletedId(item.id);
-                          deleteFromFirestore('bk_komitmen_rtl_list', item.id);
-                          setKomitmenList(komitmenList.filter((k) => k.id !== item.id));
-                        }
-                      }}
+                      onClick={() =>
+                        setPendingDeleteDoc({
+                          localKey: 'bk_komitmen_rtl_list',
+                          id: item.id,
+                          label: `Hapus Lembar Komitmen ${item.commitmentNumber}?`,
+                          entityType: 'Lembar Komitmen',
+                          nama: item.studentName || item.commitmentNumber,
+                          kelas: item.studentClass || '',
+                        })
+                      }
                       className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-all cursor-pointer"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -2369,6 +2427,91 @@ export default function PembinaanPendisiplinanView({
           setDisciplineConfig(updatedCfg);
         }}
       />
+      {pendingDeleteDoc && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus 1 Dokumen</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+                  {pendingDeleteDoc.label} Data lain tidak akan terhapus.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteDoc(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const target = pendingDeleteDoc;
+                  setPendingDeleteDoc(null);
+                  if (!isValidDeleteId(target?.id)) {
+                    showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+                    return;
+                  }
+
+                  let deletedRecord: any = target.id;
+                  if (target.localKey === 'bk_surat_perjanjian_list') {
+                    const res = safeFilterSingleDelete(perjanjianList, target.id);
+                    if (!res.ok) return;
+                    deletedRecord = res.removed || target.id;
+                    setPerjanjianList((prev) => {
+                      const next = safeFilterSingleDelete(prev, target.id);
+                      return next.ok ? next.next : prev;
+                    });
+                  } else if (target.localKey === 'bk_kontrak_perilaku_list') {
+                    const res = safeFilterSingleDelete(kontrakList, target.id);
+                    if (!res.ok) return;
+                    deletedRecord = res.removed || target.id;
+                    setKontrakList((prev) => {
+                      const next = safeFilterSingleDelete(prev, target.id);
+                      return next.ok ? next.next : prev;
+                    });
+                  } else if (target.localKey === 'bk_jurnal_pembinaan_disiplin_list') {
+                    const res = safeFilterSingleDelete(jurnalList, target.id);
+                    if (!res.ok) return;
+                    deletedRecord = res.removed || target.id;
+                    setJurnalList((prev) => {
+                      const next = safeFilterSingleDelete(prev, target.id);
+                      return next.ok ? next.next : prev;
+                    });
+                  } else if (target.localKey === 'bk_komitmen_rtl_list') {
+                    const res = safeFilterSingleDelete(komitmenList, target.id);
+                    if (!res.ok) return;
+                    deletedRecord = res.removed || target.id;
+                    setKomitmenList((prev) => {
+                      const next = safeFilterSingleDelete(prev, target.id);
+                      return next.ok ? next.next : prev;
+                    });
+                  }
+
+                  registerDeletedId(target.id);
+                  await softDeleteFromFirestore(target.localKey, deletedRecord, {
+                    deletedBy: activeCounselor?.name || 'Guru BK',
+                    deletedReason: 'Dihapus dari Pembinaan Pendisiplinan',
+                    entityType: target.entityType,
+                    nama: target.nama,
+                    kelas: target.kelas || '',
+                  });
+                  showToast(`${target.entityType} dihapus`, 'info');
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Ya, Hapus 1 Ini Saja
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

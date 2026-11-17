@@ -21,6 +21,9 @@ import {
 } from 'lucide-react';
 import { APPRECIATION_TEMPLATES } from '../data/appreciationTemplates';
 import { getSchoolConfig } from '../utils/schoolConfig';
+import { formatCardDateTime } from '../utils/dateFormatter';
+import { showToast } from '../utils/toast';
+import { isValidDeleteId } from '../utils/safeDelete';
 
 interface CatatApresiasiFormProps {
   students: Student[];
@@ -59,6 +62,8 @@ export default function CatatApresiasiForm({
   const [editStudentName, setEditStudentName] = useState('');
   const [editStudentClass, setEditStudentClass] = useState('');
   const [editStudentNis, setEditStudentNis] = useState('');
+  const [confirmDeleteStudent, setConfirmDeleteStudent] = useState<Student | null>(null);
+  const [pendingDeleteAchievement, setPendingDeleteAchievement] = useState<StudentAchievement | null>(null);
 
   // Selected Students for New Appreciation
   const [studentQuery, setStudentQuery] = useState('');
@@ -627,7 +632,7 @@ export default function CatatApresiasiForm({
                           <p className="text-[11px] text-gray-600 font-medium mt-0.5 italic">"{ach.notes}"</p>
                         )}
                         <p className="text-[10px] text-gray-400 font-medium mt-1">
-                          Pencatat: {ach.recordedBy || 'Guru BK'} • Tanggal: {ach.date} {ach.time ? `(${ach.time})` : ''}
+                          Pencatat: {ach.recordedBy || 'Guru BK'} • {formatCardDateTime(ach.date, ach.time)}
                         </p>
                       </div>
                     </div>
@@ -645,7 +650,7 @@ export default function CatatApresiasiForm({
                       {onDeleteAchievement && (
                         <button
                           type="button"
-                          onClick={() => onDeleteAchievement(ach.id)}
+                          onClick={() => setPendingDeleteAchievement(ach)}
                           className="px-3 py-1.5 text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl transition-colors cursor-pointer flex items-center gap-1"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -802,12 +807,7 @@ export default function CatatApresiasiForm({
               {onDeleteStudent && (
                 <button
                   type="button"
-                  onClick={() => {
-                    if (confirm(`Apakah Anda yakin ingin menghapus data siswa ${selectedStudentForEdit.name} dari sistem?`)) {
-                      onDeleteStudent(selectedStudentForEdit.id);
-                      setSelectedStudentForEdit(null);
-                    }
-                  }}
+                  onClick={() => setConfirmDeleteStudent(selectedStudentForEdit)}
                   className="px-3 py-2 text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 rounded-xl cursor-pointer flex items-center gap-1"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -841,6 +841,91 @@ export default function CatatApresiasiForm({
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirmDeleteStudent && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus Siswa</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+                  Hapus {confirmDeleteStudent.name} ({confirmDeleteStudent.class}) saja? Siswa lain tidak akan terhapus.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteStudent(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = confirmDeleteStudent;
+                  setConfirmDeleteStudent(null);
+                  if (!isValidDeleteId(target?.id)) {
+                    showToast('Gagal: ID siswa tidak valid, hapus dibatalkan', 'error');
+                    return;
+                  }
+                  if (onDeleteStudent) {
+                    onDeleteStudent(target.id);
+                    setSelectedStudentForEdit(null);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Ya, Hapus 1 Ini Saja
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {pendingDeleteAchievement && (
+        <div className="fixed inset-0 z-[120] bg-[#0b1c30]/60 backdrop-blur-[2px] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-[#bcc9c6]/50 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus Apresiasi</h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+                  Hapus apresiasi "{pendingDeleteAchievement.achievementName}" milik {pendingDeleteAchievement.studentName} saja? Apresiasi lain tidak akan terhapus.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteAchievement(null)}
+                className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = pendingDeleteAchievement;
+                  setPendingDeleteAchievement(null);
+                  if (!isValidDeleteId(target?.id)) {
+                    showToast('Gagal: ID apresiasi tidak valid, hapus dibatalkan', 'error');
+                    return;
+                  }
+                  onDeleteAchievement?.(target.id);
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Ya, Hapus 1 Ini Saja
+              </button>
             </div>
           </div>
         </div>

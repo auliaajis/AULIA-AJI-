@@ -1,5 +1,9 @@
 import { getAccessToken, googleSignIn, clearExpiredGoogleToken } from './firebaseAuth';
 import { getSchoolConfig } from './schoolConfig';
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import { getApps, getApp } from 'firebase/app';
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { db, getActiveSchoolId } from './firestoreSync';
 
 export interface DriveUploadOptions {
   category: 'sesi' | 'home_visit' | 'pelanggaran' | 'umum';
@@ -575,3 +579,273 @@ export async function uploadPdfToGoogleDrive(
     error: 'Google Drive belum terhubung atau sesi 1 jam telah berakhir. File tetap aman diunduh ke komputer/HP Anda.',
   };
 }
+
+/**
+ * Helper: Ambil inisial nama siswa (misal: "Aulia Sasongko" -> "AS", "Tri" -> "TRI")
+ */
+export function getStudentInitials(name: string): string {
+  if (!name) return 'Siswa';
+  const clean = name.trim();
+  if (/^[A-Z]{1,4}$/.test(clean)) return clean;
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 3).toUpperCase();
+  return parts.map((w) => w.charAt(0).toUpperCase()).join('').slice(0, 4);
+}
+
+/**
+ * Helper format nama file resmi PDF Layanan: YYYY-MM-DD_{jenisLayanan}_{kelas}_{inisial}.pdf
+ */
+export function formatLayananPdfFileName(
+  tanggal: string | undefined,
+  jenisLayanan: string,
+  kelas: string,
+  namaSiswa: string
+): string {
+  const cleanDate = (tanggal || new Date().toISOString().split('T')[0]).trim();
+  const cleanJenis = (jenisLayanan || 'Konseling').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanKelas = (kelas || 'Kelas').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const inisial = getStudentInitials(namaSiswa).replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${cleanDate}_${cleanJenis}_${cleanKelas}_${inisial}.pdf`;
+}
+
+export interface LayananPdfUploadParams {
+  schoolId?: string;
+  schoolName?: string;
+  jenisLayanan: 'Konseling' | 'Restitusi' | 'Panggilan' | string;
+  namaSiswa: string;
+  kelas: string;
+  tanggal?: string;
+  pdfBlobOrDoc?: any;
+  pdfBase64?: string;
+  docId?: string;
+  colName?: 'cases' | 'counseling';
+}
+
+export interface LayananPdfUploadResult {
+  success: boolean;
+  pdfUrl?: string;
+  driveFileId?: string;
+  fileName?: string;
+  folderPath?: string;
+  error?: string;
+  isDriveFailed?: boolean;
+}
+
+/**
+ * Upload PDF Layanan ke Google Drive via Cloud Function generateLayananPdf
+ * Sesuai aturan:
+ * 1. Dipanggil setelah PDF dibuat oleh tombol [Generate Layanan]
+ * 2. Mengirim data: schoolId, schoolName, jenisLayanan, namaSiswa (inisial), kelas, tanggal
+ * 3. Mengupload ke folder Drive: BK MGMP Kab Semarang / {schoolName} / {jenisLayanan}
+ * 4. Atur permission: Hanya guru dengan schoolId yang sama (BUKAN Public/anyone with link)
+ * 5. Simpan di Firestore doc cases/{docId} atau counseling/{docId}: pdfUrl, driveFileId, pdfGeneratedAt
+ * 6. Jika upload gagal: return { success: false, isDriveFailed: true, error: "PDF berhasil dibuat, tapi gagal simpan ke Drive. Klik [Coba Lagi ke Drive]" }
+ */
+export async function uploadLayananPdfViaCloudFunction(
+  params: LayananPdfUploadParams
+): Promise<LayananPdfUploadResult> {
+  const schoolConfig = getSchoolConfig();
+  const schoolId = params.schoolId || getActiveSchoolId() || 'smpn2susukan';
+  const schoolName = params.schoolName || schoolConfig.schoolName || 'SMPN 2 Susukan';
+  const cleanDate = params.tanggal || new Date().toISOString().split('T')[0];
+  const inisial = getStudentInitials(params.namaSiswa);
+  const fileName = formatLayananPdfFileName(cleanDate, params.jenisLayanan, params.kelas, params.namaSiswa);
+  const folderPath = `BK MGMP Kab Semarang / ${schoolName} / ${params.jenisLayanan}`;
+
+  // 1. Ekstrak Base64 jika disediakan blob/doc
+  let base64 = params.pdfBase64;
+  try {
+    if (!base64 && params.pdfBlobOrDoc) {
+      let blob: Blob;
+      if (params.pdfBlobOrDoc instanceof Blob) {
+        blob = params.pdfBlobOrDoc;
+      } else if (typeof params.pdfBlobOrDoc?.output === 'function') {
+        blob = params.pdfBlobOrDoc.output('blob');
+      } else if (params.pdfBlobOrDoc instanceof ArrayBuffer) {
+        blob = new Blob([params.pdfBlobOrDoc], { type: 'application/pdf' });
+      } else {
+        blob = new Blob([params.pdfBlobOrDoc], { type: 'application/pdf' });
+      }
+      base64 = await blobToBase64(blob);
+    }
+  } catch (convErr) {
+    console.warn('Konversi PDF blob ke base64:', convErr);
+  }
+
+  let driveFileId: string | undefined;
+  let pdfUrl: string | undefined;
+  let uploadSuccess = false;
+
+  // 2. Coba via Firebase Cloud Function generateLayananPdf
+  try {
+    const apps = getApps();
+    if (apps.length > 0) {
+      const functions = getFunctions(apps[0]);
+      const generateFn = httpsCallable<any, any>(functions, 'generateLayananPdf');
+      const response = await generateFn({
+        schoolId,
+        schoolName,
+        jenisLayanan: params.jenisLayanan,
+        namaSiswa: inisial,
+        kelas: params.kelas,
+        tanggal: cleanDate,
+        pdfBase64: base64,
+        docId: params.docId,
+        colName: params.colName || 'counseling',
+      });
+      const data = response?.data;
+      if (data && (data.pdfUrl || data.driveFileId)) {
+        pdfUrl = data.pdfUrl;
+        driveFileId = data.driveFileId;
+        uploadSuccess = true;
+      }
+    }
+  } catch (cfErr: any) {
+    console.warn('Cloud Function generateLayananPdf notice (trying proxy/direct):', cfErr?.message || cfErr);
+  }
+
+  // 3. Fallback ke endpoint server Express /api/drive/generate-layanan-pdf jika di development preview
+  if (!uploadSuccess) {
+    try {
+      const proxyRes = await fetch('/api/drive/generate-layanan-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          schoolId,
+          schoolName,
+          jenisLayanan: params.jenisLayanan,
+          namaSiswa: inisial,
+          kelas: params.kelas,
+          tanggal: cleanDate,
+          pdfBase64: base64,
+          docId: params.docId,
+          colName: params.colName || 'counseling',
+        }),
+      });
+
+      if (proxyRes.ok) {
+        const pData = await proxyRes.json();
+        if (pData.success && (pData.pdfUrl || pData.driveFileId)) {
+          pdfUrl = pData.pdfUrl;
+          driveFileId = pData.driveFileId;
+          uploadSuccess = true;
+        }
+      }
+    } catch (proxyErr) {
+      console.warn('Proxy fallback notice:', proxyErr);
+    }
+  }
+
+  // 4. Fallback ke Direct Drive Upload jika token Google aktif
+  if (!uploadSuccess && base64) {
+    try {
+      const token = await getAccessToken();
+      if (token) {
+        const rootFolder = await getOrCreateDriveFolder(token, 'BK MGMP Kab Semarang');
+        const schoolFolder = await getOrCreateDriveFolder(token, schoolName, rootFolder.id);
+        const serviceFolder = await getOrCreateDriveFolder(token, params.jenisLayanan, schoolFolder.id);
+
+        const boundary = '-------sikapbk' + Math.random().toString(36).substring(2);
+        const metadata = {
+          name: fileName,
+          mimeType: 'application/pdf',
+          parents: [serviceFolder.id],
+          description: `Dokumen Resmi ${params.jenisLayanan} - ${schoolName} (Siswa: ${inisial})`,
+        };
+
+        const byteCharacters = atob(base64);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const fileBlob = new Blob([new Uint8Array(byteNumbers)], { type: 'application/pdf' });
+
+        const dashdash = '--';
+        const crlf = '\r\n';
+        const header = `${dashdash}${boundary}${crlf}Content-Type: application/json; charset=UTF-8${crlf}${crlf}${JSON.stringify(metadata)}${crlf}${dashdash}${boundary}${crlf}Content-Type: application/pdf${crlf}${crlf}`;
+        const footer = `${crlf}${dashdash}${boundary}${dashdash}${crlf}`;
+        const fullBody = new Blob([new Blob([header]), fileBlob, new Blob([footer])], {
+          type: `multipart/related; boundary=${boundary}`,
+        });
+
+        const uploadRes = await fetch(
+          'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink',
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': `multipart/related; boundary=${boundary}`,
+            },
+            body: fullBody,
+          }
+        );
+
+        if (uploadRes.ok) {
+          const fileData = await uploadRes.json();
+          driveFileId = fileData.id;
+          pdfUrl = fileData.webViewLink || `https://drive.google.com/file/d/${driveFileId}/view`;
+          uploadSuccess = true;
+        }
+      }
+    } catch (directDriveErr) {
+      console.warn('Direct Google Drive upload notice:', directDriveErr);
+    }
+  }
+
+  // 5. Simpan link ke Firestore jika upload berhasil
+  if (uploadSuccess && params.docId) {
+    try {
+      const targetCol = params.colName === 'cases' ? 'cases' : 'counseling';
+      const docRef = doc(db, targetCol, params.docId);
+      await setDoc(
+        docRef,
+        {
+          pdfUrl,
+          driveFileId,
+          pdfFileName: fileName,
+          pdfGeneratedAt: serverTimestamp(),
+          schoolId,
+          schoolName,
+        },
+        { merge: true }
+      );
+    } catch (fsErr) {
+      console.warn('Update Firestore with Drive URL notice:', fsErr);
+    }
+  }
+
+  if (uploadSuccess && pdfUrl) {
+    // Dispatch custom event agar UI terupdate realtime
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('bk_layanan_pdf_uploaded', {
+          detail: {
+            docId: params.docId,
+            colName: params.colName,
+            pdfUrl,
+            driveFileId,
+            fileName,
+            folderPath,
+          },
+        })
+      );
+    }
+
+    return {
+      success: true,
+      pdfUrl,
+      driveFileId,
+      fileName,
+      folderPath,
+    };
+  }
+
+  // Jika gagal simpan ke Drive: jangan anggap PDF generate gagal, berikan instruksi coba lagi
+  return {
+    success: false,
+    fileName,
+    isDriveFailed: true,
+    error: 'PDF berhasil dibuat, tapi gagal simpan ke Drive. Klik [Coba Lagi ke Drive]',
+  };
+}
+
