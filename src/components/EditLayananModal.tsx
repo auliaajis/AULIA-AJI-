@@ -63,46 +63,44 @@ export default function EditLayananModal({
   onDelete,
   onClose,
 }: EditLayananModalProps) {
-  if (!service) return null;
-
-  const initialComponent = service.bkComponent || getBKComponentForService(service.serviceType);
+  const initialComponent = service?.bkComponent || (service ? getBKComponentForService(service.serviceType) : 'Layanan Dasar');
   const [bkComponent, setBkComponent] = useState<BKComponentType>(initialComponent);
-  const [serviceType, setServiceType] = useState<BKServiceType>(service.serviceType);
+  const [serviceType, setServiceType] = useState<BKServiceType>(service?.serviceType || 'Layanan Konseling Perorangan (Individual)');
   const [bidangBimbingan, setBidangBimbingan] = useState<BidangBimbinganType>(
-    service.bidangBimbingan || (service.specificDetails?.bidangBimbingan as any) || 'Pribadi'
+    service?.bidangBimbingan || (service?.specificDetails?.bidangBimbingan as any) || 'Pribadi'
   );
-  const [focusIssue, setFocusIssue] = useState<string>(service.focusIssue || '');
+  const [focusIssue, setFocusIssue] = useState<string>(service?.focusIssue || '');
   const [targetType, setTargetType] = useState<'Individu' | 'Kelompok' | 'Klasikal'>(
-    service.targetType || 'Individu'
+    service?.targetType || 'Individu'
   );
   const [selectedStudents, setSelectedStudents] = useState<
     { id: string; name: string; class: string; nis: string }[]
-  >(service.students || []);
+  >(service?.students || []);
 
-  const [date, setDate] = useState(service.date || new Date().toISOString().split('T')[0]);
-  const [startTime, setStartTime] = useState(service.startTime || '08:00');
-  const [endTime, setEndTime] = useState(service.endTime || '08:45');
+  const [date, setDate] = useState(service?.date || new Date().toISOString().split('T')[0]);
+  const [startTime, setStartTime] = useState(service?.startTime || '08:00');
+  const [endTime, setEndTime] = useState(service?.endTime || '08:45');
 
   const [status, setStatus] = useState<'Terjadwal' | 'Selesai' | 'Dibatalkan'>(
-    service.status || 'Terjadwal'
+    service?.status || 'Terjadwal'
   );
-  const [problem, setProblem] = useState(service.problem || '');
-  const [description, setDescription] = useState(service.description || '');
-  const [output, setOutput] = useState(service.output || '');
-  const [followUp, setFollowUp] = useState(service.followUp || '');
-  const [specificDetails, setSpecificDetails] = useState<ServiceSpecificDetails>(service.specificDetails || {});
+  const [problem, setProblem] = useState(service?.problem || '');
+  const [description, setDescription] = useState(service?.description || '');
+  const [output, setOutput] = useState(service?.output || '');
+  const [followUp, setFollowUp] = useState(service?.followUp || '');
+  const [specificDetails, setSpecificDetails] = useState<ServiceSpecificDetails>(service?.specificDetails || {});
   const [showOptionalFields, setShowOptionalFields] = useState(
-    Boolean(service.output || service.followUp || service.proofPhotoUrl)
+    Boolean(service?.output || service?.followUp || service?.proofPhotoUrl)
   );
 
   const formConfig = useMemo(() => {
     return getServiceFormConfig(serviceType, bkComponent);
   }, [serviceType, bkComponent]);
 
-  const [proofPhotoUrl, setProofPhotoUrl] = useState<string>(service.proofPhotoUrl || '');
-  const [proofPhotoName, setProofPhotoName] = useState<string>(service.proofPhotoName || '');
-  const [driveFileId, setDriveFileId] = useState<string | undefined>(service.driveFileId);
-  const [driveViewUrl, setDriveViewUrl] = useState<string | undefined>(service.driveViewUrl);
+  const [proofPhotoUrl, setProofPhotoUrl] = useState<string>(service?.proofPhotoUrl || '');
+  const [proofPhotoName, setProofPhotoName] = useState<string>(service?.proofPhotoName || '');
+  const [driveFileId, setDriveFileId] = useState<string | undefined>(service?.driveFileId);
+  const [driveViewUrl, setDriveViewUrl] = useState<string | undefined>(service?.driveViewUrl);
 
   // Student search/selection popover state
   const [showAddStudentPopover, setShowAddStudentPopover] = useState(false);
@@ -113,6 +111,34 @@ export default function EditLayananModal({
   // Quick Problem & Follow-Up Templates State
   const [customProblemTemplates, setCustomProblemTemplates] = useState<LayananTemplateItem[]>(() => getCustomProblemTemplates());
   const [customFollowUpTemplates, setCustomFollowUpTemplates] = useState<LayananTemplateItem[]>(() => getCustomFollowUpTemplates());
+
+  useEffect(() => {
+    if (!service) return;
+    setBkComponent(service.bkComponent || getBKComponentForService(service.serviceType));
+    setServiceType(service.serviceType);
+    setBidangBimbingan(service.bidangBimbingan || (service.specificDetails?.bidangBimbingan as any) || 'Pribadi');
+    setFocusIssue(service.focusIssue || '');
+    setTargetType(service.targetType || 'Individu');
+    setSelectedStudents(service.students || []);
+    setDate(service.date || new Date().toISOString().split('T')[0]);
+    setStartTime(service.startTime || '08:00');
+    setEndTime(service.endTime || '08:45');
+    setStatus(service.status || 'Terjadwal');
+    setProblem(service.problem || '');
+    setDescription(service.description || '');
+    setOutput(service.output || '');
+    setFollowUp(service.followUp || '');
+    setSpecificDetails(service.specificDetails || {});
+    setShowOptionalFields(Boolean(service.output || service.followUp || service.proofPhotoUrl));
+    setProofPhotoUrl(service.proofPhotoUrl || '');
+    setProofPhotoName(service.proofPhotoName || '');
+    setDriveFileId(service.driveFileId);
+    setDriveViewUrl(service.driveViewUrl);
+    setShowDeleteConfirm(false);
+    setConfirmEmptyFollowUp(false);
+  }, [service?.id]);
+
+  if (!service) return null;
 
   const handleSaveCustomProblem = (name: string, text: string) => {
     const updated = saveCustomProblemTemplate(name, text);

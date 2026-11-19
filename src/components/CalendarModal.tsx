@@ -41,14 +41,14 @@ export default function CalendarModal({
   onAddServiceOnDate,
   onNavigateToTab,
 }: CalendarModalProps) {
-  if (!isOpen) return null;
-
   const [currentDate, setCurrentDate] = useState(() => new Date());
   const [selectedDateStr, setSelectedDateStr] = useState(() => {
     const today = new Date();
     return today.toISOString().split('T')[0];
   });
   const [showExportMenu, setShowExportMenu] = useState(false);
+
+  if (!isOpen) return null;
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth(); // 0-indexed

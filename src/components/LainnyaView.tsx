@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { 
   ArrowLeft, 
   Calendar, 
@@ -57,6 +57,7 @@ import { isDummyStudent, purgeDummyStudents } from '../utils/purgeDummyData';
 import { showToast } from '../utils/toast';
 import PanduanBskap2022Modal from './PanduanBskap2022Modal';
 import UserManualModal from './UserManualModal';
+import ErrorBoundary from './ErrorBoundary';
 
 interface LainnyaViewProps {
   onNavigate: (view: string) => void;
@@ -110,11 +111,15 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
   const [isPermanentDeleting, setIsPermanentDeleting] = useState(false);
 
   // Audit Identitas Sekolah & Migrasi Data Lama Manual
+  const AUDIT_PAGE_SIZE = 20;
   const [auditResult, setAuditResult] = useState<SchoolIdentityAuditResult | null>(null);
   const [isAuditing, setIsAuditing] = useState(false);
   const [showUnassignedList, setShowUnassignedList] = useState(false);
   const [showOtherSchoolList, setShowOtherSchoolList] = useState(false);
   const [auditCategoryFilter, setAuditCategoryFilter] = useState<'Semua' | IdentityAuditCategory>('Semua');
+  const [unassignedPage, setUnassignedPage] = useState(1);
+  const [otherSchoolPage, setOtherSchoolPage] = useState(1);
+  const lastAuditScanKeyRef = useRef<string>('');
   const [showLegacyMigrationConfirm, setShowLegacyMigrationConfirm] = useState(false);
   const [isRunningLegacyMigration, setIsRunningLegacyMigration] = useState(false);
   const [legacyMigrationResult, setLegacyMigrationResult] = useState<MigrationSummaryResult | null>(null);
@@ -149,6 +154,8 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
     try {
       const res = await auditSchoolIdentity(activeCounselor);
       setAuditResult(res);
+      setUnassignedPage(1);
+      setOtherSchoolPage(1);
     } catch (err: any) {
       showToast(`Gagal memindai identitas sekolah: ${err?.message || err}`, 'error');
     } finally {
@@ -158,15 +165,40 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
 
   useEffect(() => {
     if (showEmergencyModal && emergencyUnlocked && emergencyTab === 'audit') {
-      void handleLoadIdentityAudit();
+      const openKey = `${activeCounselor?.schoolId || getActiveSchoolId()}-audit`;
+      if (lastAuditScanKeyRef.current !== openKey) {
+        lastAuditScanKeyRef.current = openKey;
+        void handleLoadIdentityAudit();
+      }
+    } else if (!showEmergencyModal) {
+      lastAuditScanKeyRef.current = '';
     }
   }, [showEmergencyModal, emergencyUnlocked, emergencyTab]);
+
+  useEffect(() => {
+    setUnassignedPage(1);
+  }, [auditCategoryFilter]);
 
   const filteredUnassignedItems = useMemo(() => {
     const list = auditResult?.unassignedItems || [];
     if (auditCategoryFilter === 'Semua') return list;
     return list.filter((it) => it.category === auditCategoryFilter);
   }, [auditResult, auditCategoryFilter]);
+
+  const unassignedTotalPages = Math.max(1, Math.ceil(filteredUnassignedItems.length / AUDIT_PAGE_SIZE));
+  const paginatedUnassignedItems = useMemo(() => {
+    const safePage = Math.min(unassignedPage, unassignedTotalPages);
+    const start = (safePage - 1) * AUDIT_PAGE_SIZE;
+    return filteredUnassignedItems.slice(start, start + AUDIT_PAGE_SIZE);
+  }, [filteredUnassignedItems, unassignedPage, unassignedTotalPages]);
+
+  const otherSchoolItems = auditResult?.otherSchoolItems || [];
+  const otherSchoolTotalPages = Math.max(1, Math.ceil(otherSchoolItems.length / AUDIT_PAGE_SIZE));
+  const paginatedOtherSchoolItems = useMemo(() => {
+    const safePage = Math.min(otherSchoolPage, otherSchoolTotalPages);
+    const start = (safePage - 1) * AUDIT_PAGE_SIZE;
+    return otherSchoolItems.slice(start, start + AUDIT_PAGE_SIZE);
+  }, [otherSchoolItems, otherSchoolPage, otherSchoolTotalPages]);
 
   const handleConfirmRunLegacyMigration = async () => {
     if (!hasConfiguredSchool(activeCounselor)) {
@@ -1116,8 +1148,19 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
         </div>
       )}
 
-      {/* Modal Kelola Data Siswa - Darurat (Dengan Kunci Peringatan) */}
+      {/* Modal Kelola Data Siswa - Darurat (Dengan Kunci Peringatan & Isolasi ErrorBoundary) */}
       {showEmergencyModal && (
+        <ErrorBoundary
+          moduleName="Audit"
+          onHideModule={() => {
+            setShowEmergencyModal(false);
+            onNavigate('data-siswa');
+          }}
+          onNavigateHome={() => {
+            setShowEmergencyModal(false);
+            onNavigate('dashboard');
+          }}
+        >
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
           <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 space-y-4 shadow-2xl border border-gray-200">
             <div className="flex items-center justify-between pb-3 border-b border-gray-100">
@@ -1580,15 +1623,18 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
                       ) : auditResult ? (
                         <div className="space-y-2">
                           <div className="p-3 rounded-xl bg-white border border-[#bcc9c6]/50 text-xs font-bold text-[#0b1c30] tabular-nums leading-relaxed">
-                            Total Data: {auditResult.total} &bull; Sudah punya schoolId {activeSchoolLabel}:{' '}
-                            <span className="text-[#00685f] font-black">{auditResult.ownedByCurrentSchool}</span> &bull; Belum punya schoolId (Data Lama):{' '}
+                            Total: {auditResult.total} &bull; {activeSchoolLabel}:{' '}
+                            <span className="text-[#00685f] font-black">{auditResult.ownedByCurrentSchool}</span> &bull;{' '}
+                            {otherLabels.length > 0 ? otherSchoolLabelDisplay : 'Sekolah Lain'}:{' '}
+                            <span className={auditResult.ownedByOtherSchool > 0 ? 'text-rose-700 font-black' : 'text-[#0b1c30]'}>
+                              {auditResult.ownedByOtherSchool}
+                            </span>{' '}
+                            &bull; Tanpa schoolId:{' '}
                             <span className={auditResult.unassignedLegacy > 0 ? 'text-amber-700 font-black' : 'text-[#00685f]'}>
                               {auditResult.unassignedLegacy}
                             </span>{' '}
-                            &bull; Punya schoolId sekolah lain{otherLabels.length > 0 ? ` (${otherSchoolLabelDisplay})` : ''}:{' '}
-                            <span className={auditResult.ownedByOtherSchool > 0 ? 'text-rose-700 font-black' : 'text-[#0b1c30]'}>
-                              {auditResult.ownedByOtherSchool}
-                            </span>
+                            &bull; isDeleted:{' '}
+                            <span className="text-gray-600 font-black">{auditResult.deletedCount ?? 0}</span>
                           </div>
 
                           <div className="p-3 rounded-xl bg-white border border-[#00685f]/25 text-xs font-bold text-[#0b1c30] tabular-nums leading-relaxed">
@@ -1686,11 +1732,16 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
 
                     {showOtherSchoolList && auditResult && auditResult.otherSchoolItems.length > 0 && (
                       <div className="space-y-2 p-3 rounded-xl border border-rose-200 bg-rose-50/40">
-                        <p className="text-xs font-extrabold text-rose-900">
-                          Daftar Data yang Tercatat ke Sekolah Lain ({auditResult.otherSchoolItems.length})
-                        </p>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-extrabold text-rose-900">
+                            Daftar Data Sekolah Lain ({auditResult.otherSchoolItems.length})
+                          </p>
+                          <span className="text-[11px] font-bold text-rose-800 tabular-nums">
+                            Halaman {Math.min(otherSchoolPage, otherSchoolTotalPages)} / {otherSchoolTotalPages}
+                          </span>
+                        </div>
                         <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-                          {auditResult.otherSchoolItems.map((item) => (
+                          {paginatedOtherSchoolItems.map((item) => (
                             <div
                               key={`other-${item.category}-${item.id}`}
                               className="p-3 rounded-xl border border-rose-200 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
@@ -1718,6 +1769,29 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
                             </div>
                           ))}
                         </div>
+                        {otherSchoolTotalPages > 1 && (
+                          <div className="flex items-center justify-between pt-1.5 border-t border-rose-200/70">
+                            <button
+                              type="button"
+                              disabled={otherSchoolPage <= 1}
+                              onClick={() => setOtherSchoolPage((p) => Math.max(1, p - 1))}
+                              className="px-3 py-1.5 rounded-lg bg-white border border-rose-200 text-xs font-bold text-rose-900 disabled:opacity-40 cursor-pointer"
+                            >
+                              Sebelumnya
+                            </button>
+                            <span className="text-[11px] font-bold text-rose-900 tabular-nums">
+                              20 item/halaman &bull; Hal {Math.min(otherSchoolPage, otherSchoolTotalPages)} dari {otherSchoolTotalPages}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={otherSchoolPage >= otherSchoolTotalPages}
+                              onClick={() => setOtherSchoolPage((p) => Math.min(otherSchoolTotalPages, p + 1))}
+                              className="px-3 py-1.5 rounded-lg bg-white border border-rose-200 text-xs font-bold text-rose-900 disabled:opacity-40 cursor-pointer"
+                            >
+                              Berikutnya
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -1745,35 +1819,60 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
                             Semua data pada kategori ini sudah memiliki identitas sekolah.
                           </div>
                         ) : (
-                          <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                            {filteredUnassignedItems.map((item) => (
-                              <div
-                                key={`${item.category}-${item.id}`}
-                                className="p-3 rounded-xl border border-gray-200 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
-                              >
-                                <div className="min-w-0 space-y-0.5">
-                                  <div className="flex flex-wrap items-center gap-1.5">
-                                    <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 text-[10px] font-extrabold">
-                                      {item.entityType}
-                                    </span>
-                                    {item.date && (
-                                      <span className="text-[10px] font-semibold text-gray-500">{item.date}</span>
-                                    )}
+                          <>
+                            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                              {paginatedUnassignedItems.map((item) => (
+                                <div
+                                  key={`${item.category}-${item.id}`}
+                                  className="p-3 rounded-xl border border-gray-200 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                                >
+                                  <div className="min-w-0 space-y-0.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 text-[10px] font-extrabold">
+                                        {item.entityType}
+                                      </span>
+                                      {item.date && (
+                                        <span className="text-[10px] font-semibold text-gray-500">{item.date}</span>
+                                      )}
+                                    </div>
+                                    <p className="text-xs font-extrabold text-[#0b1c30] break-words">{item.label}</p>
+                                    <p className="text-[11px] text-[#3d4947] break-words">{item.sublabel}</p>
                                   </div>
-                                  <p className="text-xs font-extrabold text-[#0b1c30] break-words">{item.label}</p>
-                                  <p className="text-[11px] text-[#3d4947] break-words">{item.sublabel}</p>
+                                  <button
+                                    type="button"
+                                    disabled={claimingSingleId === item.id || isRunningLegacyMigration}
+                                    onClick={() => handleClaimSingleLegacyItem(item.id, item.label)}
+                                    className="px-3 py-1.5 rounded-xl bg-[#00685f] hover:bg-[#005049] disabled:opacity-50 text-white text-[11px] font-bold shrink-0 cursor-pointer"
+                                  >
+                                    {claimingSingleId === item.id ? 'Menyimpan...' : 'Tandai Sebagai Milik Sekolah Saya'}
+                                  </button>
                                 </div>
+                              ))}
+                            </div>
+                            {unassignedTotalPages > 1 && (
+                              <div className="flex items-center justify-between pt-1.5 border-t border-gray-200">
                                 <button
                                   type="button"
-                                  disabled={claimingSingleId === item.id || isRunningLegacyMigration}
-                                  onClick={() => handleClaimSingleLegacyItem(item.id, item.label)}
-                                  className="px-3 py-1.5 rounded-xl bg-[#00685f] hover:bg-[#005049] disabled:opacity-50 text-white text-[11px] font-bold shrink-0 cursor-pointer"
+                                  disabled={unassignedPage <= 1}
+                                  onClick={() => setUnassignedPage((p) => Math.max(1, p - 1))}
+                                  className="px-3 py-1.5 rounded-lg bg-white border border-gray-300 text-xs font-bold text-[#0b1c30] disabled:opacity-40 cursor-pointer"
                                 >
-                                  {claimingSingleId === item.id ? 'Menyimpan...' : 'Tandai Sebagai Milik Sekolah Saya'}
+                                  Sebelumnya
+                                </button>
+                                <span className="text-[11px] font-bold text-[#3d4947] tabular-nums">
+                                  20 item/halaman &bull; Hal {Math.min(unassignedPage, unassignedTotalPages)} dari {unassignedTotalPages} ({filteredUnassignedItems.length} total)
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={unassignedPage >= unassignedTotalPages}
+                                  onClick={() => setUnassignedPage((p) => Math.min(unassignedTotalPages, p + 1))}
+                                  className="px-3 py-1.5 rounded-lg bg-white border border-gray-300 text-xs font-bold text-[#0b1c30] disabled:opacity-40 cursor-pointer"
+                                >
+                                  Berikutnya
                                 </button>
                               </div>
-                            ))}
-                          </div>
+                            )}
+                          </>
                         )}
                       </div>
                     )}
@@ -1894,6 +1993,7 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
             )}
           </div>
         </div>
+        </ErrorBoundary>
       )}
 
       {/* Konfirmasi 2x Hapus Permanen dari Sampah */}

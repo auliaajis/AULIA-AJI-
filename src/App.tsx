@@ -20,6 +20,7 @@ import LaporanRekapView from './components/LaporanRekapView';
 import StudioPdfMakerView from './components/StudioPdfMakerView';
 import EditLayananModal from './components/EditLayananModal';
 import LayananDetailModal from './components/LayananDetailModal';
+import ErrorBoundary from './components/ErrorBoundary';
 import ToastContainer from './components/ToastContainer';
 import BottomNavBar from './components/BottomNavBar';
 import PageHeaderBanner from './components/PageHeaderBanner';
@@ -2441,6 +2442,13 @@ export default function App() {
   const filteredHomeVisits = useMemo(() => filterHomeVisits(homeVisits, activeCounselor), [homeVisits, activeCounselor]);
   const filteredLogs = useMemo(() => filterLogs(logs, activeCounselor), [logs, activeCounselor]);
 
+  const unseenOverdueCount = useMemo(
+    () => overdueFollowUpIds.filter((id) => !seenOverdueIds.includes(id)).length,
+    [overdueFollowUpIds, seenOverdueIds]
+  );
+
+  const siBecikBadgeCount = unseenOverdueCount + (siBecikUnread ? 1 : 0);
+
   // Render individual view layout switch
   const renderMainView = () => {
     switch (currentView) {
@@ -3307,16 +3315,22 @@ export default function App() {
       case 'lainnya':
       case 'menu-lainnya':
         return (
-          <LainnyaView
-            onNavigate={handleNavigateToTab}
-            activeCounselor={activeCounselor}
-            onLogout={handleLogout}
-            students={filteredStudents}
-            violations={filteredViolations}
-            services={filteredServices}
-            onClearAllStudents={handleClearAllStudents}
-            onAddStudent={handleAddStudent}
-          />
+          <ErrorBoundary
+            moduleName="Audit"
+            onHideModule={() => setCurrentView('data-siswa')}
+            onNavigateHome={() => setCurrentView('dashboard')}
+          >
+            <LainnyaView
+              onNavigate={handleNavigateToTab}
+              activeCounselor={activeCounselor}
+              onLogout={handleLogout}
+              students={filteredStudents}
+              violations={filteredViolations}
+              services={filteredServices}
+              onClearAllStudents={handleClearAllStudents}
+              onAddStudent={handleAddStudent}
+            />
+          </ErrorBoundary>
         );
       case 'profil-siswa':
       case 'profil': {
@@ -3692,13 +3706,6 @@ export default function App() {
     !isKeyboardOpen &&
     !isFormOrModalOpen;
 
-  const unseenOverdueCount = useMemo(
-    () => overdueFollowUpIds.filter((id) => !seenOverdueIds.includes(id)).length,
-    [overdueFollowUpIds, seenOverdueIds]
-  );
-
-  const siBecikBadgeCount = unseenOverdueCount + (siBecikUnread ? 1 : 0);
-
   return (
     <div className="min-h-screen bg-[#f8fafa] text-[#0b1c30] app-root">
       {/* Main Full-Width Column (Sidebar removed for clean, focused layout) */}
@@ -3789,6 +3796,7 @@ export default function App() {
 
       {/* Edit Scheduled Service Modal */}
       <EditLayananModal
+        key={editingService?.id || 'edit-layanan-empty'}
         service={editingService}
         students={filterStudents(students, activeCounselor)}
         onSave={(updated) => {

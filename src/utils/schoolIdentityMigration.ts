@@ -61,6 +61,7 @@ export interface SchoolIdentityAuditResult {
   ownedByCurrentSchool: number;
   unassignedLegacy: number;
   ownedByOtherSchool: number;
+  deletedCount: number;
   totalStudents: number;
   studentBreakdown: {
     currentSchool: number;
@@ -240,6 +241,7 @@ export async function auditSchoolIdentity(counselor?: Counselor | null): Promise
 
   // Track unique records per logical dataset group + id
   const seenLogicalIds = new Set<string>();
+  const seenDeletedIds = new Set<string>();
   let total = 0;
   let ownedByCurrentSchool = 0;
   let unassignedLegacy = 0;
@@ -278,7 +280,11 @@ export async function auditSchoolIdentity(counselor?: Counselor | null): Promise
           rawList.forEach((it: any) => {
             if (!it || !it.id) return;
             const rid = String(it.id).trim();
-            if (it.isDeleted === true || deletedSet.has(rid) || isDummyRecord(it, localKey)) return;
+            if (it.isDeleted === true || deletedSet.has(rid)) {
+              seenDeletedIds.add(`${ds.logicalGroup}:${rid}`);
+              return;
+            }
+            if (isDummyRecord(it, localKey)) return;
             if (!recordMap.has(rid)) {
               recordMap.set(rid, { item: it, matchedCols: new Set(ds.colNames), refPaths: [] });
             }
@@ -315,6 +321,9 @@ export async function auditSchoolIdentity(counselor?: Counselor | null): Promise
             const data = d.data();
             const rid = String(d.id).trim();
             if (!data || data.isDeleted === true || deletedSet.has(rid)) {
+              if (data?.isDeleted === true || deletedSet.has(rid)) {
+                seenDeletedIds.add(`${ds.logicalGroup}:${rid}`);
+              }
               recordMap.delete(rid);
               return;
             }
@@ -457,6 +466,7 @@ export async function auditSchoolIdentity(counselor?: Counselor | null): Promise
     ownedByCurrentSchool,
     unassignedLegacy,
     ownedByOtherSchool,
+    deletedCount: seenDeletedIds.size,
     totalStudents,
     studentBreakdown,
     otherSchoolLabels: Array.from(detectedOtherSchoolLabels),
