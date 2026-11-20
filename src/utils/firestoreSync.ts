@@ -340,8 +340,71 @@ export interface CloudConnectionInfo {
   clientTabId?: string;
 }
 
+export interface CloudSyncRecordInfo {
+  syncedAtIso: string;
+  timeLabel: string;
+  dateTimeLabel: string;
+  status: 'synced' | 'unsynced' | 'offline';
+  counts?: Record<string, number>;
+}
+
+const CLOUD_LAST_SYNC_PREFIX = 'bk_cloud_last_sync_';
+
+export function getLastCloudSyncInfo(schoolId?: string): CloudSyncRecordInfo {
+  const sid = sanitizeSchoolId(schoolId || getActiveSchoolId());
+  const pendingCount = getPendingCloudQueue().length;
+  const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(`${CLOUD_LAST_SYNC_PREFIX}${sid}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.syncedAtIso) {
+          return {
+            syncedAtIso: parsed.syncedAtIso,
+            timeLabel: parsed.timeLabel || new Date(parsed.syncedAtIso).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+            dateTimeLabel: parsed.dateTimeLabel || new Date(parsed.syncedAtIso).toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+            status: !isOnline ? 'offline' : pendingCount > 0 ? 'unsynced' : 'synced',
+            counts: parsed.counts
+          };
+        }
+      }
+    } catch {}
+  }
+
+  return {
+    syncedAtIso: '',
+    timeLabel: '-',
+    dateTimeLabel: 'Belum pernah sinkron',
+    status: !isOnline ? 'offline' : 'unsynced'
+  };
+}
+
+export function markCloudSyncCompleted(schoolId?: string, counts?: Record<string, number>): CloudSyncRecordInfo {
+  const sid = sanitizeSchoolId(schoolId || getActiveSchoolId());
+  const now = new Date();
+  const info: CloudSyncRecordInfo = {
+    syncedAtIso: now.toISOString(),
+    timeLabel: now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+    dateTimeLabel: now.toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+    status: 'synced',
+    counts
+  };
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(`${CLOUD_LAST_SYNC_PREFIX}${sid}`, JSON.stringify(info));
+    } catch {}
+  }
+  return info;
+}
+
 let currentCloudStatus: CloudStatus = typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'connected';
-let lastSyncTimestamp: string = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+let lastSyncTimestamp: string = (() => {
+  const saved = getLastCloudSyncInfo();
+  if (saved.syncedAtIso) return saved.timeLabel;
+  return new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+})();
 
 export function getCloudConnectionInfo(): CloudConnectionInfo {
   const currentSchool = getSchoolConfig();
@@ -478,9 +541,12 @@ export function updateLocalDocWithRemote(localKey: string, remoteDoc: any, schoo
   }
 }
 
-function notifyCloudStatusChange(status: CloudStatus) {
+function notifyCloudStatusChange(status: CloudStatus, recordSync = false) {
   currentCloudStatus = status;
   lastSyncTimestamp = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  if (recordSync && status === 'connected') {
+    markCloudSyncCompleted(getActiveSchoolId());
+  }
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('bk_cloud_status', { detail: getCloudConnectionInfo() }));
   }
@@ -1887,15 +1953,18 @@ export function clearLocalDataCachesOnLogin(schoolIdInput?: string): void {
 }
 
 /**
- * Save an entire list of array items to Firestore (School-scoped Batch)
+ * Push a collection list to Firestore with detailed success/count feedback
  */
-export async function saveBulkToFirestore(
-  localKey: string, 
-  items: any[], 
+export async function pushCollectionToFirestore(
+  localKey: string,
+  items: any[],
   customSchoolId?: string,
-  isIntentionalWipe: boolean = false
-): Promise<void> {
-  if (!Array.isArray(items) || isQuotaExceeded) return;
+  isIntentionalWipe: boolean = false,
+  options?: { stampMissingSchoolId?: boolean; bypassCache?: boolean }
+): Promise<{ success: boolean; count: number; error?: string }> {
+  if (!Array.isArray(items) || isQuotaExceeded) {
+    return { success: false, count: 0, error: isQuotaExceeded ? 'Kuota Firestore terlampaui' : 'Data tidak valid' };
+  }
 
   const deletedSet = new Set(getDeletedIds());
   const activeCleanItems = items.filter(
@@ -1904,12 +1973,11 @@ export async function saveBulkToFirestore(
 
   const schoolId = customSchoolId || getActiveSchoolId();
   const cacheKey = `${schoolId}_${localKey}`;
-  const sortedItems = sortCollectionData(localKey, activeCleanItems);
+  const sortedItems = sortCollectionData(localKey, activeCleanItems, schoolId);
   const currentStr = JSON.stringify(sortedItems);
 
-  if (lastSavedRemoteMap[cacheKey] === currentStr) {
-    // Already in sync with remote, skip unnecessary network roundtrip
-    return;
+  if (!options?.bypassCache && !options?.stampMissingSchoolId && lastSavedRemoteMap[cacheKey] === currentStr) {
+    return { success: true, count: sortedItems.length };
   }
 
   const colName = SYNC_MAP[localKey] || localKey;
@@ -1920,8 +1988,7 @@ export async function saveBulkToFirestore(
     // If local collection was intentionally emptied by an explicit admin reset, soft-delete documents
     if (sortedItems.length === 0) {
       if (!isIntentionalWipe) {
-        // Prevent accidental cloud wipe from empty local initial state
-        return;
+        return { success: true, count: 0 };
       }
       const deletedAt = formatDeletedAtIndonesian(new Date());
       const deletedAtMs = Date.now();
@@ -1950,16 +2017,21 @@ export async function saveBulkToFirestore(
         }
       }
       lastSavedRemoteMap[cacheKey] = currentStr;
-      notifyCloudStatusChange('connected');
-      return;
+      notifyCloudStatusChange('connected', true);
+      return { success: true, count: 0 };
     }
 
-    // Chunk batch writes to avoid Firestore's 500-doc limit
     const CHUNK_SIZE = 400;
     const now = Date.now();
+    let writtenCount = 0;
+    const defaultSchoolName = schoolId === 'sch_20320123'
+      ? 'SMP N 2 Susukan'
+      : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan');
+
     for (let i = 0; i < sortedItems.length; i += CHUNK_SIZE) {
       const chunk = sortedItems.slice(i, i + CHUNK_SIZE);
       const batch = writeBatch(db);
+      let chunkOps = 0;
       for (const item of chunk) {
         if (item && item.id) {
           const currentVersion = getItemVersion(item);
@@ -1967,51 +2039,81 @@ export async function saveBulkToFirestore(
           const currentTimestamp = getItemTimestamp(item) || now;
 
           const hasAssignedId = extractRecordSchoolId(item) !== '' && !item.isLegacyUnmigrated;
-          if (!hasAssignedId) continue; // Jangan auto-migrasi data lama saat sync biasa; migrasi hanya lewat tombol manual
-          const itemSchoolName = item.schoolName || (schoolId === 'sch_20320123' ? 'SMP N 2 Susukan' : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan'));
+          if (!hasAssignedId && !options?.stampMissingSchoolId) continue;
+
+          const itemSchoolName = item.schoolName || defaultSchoolName;
           const ref = getSchoolDocRef(colName, String(item.id), schoolId);
-          const payload = { 
-            ...item, 
+          const cleanItem = { ...item };
+          if (options?.stampMissingSchoolId) {
+            delete cleanItem.isLegacyUnmigrated;
+          }
+          const payload = {
+            ...cleanItem,
             isDeleted: false,
             schoolId,
+            sekolahId: cleanItem.sekolahId || schoolId,
             schoolName: itemSchoolName,
+            namaSekolah: cleanItem.namaSekolah || itemSchoolName,
             _version: nextVersion,
             _updatedAt: currentTimestamp,
             _lastModifiedByTab: CLIENT_TAB_ID
           };
           batch.set(ref, payload, { merge: true });
+          chunkOps++;
+          writtenCount++;
         }
       }
-      await batch.commit();
+      if (chunkOps > 0) {
+        await batch.commit();
+      }
     }
 
     lastSavedRemoteMap[cacheKey] = currentStr;
-    notifyCloudStatusChange('connected');
-  } catch (err) {
+    notifyCloudStatusChange('connected', true);
+    return { success: true, count: writtenCount };
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
     if (!checkAndHandleQuotaError(err)) {
       console.warn(`Firestore bulk save batch commit failed [${schoolId}/${colName}], executing atomic setDoc fallback:`, err);
-      // Fallback: save individually with setDoc so Firestore client queues them in offline cache
+      const defaultSchoolName = schoolId === 'sch_20320123'
+        ? 'SMP N 2 Susukan'
+        : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan');
       for (const item of sortedItems) {
         if (item && item.id) {
           const hasAssignedId = extractRecordSchoolId(item) !== '' && !item.isLegacyUnmigrated;
-          if (!hasAssignedId) continue;
+          if (!hasAssignedId && !options?.stampMissingSchoolId) continue;
           try {
-            const itemSchoolName = item.schoolName || (schoolId === 'sch_20320123' ? 'SMP N 2 Susukan' : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan'));
+            const itemSchoolName = item.schoolName || defaultSchoolName;
             const ref = getSchoolDocRef(colName, String(item.id), schoolId);
-            setDoc(ref, { 
-              ...item, 
+            setDoc(ref, {
+              ...item,
               isDeleted: false,
               schoolId,
+              sekolahId: item.sekolahId || schoolId,
               schoolName: itemSchoolName,
               _version: getItemVersion(item) || 1,
               _updatedAt: getItemTimestamp(item) || Date.now(),
               _lastModifiedByTab: CLIENT_TAB_ID
             }, { merge: true }).catch(() => {});
-          } catch (e) {}
+          } catch {}
         }
       }
     }
+    return { success: false, count: 0, error: errMsg };
   }
+}
+
+/**
+ * Save an entire list of array items to Firestore (School-scoped Batch)
+ */
+export async function saveBulkToFirestore(
+  localKey: string,
+  items: any[],
+  customSchoolId?: string,
+  isIntentionalWipe: boolean = false,
+  options?: { stampMissingSchoolId?: boolean }
+): Promise<void> {
+  await pushCollectionToFirestore(localKey, items, customSchoolId, isIntentionalWipe, options);
 }
 
 /**
@@ -2994,17 +3096,18 @@ export async function forceFullCloudSync(): Promise<void> {
         const hadDeletedInLocal = Array.isArray(localList) && localList.some(
           item => item && (item.isDeleted === true || deletedSet.has(String(item.id)))
         );
+        const isExplicitClear = typeof localStorage !== 'undefined' &&
+          (localStorage.getItem(`bk_cleared_${currentSchoolId}`) === 'true' || localStorage.getItem(`bk_students_cleared_${currentSchoolId}`) === 'true');
+        const activeLocalItems = Array.isArray(localList)
+          ? localList.filter(item => item && item.id && item.isDeleted !== true && !deletedSet.has(String(item.id)) && !isDummyRecord(item, localKey))
+          : [];
 
         if (docsData.length > 0 || hadDeletedInLocal) {
-          // Merge safely with non-dummy & non-deleted local records
+          // Kasus 1: Firestore memiliki data (atau ada jejak penghapusan) -> gabungkan aman tanpa menghapus data lama
           const mergedMap = new Map<string, any>();
-          if (Array.isArray(localList)) {
-            localList.forEach(item => {
-              if (item && item.id && item.isDeleted !== true && !deletedSet.has(String(item.id)) && !isDummyRecord(item, localKey)) {
-                mergedMap.set(String(item.id), item);
-              }
-            });
-          }
+          activeLocalItems.forEach(item => {
+            mergedMap.set(String(item.id), item);
+          });
           docsData.forEach(remoteItem => {
             const rid = String(remoteItem.id);
             if (deletedSet.has(rid) || remoteItem.isDeleted === true) return;
@@ -3015,8 +3118,6 @@ export async function forceFullCloudSync(): Promise<void> {
           });
 
           const sortedDocs = sortCollectionData(localKey, Array.from(mergedMap.values()), currentSchoolId);
-          const isExplicitClear = typeof localStorage !== 'undefined' &&
-            (localStorage.getItem(`bk_cleared_${currentSchoolId}`) === 'true' || localStorage.getItem(`bk_students_cleared_${currentSchoolId}`) === 'true');
           if (Array.isArray(localList) && localList.length > 5 && sortedDocs.length === 0 && !isExplicitClear) {
             console.warn(`[FirestoreSync] Anti-mass-wipe in forceFullCloudSync for ${localKey}`);
             continue;
@@ -3031,6 +3132,12 @@ export async function forceFullCloudSync(): Promise<void> {
             data: sortedDocs,
             schoolId: currentSchoolId
           });
+        } else if (docsData.length === 0 && activeLocalItems.length > 0 && !isExplicitClear) {
+          // Kasus 2: Firestore kosong, tetapi lokal memiliki data aktif -> upload data lokal ke Firestore (mode merge, jangan timpa kosong)
+          await pushCollectionToFirestore(localKey, activeLocalItems, currentSchoolId, false, {
+            stampMissingSchoolId: true,
+            bypassCache: true
+          }).catch(() => {});
         }
       }
     } catch (e) {
@@ -3041,7 +3148,7 @@ export async function forceFullCloudSync(): Promise<void> {
   });
 
   await Promise.all([pullAccReqs(), ...pullCollections]);
-  notifyCloudStatusChange('connected');
+  notifyCloudStatusChange('connected', true);
 }
 
 let hasRegisteredSchoolListener = false;

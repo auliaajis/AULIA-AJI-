@@ -10,6 +10,7 @@ import ProfilSiswaView from './components/ProfilSiswaView';
 import PengaturanView from './components/PengaturanView';
 import AbsensiView from './components/AbsensiView';
 import GoogleIntegrationView from './components/GoogleIntegrationView';
+import BackupRestoreView from './components/BackupRestoreView';
 import JurnalHarianView from './components/JurnalHarianView';
 import PanggilanOrangTuaView from './components/PanggilanOrangTuaView';
 import HomeVisitView from './components/HomeVisitView';
@@ -3305,6 +3306,39 @@ export default function App() {
             activeCounselor={activeCounselor}
           />
         );
+      case 'backup-restore':
+        return (
+          <BackupRestoreView
+            activeCounselor={activeCounselor}
+            liveState={{
+              students,
+              violations,
+              services,
+              logs,
+              achievements,
+              homeVisits,
+              programEvaluations,
+              serviceEvaluations,
+              allCounselors,
+            }}
+            onBack={() => setCurrentView('lainnya')}
+            onDataRestored={() => {
+              const sid = getActiveSchoolId();
+              setStudents(loadSchoolData('bk_students', [], sid));
+              setViolations(loadSchoolData('bk_violations', [], sid));
+              setServices(loadSchoolData('bk_services', [], sid));
+              setLogs(loadSchoolData('bk_logs', [], sid));
+              setAchievements(loadSchoolData('bk_achievements', [], sid));
+              setHomeVisits(loadSchoolData('bk_home_visits', [], sid));
+              setProgramEvaluations(loadSchoolData('bk_program_evaluations', [], sid));
+              setServiceEvaluations(loadSchoolData('bk_service_evaluations', [], sid));
+              const nextCounselors = loadSchoolData('bk_counselors', [], sid);
+              if (Array.isArray(nextCounselors) && nextCounselors.length > 0) {
+                setAllCounselors(nextCounselors);
+              }
+            }}
+          />
+        );
       case 'surat-panggilan':
         return (
           <PanggilanOrangTuaView
@@ -3642,6 +3676,8 @@ export default function App() {
         return 'Pengaturan Profil Guru BK';
       case 'google-sync':
         return 'Cadangan Data & Sinkronisasi Drive';
+      case 'backup-restore':
+        return 'Backup & Restore Semua Data';
       case 'asesmen-bk':
       case 'asesmen':
         return 'Sosiometri & Asesmen Siswa';
