@@ -1,6 +1,4 @@
-import { initializeApp } from 'firebase/app';
 import { 
-  getAuth, 
   signInWithPopup, 
   signInWithRedirect, 
   getRedirectResult, 
@@ -8,11 +6,9 @@ import {
   onAuthStateChanged, 
   User 
 } from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
+import { auth } from '../firebase';
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
+export { auth };
 
 // Configure Google Auth Provider
 export const provider = new GoogleAuthProvider();

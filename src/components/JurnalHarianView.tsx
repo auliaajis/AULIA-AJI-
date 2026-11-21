@@ -118,24 +118,40 @@ export default function JurnalHarianView({
     return localDate.toISOString().split('T')[0];
   });
 
+  const readScopedOrLegacyArray = (primaryKey: string, altKey?: string): any[] => {
+    const sId = activeCounselor?.schoolId;
+    const primaryScoped = loadSchoolData<any[]>(primaryKey, [], sId);
+    if (Array.isArray(primaryScoped) && primaryScoped.length > 0) return primaryScoped;
+    if (altKey) {
+      const altScoped = loadSchoolData<any[]>(altKey, [], sId);
+      if (Array.isArray(altScoped) && altScoped.length > 0) return altScoped;
+    }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const raw = localStorage.getItem(primaryKey) || (altKey ? localStorage.getItem(altKey) : null);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) return parsed;
+        }
+      } catch {}
+    }
+    return [];
+  };
+
   const getRangeAutoActivities = (start: string, end: string) => {
     const rangeServices = services.filter(s => s.date >= start && s.date <= end);
     const rangeViolations = violations.filter(v => v.date >= start && v.date <= end);
 
-    const savedHomeVisits = localStorage.getItem('bk_home_visits');
-    const homeVisits: any[] = savedHomeVisits ? JSON.parse(savedHomeVisits) : [];
+    const homeVisits = readScopedOrLegacyArray('bk_home_visits');
     const rangeHomeVisits = homeVisits.filter(hv => hv.date >= start && hv.date <= end);
 
-    const savedSummons = localStorage.getItem('bk_parent_summons');
-    const summons: any[] = savedSummons ? JSON.parse(savedSummons) : [];
+    const summons = readScopedOrLegacyArray('bk_parent_summons');
     const rangeSummons = summons.filter(sm => (sm.summonDate || sm.date) >= start && (sm.summonDate || sm.date) <= end);
 
-    const savedAch = localStorage.getItem('bk_student_achievements');
-    const achievements: any[] = savedAch ? JSON.parse(savedAch) : [];
+    const achievements = readScopedOrLegacyArray('bk_achievements', 'bk_student_achievements');
     const rangeAch = achievements.filter(a => a.date >= start && a.date <= end);
 
-    const savedAtt = localStorage.getItem('bk_attendance_history');
-    const attendanceHistory: any[] = savedAtt ? JSON.parse(savedAtt) : [];
+    const attendanceHistory = readScopedOrLegacyArray('bk_attendance_history');
     const rangeAtt = attendanceHistory.filter(att => {
       const d = normalizeDateStr(att.date);
       return d >= start && d <= end;
@@ -431,9 +447,8 @@ export default function JurnalHarianView({
   // Automatically load absent students from attendance logs
   const handleAutoLoadAbsensi = (customClassTarget?: string) => {
     let detected = customClassTarget || findSelectedClass();
-    
-    const saved = localStorage.getItem('bk_attendance_history');
-    const attendanceHistory: any[] = saved ? JSON.parse(saved) : [];
+
+    const attendanceHistory: any[] = readScopedOrLegacyArray('bk_attendance_history');
     const dateNorm = normalizeDateStr(selectedDate);
 
     // If still not detected, and there is attendance on this date, check if there's only 1 record or suggest
@@ -610,15 +625,18 @@ export default function JurnalHarianView({
       }
     };
 
-    window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
-    window.addEventListener('storage', (e) => {
+    const handleStorageEvent = (e: StorageEvent) => {
       if (e.key && (e.key === 'bk_daily_journals' || e.key.startsWith('bk_daily_journals_sch_'))) {
         handleRealtimeUpdate({ detail: { key: 'bk_daily_journals' } });
       }
-    });
+    };
+
+    window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
+    window.addEventListener('storage', handleStorageEvent);
 
     return () => {
       window.removeEventListener('bk_realtime_sync', handleRealtimeUpdate);
+      window.removeEventListener('storage', handleStorageEvent);
     };
   }, [activeCounselor?.schoolId]);
 

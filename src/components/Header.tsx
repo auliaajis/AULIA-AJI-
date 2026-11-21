@@ -235,13 +235,16 @@ export default function Header({
         setCloudInfo(getCloudConnectionInfo());
       }
     };
-    window.addEventListener('bk_cloud_status', handleCloudStatus);
-    const interval = setInterval(() => {
+    const handleOnlineOffline = () => {
       setCloudInfo(getCloudConnectionInfo());
-    }, 4000);
+    };
+    window.addEventListener('bk_cloud_status', handleCloudStatus);
+    window.addEventListener('online', handleOnlineOffline);
+    window.addEventListener('offline', handleOnlineOffline);
     return () => {
       window.removeEventListener('bk_cloud_status', handleCloudStatus);
-      clearInterval(interval);
+      window.removeEventListener('online', handleOnlineOffline);
+      window.removeEventListener('offline', handleOnlineOffline);
     };
   }, []);
 
@@ -601,8 +604,21 @@ export default function Header({
         {/* Action Items - Responsive layout */}
         <div className="flex items-center gap-1 sm:gap-1.5 md:gap-2 shrink-0">
           {/* Cloud-First Realtime Connection Indicator & Details Popover */}
-          <div ref={cloudPopoverRef} className="relative hidden md:block">
-            <button 
+          {(() => {
+            const isErrorState = cloudInfo.status === 'error' || cloudInfo.status === 'quota_exceeded';
+            const isOfflineState = !cloudInfo.isOnline || cloudInfo.status === 'offline';
+            const isSyncingState = !isOfflineState && !isErrorState && cloudInfo.status === 'syncing';
+            const statusLabel = isErrorState
+              ? 'Gagal Sinkron'
+              : isOfflineState
+              ? 'Offline - Menunggu sinkron'
+              : isSyncingState
+              ? 'Menyinkronkan...'
+              : 'Tersambung - Real-time';
+
+            return (
+          <div ref={cloudPopoverRef} className="relative">
+            <button
               type="button"
               onClick={() => {
                 setShowCloudPopover(!showCloudPopover);
@@ -611,34 +627,40 @@ export default function Header({
                 if (showEarlyWarningMenu) setShowEarlyWarningMenu(false);
                 if (showMobileMoreMenu) setShowMobileMoreMenu(false);
               }}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-bold transition-all duration-200 cursor-pointer shadow-2xs border shrink-0 ${
-                cloudInfo.status === 'connected'
-                  ? 'bg-emerald-50 text-[#00685f] border-emerald-300/80 hover:bg-emerald-100'
-                  : cloudInfo.status === 'syncing'
-                  ? 'bg-sky-50 text-sky-800 border-sky-300/80 hover:bg-sky-100'
-                  : 'bg-amber-50 text-amber-800 border-amber-300/80 hover:bg-amber-100'
+              className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-full text-[11px] font-bold transition-all duration-200 cursor-pointer shadow-2xs border shrink-0 ${
+                isErrorState
+                  ? 'bg-rose-50 text-rose-800 border-rose-300/80 hover:bg-rose-100'
+                  : isOfflineState
+                  ? 'bg-amber-50 text-amber-800 border-amber-300/80 hover:bg-amber-100'
+                  : isSyncingState
+                  ? 'bg-amber-50 text-amber-800 border-amber-300/80 hover:bg-amber-100'
+                  : 'bg-emerald-50 text-[#00685f] border-emerald-300/80 hover:bg-emerald-100'
               }`}
-              title="Status Koneksi Cloud Database Realtime - Klik untuk detail"
+              title={`${statusLabel}${cloudInfo.lastError ? ` — ${cloudInfo.lastError}` : ' - Klik untuk detail'}`}
             >
-              <span className="relative flex h-2 w-2">
-                {cloudInfo.status === 'connected' ? (
+              <span className="relative flex h-2 w-2 shrink-0">
+                {isErrorState ? (
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                ) : isOfflineState || isSyncingState ? (
+                  <>
+                    {isSyncingState && (
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                    )}
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                  </>
+                ) : (
                   <>
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                   </>
-                ) : cloudInfo.status === 'syncing' ? (
-                  <>
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-500"></span>
-                  </>
-                ) : (
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
                 )}
               </span>
-              <Cloud className="w-3.5 h-3.5 shrink-0" />
-              <span className="hidden xl:inline">
-                {cloudInfo.status === 'connected' ? 'Cloud Terhubung' : cloudInfo.status === 'syncing' ? 'Menyinkronkan...' : 'Cloud Lokal'}
-              </span>
+              {isOfflineState ? (
+                <WifiOff className="w-3.5 h-3.5 shrink-0" />
+              ) : (
+                <Cloud className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span className="hidden lg:inline whitespace-nowrap">{statusLabel}</span>
             </button>
 
             {/* Cloud Status Popover Card */}
@@ -653,7 +675,7 @@ export default function Header({
                 >
                   <div className="flex items-center justify-between pb-3 border-b border-gray-100 mb-3">
                     <div className="flex items-center gap-2">
-                      <div className="p-1.5 bg-emerald-50 rounded-lg text-[#00685f]">
+                      <div className={`p-1.5 rounded-lg ${isErrorState ? 'bg-rose-50 text-rose-700' : isOfflineState ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-[#00685f]'}`}>
                         <Cloud className="w-4 h-4" />
                       </div>
                       <div>
@@ -671,13 +693,24 @@ export default function Header({
                   </div>
 
                   <div className="space-y-2.5 text-xs text-[#3d4947]">
-                    <div className="flex items-center justify-between p-2 rounded-xl bg-[#f8faf9] border border-[#bcc9c6]/20">
-                      <span className="text-gray-500 text-[11px]">Status Stream:</span>
-                      <span className="inline-flex items-center gap-1 font-bold text-[#00685f]">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                        {cloudInfo.status === 'connected' ? 'Aktif (Real-time Push & Pull)' : cloudInfo.status}
+                    <div className="flex items-center justify-between p-2 rounded-xl bg-[#f8faf9] border border-[#bcc9c6]/20 gap-2">
+                      <span className="text-gray-500 text-[11px] shrink-0">Status Stream:</span>
+                      <span className={`inline-flex items-center gap-1.5 font-bold text-right ${
+                        isErrorState ? 'text-rose-700' : isOfflineState || isSyncingState ? 'text-amber-700' : 'text-[#00685f]'
+                      }`}>
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${
+                          isErrorState ? 'bg-rose-500' : isOfflineState || isSyncingState ? 'bg-amber-500' : 'bg-emerald-500'
+                        }`}></span>
+                        {statusLabel}
                       </span>
                     </div>
+
+                    {cloudInfo.lastError && (
+                      <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-[11px] leading-snug break-words">
+                        <strong className="font-extrabold block mb-0.5">Detail Error Sinkronisasi:</strong>
+                        {cloudInfo.lastError}
+                      </div>
+                    )}
 
                     <div className="flex items-center justify-between px-2 text-[11px]">
                       <span className="text-gray-500">Koleksi Terhubung:</span>
@@ -700,7 +733,7 @@ export default function Header({
 
                     <div className="flex items-center justify-between px-2 text-[11px]">
                       <span className="text-gray-500">Koneksi Internet:</span>
-                      <span className="font-bold text-emerald-700 flex items-center gap-1">
+                      <span className={`font-bold flex items-center gap-1 ${cloudInfo.isOnline ? 'text-emerald-700' : 'text-rose-600'}`}>
                         {cloudInfo.isOnline ? <Wifi className="w-3.5 h-3.5 text-emerald-600" /> : <WifiOff className="w-3.5 h-3.5 text-rose-600" />}
                         {cloudInfo.isOnline ? 'Online' : 'Offline'}
                       </span>
@@ -748,6 +781,8 @@ export default function Header({
               )}
             </AnimatePresence>
           </div>
+            );
+          })()}
 
           {/* Quick Sync Button on Header Bar */}
           <button

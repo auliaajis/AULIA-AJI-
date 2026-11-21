@@ -37,11 +37,14 @@ import {
   parseBackupFilePreview,
   restoreBackupData,
   syncAllLocalDataToFirestore,
+  hasCompletedLegacyFirestoreMigration,
+  migrateLegacyLocalDataToFirestore,
   formatFileSize,
   LiveAppDataInput,
   BackupDownloadResult,
   BackupPreviewResult,
   RestoreExecutionResult,
+  LegacyMigrationResult,
 } from '../utils/backupRestore';
 
 interface BackupRestoreViewProps {
@@ -78,6 +81,16 @@ export default function BackupRestoreView({
 
   const [showReplaceConfirmModal, setShowReplaceConfirmModal] = useState(false);
   const [confirmYaInput, setConfirmYaInput] = useState('');
+
+  const [hasMigratedLegacy, setHasMigratedLegacy] = useState<boolean>(() =>
+    hasCompletedLegacyFirestoreMigration(schoolId)
+  );
+  const [isMigratingLegacy, setIsMigratingLegacy] = useState(false);
+  const [legacyMigrationResult, setLegacyMigrationResult] = useState<LegacyMigrationResult | null>(null);
+
+  useEffect(() => {
+    setHasMigratedLegacy(hasCompletedLegacyFirestoreMigration(schoolId));
+  }, [schoolId]);
 
   useEffect(() => {
     const updateCloudState = () => {
@@ -180,6 +193,41 @@ export default function BackupRestoreView({
       showToast('Gagal sinkron ke Cloud.', 'error');
     } finally {
       setIsSyncingCloud(false);
+    }
+  };
+
+  const handleMigrateLegacyToFirestore = async () => {
+    setIsMigratingLegacy(true);
+    setLegacyMigrationResult(null);
+    try {
+      const res = await migrateLegacyLocalDataToFirestore(activeCounselor, liveState);
+      setLegacyMigrationResult(res);
+      setRefreshTick((t) => t + 1);
+      setCloudInfo(getLastCloudSyncInfo(schoolId));
+      if (res.success) {
+        setHasMigratedLegacy(true);
+        if (onDataRestored) onDataRestored();
+        showToast(res.message, 'success');
+      } else {
+        showToast(res.message, 'error');
+      }
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      setLegacyMigrationResult({
+        success: false,
+        alreadyMigrated: false,
+        migratedStudents: 0,
+        migratedViolations: 0,
+        migratedServices: 0,
+        migratedOther: 0,
+        skippedDuplicates: 0,
+        totalMigrated: 0,
+        message: `Gagal migrasi data lama ke Firestore: ${msg}`,
+        error: msg,
+      });
+      showToast('Gagal migrasi data lama ke Firestore.', 'error');
+    } finally {
+      setIsMigratingLegacy(false);
     }
   };
 
@@ -399,6 +447,71 @@ export default function BackupRestoreView({
           </div>
         </div>
       </div>
+
+      {/* One-Time Legacy Migration Card (Hidden automatically after successful completion) */}
+      {(!hasMigratedLegacy || legacyMigrationResult) && (
+        <div className="bg-white rounded-2xl p-5 sm:p-6 border border-[#00685f]/30 shadow-xs space-y-4">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-[#e6f4f1] border border-[#00685f]/20 text-[#00685f] flex items-center justify-center shrink-0">
+                <Database className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-base sm:text-lg font-extrabold text-[#0b1c30]">
+                    Migrasi Data Lama ke Firestore
+                  </h2>
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md bg-teal-50 text-[#00685f] border border-teal-200">
+                    Sekali Klik • Anti Duplikat
+                  </span>
+                </div>
+                <p className="text-xs sm:text-sm text-[#3d4947] mt-1">
+                  Pindahkan seluruh data lama di browser (siswa, pelanggaran, layanan BK, home visit, agenda/jurnal, &amp; pengaturan) ke Firebase Firestore dengan pengecekan duplikat otomatis agar AI Studio dan Vercel menampilkan data yang sama persis.
+                </p>
+              </div>
+            </div>
+
+            {!hasMigratedLegacy && (
+              <button
+                type="button"
+                onClick={handleMigrateLegacyToFirestore}
+                disabled={isMigratingLegacy}
+                className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-[#00685f] hover:bg-[#005049] disabled:opacity-60 text-white text-xs sm:text-sm font-extrabold shadow-xs transition-all cursor-pointer shrink-0"
+              >
+                <RefreshCw className={`w-4 h-4 ${isMigratingLegacy ? 'animate-spin' : ''}`} />
+                <span>{isMigratingLegacy ? 'Memigrasi Data...' : 'Migrasi Data Lama ke Firestore'}</span>
+              </button>
+            )}
+          </div>
+
+          {legacyMigrationResult && (
+            <div
+              className={`p-4 rounded-xl border text-xs sm:text-sm flex items-start gap-2.5 ${
+                legacyMigrationResult.success
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                  : 'bg-rose-50 border-rose-200 text-rose-900'
+              }`}
+            >
+              {legacyMigrationResult.success ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+              )}
+              <div className="space-y-1">
+                <p className="font-extrabold">{legacyMigrationResult.message}</p>
+                {legacyMigrationResult.success && (
+                  <p className="text-xs text-emerald-800">
+                    Rincian tambahan: {legacyMigrationResult.migratedServices} layanan BK, {legacyMigrationResult.migratedOther} data agenda/home visit/lainnya diunggah
+                    {legacyMigrationResult.skippedDuplicates > 0
+                      ? ` (${legacyMigrationResult.skippedDuplicates} duplikat sudah ada di Firestore sehingga dilewati aman)`
+                      : ''}.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* SECTION 1: BACKUP SEMUA DATA */}
       <div className="bg-white rounded-2xl p-5 sm:p-6 border border-[#bcc9c6]/40 shadow-xs space-y-5">

@@ -1,17 +1,14 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
 import { 
-  getStorage, 
   ref, 
   uploadBytes, 
   getDownloadURL, 
   deleteObject 
 } from 'firebase/storage';
-import firebaseConfig from '../../firebase-applet-config.json';
+import { storage } from '../firebase';
 import { getActiveSchoolId, sanitizeSchoolId } from './schoolConfig';
 import { ensureFirebaseAuth } from './firestoreSync';
 
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const storage = getStorage(app);
+export { storage };
 
 export interface UploadResult {
   downloadUrl: string;

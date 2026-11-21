@@ -1,7 +1,4 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
-import firebaseConfig from '../../firebase-applet-config.json';
 import { 
-  getFirestore, 
   collection, 
   doc, 
   setDoc, 
@@ -10,10 +7,7 @@ import {
   writeBatch,
   getDocs,
   getDoc,
-  getDocFromServer,
   runTransaction,
-  setLogLevel,
-  disableNetwork,
   enableNetwork,
   query,
   where,
@@ -22,7 +16,8 @@ import {
   serverTimestamp
 } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { app, db, auth, firebaseConfig, testConnection } from '../firebase';
 import { getDeletedIds, registerDeletedId, unregisterDeletedId } from './deletionTracker';
 import { isDummyRecord } from './purgeDummyData';
 import { showToast } from './toast';
@@ -47,6 +42,7 @@ import {
 import { Counselor, HapusLogEntry } from '../types';
 import { initialStudents } from '../data/mockData';
 
+export { db, auth, testConnection };
 export { loadSchoolData, saveSchoolData, getActiveSchoolId, getSchoolConfig };
 export { fixMissingSchoolId, runMultiSchoolMigrationOnce, ensureSchoolDocumentExists, stampDocumentSchoolInfo } from './multiSchoolMigration';
 export type { FixMissingSchoolIdResult } from './multiSchoolMigration';
@@ -86,16 +82,6 @@ export function getCurrentUserSchoolIdSync(): string {
   return sanitizeSchoolId(getActiveSchoolId() || 'sch_20320123');
 }
 
-// Initialize Firebase App
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId || '(default)');
-
-// Silence noisy internal SDK warnings/debug logs when free tier quota limits are reached
-try {
-  setLogLevel('silent');
-} catch (e) {}
-
 // Mapping between LocalStorage keys and Firestore Collection names
 export const SYNC_MAP: Record<string, string> = {
   'bk_students': 'students',
@@ -126,6 +112,83 @@ export const SYNC_MAP: Record<string, string> = {
   'bk_program_evaluations': 'program_evaluations',
   'bk_service_evaluations': 'service_evaluations'
 };
+
+/**
+ * Maps internal/subcollection names to canonical Firestore root collections requested:
+ * siswa, pelanggaran, restitusi, layanan, agenda, pengaturan
+ */
+export function getCanonicalRootCollections(colName: string): string[] {
+  switch (colName) {
+    case 'students':
+    case 'siswa':
+      return ['students', 'siswa'];
+    case 'violations':
+    case 'cases':
+    case 'pelanggaran':
+    case 'restitusi':
+      return ['violations', 'cases', 'pelanggaran', 'restitusi'];
+    case 'services':
+    case 'counseling':
+    case 'layanan':
+      return ['services', 'counseling', 'layanan'];
+    case 'daily_journals':
+    case 'teaching_schedule':
+    case 'sticky_notes':
+    case 'agenda':
+      return [colName === 'agenda' ? 'daily_journals' : colName, 'agenda'];
+    case 'counselors':
+    case 'users':
+      return ['counselors', 'users'];
+    default:
+      return [colName];
+  }
+}
+
+export type FirestoreOperationType = 'create' | 'update' | 'delete' | 'list' | 'get' | 'write';
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: FirestoreOperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    isAnonymous: boolean | undefined;
+  };
+}
+
+export function isOfflineFirestoreError(err: any): boolean {
+  const code = String(err?.code || '').toLowerCase();
+  const msg = String(err?.message || err || '').toLowerCase();
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return true;
+  return (
+    code === 'unavailable' ||
+    msg.includes('client is offline') ||
+    msg.includes('network request failed') ||
+    msg.includes('failed to get document because the client is offline')
+  );
+}
+
+export function handleFirestoreError(
+  error: unknown,
+  operationType: FirestoreOperationType,
+  path: string | null
+): string {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const errCode = (error as any)?.code ? `[${(error as any).code}] ` : '';
+  const errInfo: FirestoreErrorInfo = {
+    error: `${errCode}${rawMessage}`,
+    operationType,
+    path,
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      isAnonymous: auth.currentUser?.isAnonymous,
+    },
+  };
+  console.error('Firestore Error:', JSON.stringify(errInfo));
+  return `${errCode}${rawMessage}`;
+}
 
 /**
  * Deduplicates and purges dummy items from a collection before sorting or persisting.
@@ -325,7 +388,7 @@ export function getConflictsPreventedCount(): number {
   return conflictsPreventedCount;
 }
 
-export type CloudStatus = 'connected' | 'syncing' | 'offline' | 'quota_exceeded';
+export type CloudStatus = 'connected' | 'syncing' | 'offline' | 'error' | 'quota_exceeded';
 
 export interface CloudConnectionInfo {
   status: CloudStatus;
@@ -335,6 +398,7 @@ export interface CloudConnectionInfo {
   dbName: string;
   activeSchoolId: string;
   activeSchoolName: string;
+  lastError?: string;
   conflictsPrevented?: number;
   lastConflictTime?: string;
   clientTabId?: string;
@@ -344,11 +408,13 @@ export interface CloudSyncRecordInfo {
   syncedAtIso: string;
   timeLabel: string;
   dateTimeLabel: string;
-  status: 'synced' | 'unsynced' | 'offline';
+  status: 'synced' | 'unsynced' | 'offline' | 'error';
+  lastError?: string;
   counts?: Record<string, number>;
 }
 
 const CLOUD_LAST_SYNC_PREFIX = 'bk_cloud_last_sync_';
+let lastCloudError: string | undefined;
 
 export function getLastCloudSyncInfo(schoolId?: string): CloudSyncRecordInfo {
   const sid = sanitizeSchoolId(schoolId || getActiveSchoolId());
@@ -365,7 +431,8 @@ export function getLastCloudSyncInfo(schoolId?: string): CloudSyncRecordInfo {
             syncedAtIso: parsed.syncedAtIso,
             timeLabel: parsed.timeLabel || new Date(parsed.syncedAtIso).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
             dateTimeLabel: parsed.dateTimeLabel || new Date(parsed.syncedAtIso).toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
-            status: !isOnline ? 'offline' : pendingCount > 0 ? 'unsynced' : 'synced',
+            status: lastCloudError ? 'error' : !isOnline ? 'offline' : pendingCount > 0 ? 'unsynced' : 'synced',
+            lastError: lastCloudError,
             counts: parsed.counts
           };
         }
@@ -377,7 +444,8 @@ export function getLastCloudSyncInfo(schoolId?: string): CloudSyncRecordInfo {
     syncedAtIso: '',
     timeLabel: '-',
     dateTimeLabel: 'Belum pernah sinkron',
-    status: !isOnline ? 'offline' : 'unsynced'
+    status: lastCloudError ? 'error' : !isOnline ? 'offline' : 'unsynced',
+    lastError: lastCloudError
   };
 }
 
@@ -408,14 +476,21 @@ let lastSyncTimestamp: string = (() => {
 
 export function getCloudConnectionInfo(): CloudConnectionInfo {
   const currentSchool = getSchoolConfig();
+  const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  const resolvedStatus: CloudStatus = isQuotaExceeded
+    ? 'quota_exceeded'
+    : !isOnline
+    ? 'offline'
+    : currentCloudStatus;
   return {
-    status: isQuotaExceeded ? 'quota_exceeded' : (typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : currentCloudStatus),
+    status: resolvedStatus,
     activeCollections: Object.keys(SYNC_MAP).length,
     lastSyncTime: lastSyncTimestamp,
-    isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
-    dbName: (firebaseConfig as any).firestoreDatabaseId || 'ai-studio-sistemadministra',
+    isOnline,
+    dbName: (firebaseConfig as any).firestoreDatabaseId || '(default)',
     activeSchoolId: getActiveSchoolId(),
     activeSchoolName: currentSchool.schoolName || 'SMP N 2 Susukan',
+    lastError: lastCloudError,
     conflictsPrevented: conflictsPreventedCount,
     lastConflictTime: lastConflictTime || undefined,
     clientTabId: CLIENT_TAB_ID
@@ -541,11 +616,18 @@ export function updateLocalDocWithRemote(localKey: string, remoteDoc: any, schoo
   }
 }
 
-function notifyCloudStatusChange(status: CloudStatus, recordSync = false) {
+function notifyCloudStatusChange(status: CloudStatus, recordSync = false, errorMsg?: string) {
   currentCloudStatus = status;
   lastSyncTimestamp = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  if (recordSync && status === 'connected') {
-    markCloudSyncCompleted(getActiveSchoolId());
+  if (status === 'connected') {
+    lastCloudError = undefined;
+    if (recordSync) {
+      markCloudSyncCompleted(getActiveSchoolId());
+    }
+  } else if (status === 'error' || status === 'quota_exceeded') {
+    lastCloudError = errorMsg || 'Gagal menyinkronkan dengan Firestore.';
+  } else if (status === 'offline') {
+    lastCloudError = errorMsg;
   }
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('bk_cloud_status', { detail: getCloudConnectionInfo() }));
@@ -701,7 +783,7 @@ if (typeof window !== 'undefined') {
   });
 
   window.addEventListener('offline', () => {
-    notifyCloudStatusChange('offline');
+    notifyCloudStatusChange('offline', false);
   });
 
   // Mobile phone screen lock / Tab background resume listener:
@@ -721,7 +803,7 @@ if (typeof window !== 'undefined') {
     });
   }
 
-  // Listen to school switch events and restart sync
+  // Listen to school switch events and restart sync immediately
   window.addEventListener('bk_school_changed', () => {
     stopRealtimeFirestoreSync();
     initRealtimeFirestoreSync();
@@ -736,25 +818,25 @@ function checkAndHandleQuotaError(err: any): boolean {
     errStr.includes('Quota limit exceeded') ||
     errStr.includes('Quota exceeded')
   ) {
-    console.warn('Firestore rate limit or temporary quota warning detected. Backing off safely without severing connection:', errStr);
-    // Keep connection alive so operations can smoothly resume once rate limits ease
-    notifyCloudStatusChange('syncing');
+    console.warn('Firestore rate limit or temporary quota warning detected:', errStr);
+    notifyCloudStatusChange('error', false, 'Kuota Firestore harian terlampaui');
     return true;
   }
   return false;
 }
 
-// Validate initial connection to Firestore (CRITICAL CONSTRAINT from Firebase Skill)
-export async function testConnection(): Promise<void> {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('[FirestoreSync] Firebase client is currently offline. Realtime sync will resume when online.');
+// Validate initial connection to Firestore non-blockingly on startup
+if (typeof window !== 'undefined') {
+  testConnection().then((res) => {
+    if (!res.ok) {
+      if (res.error === 'offline') {
+        notifyCloudStatusChange('offline', false);
+      } else if (res.error) {
+        notifyCloudStatusChange('error', false, res.error);
+      }
     }
-  }
+  }).catch(() => {});
 }
-testConnection();
 
 // Offline-to-Cloud Pending Mutations Queue
 const PENDING_QUEUE_KEY = 'bk_pending_cloud_queue';
@@ -802,18 +884,37 @@ export function removePendingCloudWrite(id: string): void {
 export async function flushPendingCloudQueue(): Promise<number> {
   const queue = getPendingCloudQueue();
   if (queue.length === 0 || isQuotaExceeded) return 0;
-  
+
   let flushed = 0;
+  let lastFlushError: string | undefined;
   const remaining: PendingCloudItem[] = [];
+  const nowIso = new Date().toISOString();
 
   for (const entry of queue) {
     try {
       const colName = SYNC_MAP[entry.localKey] || entry.localKey;
-      const ref = getSchoolDocRef(colName, entry.id, entry.schoolId);
-      await setDoc(ref, entry.item, { merge: true });
+      const docId = String(entry.id);
+      const isAgendaCol = colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes';
+      const payload = {
+        ...(entry.item || {}),
+        id: docId,
+        createdAt: entry.item?.createdAt || nowIso,
+        updatedAt: entry.item?.updatedAt || nowIso,
+        ...(isAgendaCol ? { _agendaType: colName } : {})
+      };
+      const writes: Promise<any>[] = [
+        setDoc(getSchoolDocRef(colName, docId, entry.schoolId), payload, { merge: true })
+      ];
+      getCanonicalRootCollections(colName).forEach((rootCol) => {
+        writes.push(setDoc(doc(db, rootCol, docId), payload, { merge: true }));
+      });
+      await Promise.all(writes);
       flushed++;
-    } catch (e) {
+    } catch (e: any) {
       remaining.push(entry);
+      if (!isOfflineFirestoreError(e)) {
+        lastFlushError = e?.message || String(e);
+      }
     }
   }
 
@@ -823,6 +924,11 @@ export async function flushPendingCloudQueue(): Promise<number> {
 
   if (flushed > 0) {
     console.log(`[FirestoreSync] Flushed ${flushed} pending offline records to Firestore.`);
+  }
+  if (remaining.length === 0 && flushed > 0) {
+    notifyCloudStatusChange('connected', true);
+  } else if (lastFlushError) {
+    notifyCloudStatusChange('error', false, lastFlushError);
   }
   return flushed;
 }
@@ -844,19 +950,22 @@ export async function resetQuotaState(): Promise<void> {
 export async function ensureFirebaseAuth(): Promise<void> {
   if (auth.currentUser) return;
   try {
-    const authPromise = new Promise<void>((resolve) => {
-      const unsub = onAuthStateChanged(auth, () => {
-        unsub();
-        resolve();
+    const authWait = new Promise<void>((resolve) => {
+      const unsub = onAuthStateChanged(auth, (u) => {
+        if (u) {
+          unsub();
+          resolve();
+        }
       });
     });
-    // Race with a 400ms timeout so we NEVER block or freeze cloud operations
+    // Attempt anonymous session silently if not signed in yet, without blocking offline reads/writes
+    signInAnonymously(auth).catch(() => {});
     await Promise.race([
-      authPromise,
-      new Promise((resolve) => setTimeout(resolve, 400))
+      authWait,
+      new Promise<void>((resolve) => setTimeout(resolve, 400))
     ]);
-  } catch (e) {
-    // Ignore auth errors: firestore.rules allows direct database access
+  } catch {
+    // Gracefully continue with Firestore cached/public rules
   }
 }
 
@@ -877,31 +986,91 @@ export async function syncSchoolMetadataToCloud(): Promise<void> {
 }
 
 /**
- * Register or update any school metadata in the Firestore global registry
+ * Register or update any school metadata in the Firestore global registry & `pengaturan` collection
  */
 export async function registerSchoolToCloud(config: SchoolConfig, targetSchoolId?: string): Promise<void> {
   if (isQuotaExceeded) return;
   try {
     await ensureFirebaseAuth();
     const schoolId = targetSchoolId || config.schoolId || (config.npsn ? `sch_${config.npsn.replace(/[^0-9a-zA-Z]/g, '')}` : getActiveSchoolId());
-    const metaDoc = doc(db, 'schools_registry', schoolId);
-    await setDoc(metaDoc, {
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    const stampedPayload = {
       ...config,
+      id: schoolId,
       schoolId,
-      lastActiveAt: new Date().toISOString()
-    }, { merge: true });
+      createdAt: (config as any).createdAt || nowIso,
+      updatedAt: nowIso,
+      _updatedAt: nowMs,
+    };
 
-    // Also sync config inside school document
-    const schoolDoc = doc(db, 'schools', schoolId);
-    await setDoc(schoolDoc, {
-      ...config,
-      schoolId,
-      updatedAt: new Date().toISOString()
-    }, { merge: true });
+    await Promise.all([
+      setDoc(doc(db, 'schools_registry', schoolId), { ...stampedPayload, lastActiveAt: nowIso }, { merge: true }),
+      setDoc(doc(db, 'schools', schoolId), stampedPayload, { merge: true }),
+      setDoc(doc(db, 'pengaturan', schoolId), stampedPayload, { merge: true }),
+    ]);
   } catch (err) {
-    if (!checkAndHandleQuotaError(err)) {
-      console.error('Failed to register school to cloud:', err);
+    if (!checkAndHandleQuotaError(err) && !isOfflineFirestoreError(err)) {
+      const msg = handleFirestoreError(err, 'write', `pengaturan/${targetSchoolId || config.schoolId || ''}`);
+      notifyCloudStatusChange('error', false, msg);
     }
+  }
+}
+
+/**
+ * Sync school profile & operational settings immediately to `pengaturan/{schoolId}` and `schools/{schoolId}`
+ */
+export async function syncSettingsToPengaturan(
+  schoolIdInput?: string,
+  partialSettings?: {
+    schoolConfig?: SchoolConfig;
+    walikelasConfig?: any[];
+    violationRules?: any[];
+    parentSummonTemplates?: any[];
+    akpdClassSessions?: any[];
+    autoJournalSettings?: any;
+    siBecikFabEnabled?: boolean | null;
+  }
+): Promise<{ success: boolean; error?: string }> {
+  const schoolId = sanitizeSchoolId(schoolIdInput || getActiveSchoolId());
+  const nowIso = new Date().toISOString();
+  const nowMs = Date.now();
+  const cfg = partialSettings?.schoolConfig || getSchoolConfig(schoolId);
+  const payload: Record<string, any> = {
+    id: schoolId,
+    schoolId,
+    ...cfg,
+    ...(partialSettings?.walikelasConfig !== undefined ? { walikelasConfig: partialSettings.walikelasConfig } : {}),
+    ...(partialSettings?.violationRules !== undefined ? { violationRules: partialSettings.violationRules } : {}),
+    ...(partialSettings?.parentSummonTemplates !== undefined ? { parentSummonTemplates: partialSettings.parentSummonTemplates } : {}),
+    ...(partialSettings?.akpdClassSessions !== undefined ? { akpdClassSessions: partialSettings.akpdClassSessions } : {}),
+    ...(partialSettings?.autoJournalSettings !== undefined ? { autoJournalSettings: partialSettings.autoJournalSettings } : {}),
+    ...(partialSettings?.siBecikFabEnabled !== undefined ? { siBecikFabEnabled: partialSettings.siBecikFabEnabled } : {}),
+    createdAt: (cfg as any)?.createdAt || nowIso,
+    updatedAt: nowIso,
+    _updatedAt: nowMs,
+    _lastModifiedByTab: CLIENT_TAB_ID,
+  };
+
+  try {
+    await ensureFirebaseAuth();
+    notifyCloudStatusChange('syncing');
+    await Promise.all([
+      setDoc(doc(db, 'pengaturan', schoolId), payload, { merge: true }),
+      setDoc(doc(db, 'schools', schoolId), payload, { merge: true }),
+      setDoc(doc(db, 'schools', schoolId, 'settings', 'app_settings'), payload, { merge: true }),
+    ]);
+    notifyCloudStatusChange('connected', true);
+    return { success: true };
+  } catch (err: any) {
+    if (isOfflineFirestoreError(err)) {
+      notifyCloudStatusChange('offline', false);
+      return { success: false, error: 'Offline - perubahan pengaturan akan otomatis tersinkron saat online' };
+    }
+    const msg = handleFirestoreError(err, 'write', `pengaturan/${schoolId}`);
+    notifyCloudStatusChange('error', false, msg);
+    showToast(`Gagal menyinkronkan pengaturan ke Firestore: ${msg}`, 'error');
+    return { success: false, error: msg };
   }
 }
 
@@ -941,17 +1110,21 @@ export async function saveToFirestore(
   // 1. Optimistic fast update: update local cache and broadcast immediately (<1ms response)
   const optimisticVersion = (getItemVersion(item) || 0) + 1;
   const optimisticNow = Date.now();
+  const optimisticNowIso = new Date(optimisticNow).toISOString();
   const optimisticItem = {
     ...item,
+    id: itemId,
     isDeleted: false,
     schoolId,
     sekolahId: item.sekolahId || schoolId,
     schoolName,
     namaSekolah: item.namaSekolah || schoolName,
-    createdAt: item.createdAt || new Date().toISOString(),
+    createdAt: item.createdAt || optimisticNowIso,
+    updatedAt: optimisticNowIso,
     _version: optimisticVersion,
     _updatedAt: optimisticNow,
     _lastModifiedByTab: CLIENT_TAB_ID,
+    ...(colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes' ? { _agendaType: colName } : {}),
     ...(options.counselorId ? { _lastModifiedByCounselorId: options.counselorId } : {}),
     ...(options.counselorName ? { _lastModifiedByCounselorName: options.counselorName } : {})
   };
@@ -1052,53 +1225,47 @@ export async function saveToFirestore(
         // Fresh update: calculate next version and timestamp
         const nextVersion = Math.max(remoteVersion, incomingVersion) + 1;
         const now = Date.now();
+        const nowIso = new Date(now).toISOString();
 
         const stampedItem = {
           ...item,
+          id: itemId,
           isDeleted: false,
           schoolId,
           sekolahId: item.sekolahId || schoolId,
           schoolName,
           namaSekolah: item.namaSekolah || schoolName,
-          createdAt: item.createdAt || new Date().toISOString(),
+          createdAt: item.createdAt || nowIso,
+          updatedAt: nowIso,
           _version: nextVersion,
           _updatedAt: now,
           _lastModifiedByTab: CLIENT_TAB_ID,
+          ...(colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes' ? { _agendaType: colName } : {}),
           ...(options.counselorId ? { _lastModifiedByCounselorId: options.counselorId } : {}),
           ...(options.counselorName ? { _lastModifiedByCounselorName: options.counselorName } : {})
         };
 
         transaction.set(docRef, stampedItem, { merge: true });
 
-        // Multi-sekolah cross-collection mirror: ensure users, students, cases, counseling in root & subcollections
-        try {
-          if (colName === 'violations' || colName === 'cases') {
-            transaction.set(getSchoolDocRef('cases', itemId, schoolId), stampedItem, { merge: true });
-            transaction.set(getSchoolDocRef('violations', itemId, schoolId), stampedItem, { merge: true });
-            transaction.set(doc(db, 'cases', itemId), stampedItem, { merge: true });
-            transaction.set(doc(db, 'violations', itemId), stampedItem, { merge: true });
-          } else if (colName === 'services' || colName === 'counseling') {
-            transaction.set(getSchoolDocRef('counseling', itemId, schoolId), stampedItem, { merge: true });
-            transaction.set(getSchoolDocRef('services', itemId, schoolId), stampedItem, { merge: true });
-            transaction.set(doc(db, 'counseling', itemId), stampedItem, { merge: true });
-            transaction.set(doc(db, 'services', itemId), stampedItem, { merge: true });
-          } else if (colName === 'counselors' || colName === 'users') {
-            transaction.set(getSchoolDocRef('users', itemId, schoolId), stampedItem, { merge: true });
-            transaction.set(getSchoolDocRef('counselors', itemId, schoolId), stampedItem, { merge: true });
-            transaction.set(doc(db, 'users', itemId), stampedItem, { merge: true });
-            transaction.set(doc(db, 'counselors', itemId), stampedItem, { merge: true });
-          } else if (colName === 'students') {
-            transaction.set(doc(db, 'students', itemId), stampedItem, { merge: true });
-          } else if (colName === 'program_evaluations') {
-            transaction.set(doc(db, 'program_evaluations', itemId), stampedItem, { merge: true });
-          } else if (colName === 'service_evaluations') {
-            transaction.set(doc(db, 'service_evaluations', itemId), stampedItem, { merge: true });
-          }
-        } catch (mirrorErr) {
-          // ignore non-critical mirror issues
+        // Mirror to school subcollections + canonical root collections (siswa, pelanggaran, restitusi, layanan, agenda)
+        const canonicalRoots = getCanonicalRootCollections(colName);
+        canonicalRoots.forEach((rootCol) => {
+          transaction.set(doc(db, rootCol, itemId), stampedItem, { merge: true });
+        });
+        if (colName === 'violations' || colName === 'cases') {
+          transaction.set(getSchoolDocRef('cases', itemId, schoolId), stampedItem, { merge: true });
+          transaction.set(getSchoolDocRef('violations', itemId, schoolId), stampedItem, { merge: true });
+        } else if (colName === 'services' || colName === 'counseling') {
+          transaction.set(getSchoolDocRef('counseling', itemId, schoolId), stampedItem, { merge: true });
+          transaction.set(getSchoolDocRef('services', itemId, schoolId), stampedItem, { merge: true });
+        } else if (colName === 'counselors' || colName === 'users') {
+          transaction.set(getSchoolDocRef('users', itemId, schoolId), stampedItem, { merge: true });
+          transaction.set(getSchoolDocRef('counselors', itemId, schoolId), stampedItem, { merge: true });
         }
 
         // Update in-memory item
+        item.updatedAt = nowIso;
+        item.createdAt = stampedItem.createdAt;
         item._version = nextVersion;
         item._updatedAt = now;
         item._lastModifiedByTab = CLIENT_TAB_ID;
@@ -1121,22 +1288,29 @@ export async function saveToFirestore(
         };
       });
     } catch (txErr: any) {
-      // If transaction fails for ANY reason (network latency, offline, mobile sleep, retry limit),
-      // gracefully fallback to atomic setDoc which queues in Firebase SDK offline persistence
-      console.warn(`[FirestoreSync] Transaction save failed, falling back to atomic setDoc for ${colName}/${itemId}:`, txErr?.message || txErr);
+      // Fallback to direct atomic setDoc (queued natively by IndexedDB offline cache when offline)
       const nextVersion = (getItemVersion(item) || 0) + 1;
       const now = Date.now();
+      const nowIso = new Date(now).toISOString();
       const stampedItem = {
         ...item,
+        id: itemId,
         isDeleted: false,
         schoolId,
+        sekolahId: item.sekolahId || schoolId,
         schoolName,
+        namaSekolah: item.namaSekolah || schoolName,
+        createdAt: item.createdAt || nowIso,
+        updatedAt: nowIso,
         _version: nextVersion,
         _updatedAt: now,
         _lastModifiedByTab: CLIENT_TAB_ID,
+        ...(colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes' ? { _agendaType: colName } : {}),
         ...(options.counselorId ? { _lastModifiedByCounselorId: options.counselorId } : {}),
         ...(options.counselorName ? { _lastModifiedByCounselorName: options.counselorName } : {})
       };
+      item.createdAt = stampedItem.createdAt;
+      item.updatedAt = nowIso;
       item._version = nextVersion;
       item._updatedAt = now;
       item.schoolId = schoolId;
@@ -1144,31 +1318,23 @@ export async function saveToFirestore(
       item._lastModifiedByTab = CLIENT_TAB_ID;
 
       try {
-        await setDoc(docRef, stampedItem, { merge: true });
-        try {
-          if (colName === 'violations' || colName === 'cases') {
-            setDoc(getSchoolDocRef('cases', itemId, schoolId), stampedItem, { merge: true }).catch(() => {});
-            setDoc(doc(db, 'cases', itemId), stampedItem, { merge: true }).catch(() => {});
-            setDoc(doc(db, 'violations', itemId), stampedItem, { merge: true }).catch(() => {});
-          } else if (colName === 'services' || colName === 'counseling') {
-            setDoc(getSchoolDocRef('counseling', itemId, schoolId), stampedItem, { merge: true }).catch(() => {});
-            setDoc(doc(db, 'counseling', itemId), stampedItem, { merge: true }).catch(() => {});
-            setDoc(doc(db, 'services', itemId), stampedItem, { merge: true }).catch(() => {});
-          } else if (colName === 'counselors' || colName === 'users') {
-            setDoc(getSchoolDocRef('users', itemId, schoolId), stampedItem, { merge: true }).catch(() => {});
-            setDoc(doc(db, 'users', itemId), stampedItem, { merge: true }).catch(() => {});
-            setDoc(doc(db, 'counselors', itemId), stampedItem, { merge: true }).catch(() => {});
-          } else if (colName === 'students') {
-            setDoc(doc(db, 'students', itemId), stampedItem, { merge: true }).catch(() => {});
-          } else if (colName === 'program_evaluations') {
-            setDoc(doc(db, 'program_evaluations', itemId), stampedItem, { merge: true }).catch(() => {});
-          } else if (colName === 'service_evaluations') {
-            setDoc(doc(db, 'service_evaluations', itemId), stampedItem, { merge: true }).catch(() => {});
-          }
-        } catch (mErr) {}
+        const writePromises: Promise<void>[] = [setDoc(docRef, stampedItem, { merge: true })];
+        getCanonicalRootCollections(colName).forEach((rootCol) => {
+          writePromises.push(setDoc(doc(db, rootCol, itemId), stampedItem, { merge: true }));
+        });
+        if (colName === 'violations' || colName === 'cases') {
+          writePromises.push(setDoc(getSchoolDocRef('cases', itemId, schoolId), stampedItem, { merge: true }));
+        } else if (colName === 'services' || colName === 'counseling') {
+          writePromises.push(setDoc(getSchoolDocRef('counseling', itemId, schoolId), stampedItem, { merge: true }));
+        } else if (colName === 'counselors' || colName === 'users') {
+          writePromises.push(setDoc(getSchoolDocRef('users', itemId, schoolId), stampedItem, { merge: true }));
+        }
+        await Promise.all(writePromises);
         removePendingCloudWrite(itemId);
-      } catch (setErr) {
-        console.warn(`[FirestoreSync] Cloud write queued for offline sync [${colName}/${itemId}]:`, setErr);
+        updateLocalDocWithRemote(localKey, stampedItem, schoolId);
+        broadcastRealtimeChange({ type: 'doc_saved', key: localKey, doc: stampedItem, schoolId });
+        result = { success: true, isStale: false, version: nextVersion, updatedAt: now };
+      } catch (setErr: any) {
         enqueuePendingCloudWrite({
           id: itemId,
           localKey,
@@ -1176,29 +1342,28 @@ export async function saveToFirestore(
           schoolId,
           enqueuedAt: Date.now()
         });
+        if (isOfflineFirestoreError(setErr)) {
+          notifyCloudStatusChange('offline', false);
+          return { success: true, isStale: false, version: nextVersion, updatedAt: now };
+        }
+        const errMsg = handleFirestoreError(setErr, 'write', docRef.path);
+        notifyCloudStatusChange('error', false, errMsg);
+        showToast(`Gagal sinkron ke Firestore: ${errMsg}`, 'error');
+        return { success: false, error: setErr };
       }
-
-      updateLocalDocWithRemote(localKey, stampedItem, schoolId);
-      broadcastRealtimeChange({
-        type: 'doc_saved',
-        key: localKey,
-        doc: stampedItem,
-        schoolId
-      });
-
-      result = {
-        success: true,
-        isStale: false,
-        version: nextVersion,
-        updatedAt: now
-      };
     }
 
-    notifyCloudStatusChange('connected');
+    notifyCloudStatusChange('connected', true);
     return result;
-  } catch (err) {
+  } catch (err: any) {
     if (!checkAndHandleQuotaError(err)) {
-      console.error(`Firestore save error [${schoolId}/${colName}]:`, err);
+      if (isOfflineFirestoreError(err)) {
+        notifyCloudStatusChange('offline', false);
+      } else {
+        const errMsg = handleFirestoreError(err, 'write', docRef.path);
+        notifyCloudStatusChange('error', false, errMsg);
+        showToast(`Gagal sinkron ke Firestore: ${errMsg}`, 'error');
+      }
     }
     return { success: false, error: err };
   }
@@ -1250,28 +1415,22 @@ export interface SoftDeletedTrashItem {
 function getMirrorCollectionRefs(colName: string, itemId: string, schoolId: string) {
   const refs: ReturnType<typeof doc>[] = [
     getSchoolDocRef(colName, itemId, schoolId),
-    doc(db, colName, itemId)
+    ...getCanonicalRootCollections(colName).map((rootCol) => doc(db, rootCol, itemId))
   ];
-  if (colName === 'violations' || colName === 'cases') {
+  if (colName === 'violations' || colName === 'cases' || colName === 'pelanggaran' || colName === 'restitusi') {
     refs.push(
       getSchoolDocRef('cases', itemId, schoolId),
-      getSchoolDocRef('violations', itemId, schoolId),
-      doc(db, 'cases', itemId),
-      doc(db, 'violations', itemId)
+      getSchoolDocRef('violations', itemId, schoolId)
     );
-  } else if (colName === 'services' || colName === 'counseling') {
+  } else if (colName === 'services' || colName === 'counseling' || colName === 'layanan') {
     refs.push(
       getSchoolDocRef('counseling', itemId, schoolId),
-      getSchoolDocRef('services', itemId, schoolId),
-      doc(db, 'counseling', itemId),
-      doc(db, 'services', itemId)
+      getSchoolDocRef('services', itemId, schoolId)
     );
   } else if (colName === 'counselors' || colName === 'users') {
     refs.push(
       getSchoolDocRef('users', itemId, schoolId),
-      getSchoolDocRef('counselors', itemId, schoolId),
-      doc(db, 'users', itemId),
-      doc(db, 'counselors', itemId)
+      getSchoolDocRef('counselors', itemId, schoolId)
     );
   }
   // Deduplicate by Firestore path
@@ -2023,17 +2182,22 @@ export async function pushCollectionToFirestore(
 
     const CHUNK_SIZE = 400;
     const now = Date.now();
+    const nowIso = new Date(now).toISOString();
     let writtenCount = 0;
     const defaultSchoolName = schoolId === 'sch_20320123'
       ? 'SMP N 2 Susukan'
       : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan');
+    const canonicalRoots = getCanonicalRootCollections(colName);
+    const opsPerItem = 1 + canonicalRoots.length;
+    const maxItemsPerChunk = Math.max(1, Math.floor(CHUNK_SIZE / opsPerItem));
 
-    for (let i = 0; i < sortedItems.length; i += CHUNK_SIZE) {
-      const chunk = sortedItems.slice(i, i + CHUNK_SIZE);
+    for (let i = 0; i < sortedItems.length; i += maxItemsPerChunk) {
+      const chunk = sortedItems.slice(i, i + maxItemsPerChunk);
       const batch = writeBatch(db);
       let chunkOps = 0;
       for (const item of chunk) {
         if (item && item.id) {
+          const itemId = String(item.id);
           const currentVersion = getItemVersion(item);
           const nextVersion = currentVersion > 0 ? currentVersion : 1;
           const currentTimestamp = getItemTimestamp(item) || now;
@@ -2042,24 +2206,32 @@ export async function pushCollectionToFirestore(
           if (!hasAssignedId && !options?.stampMissingSchoolId) continue;
 
           const itemSchoolName = item.schoolName || defaultSchoolName;
-          const ref = getSchoolDocRef(colName, String(item.id), schoolId);
+          const ref = getSchoolDocRef(colName, itemId, schoolId);
           const cleanItem = { ...item };
           if (options?.stampMissingSchoolId) {
             delete cleanItem.isLegacyUnmigrated;
           }
           const payload = {
             ...cleanItem,
+            id: itemId,
             isDeleted: false,
             schoolId,
             sekolahId: cleanItem.sekolahId || schoolId,
             schoolName: itemSchoolName,
             namaSekolah: cleanItem.namaSekolah || itemSchoolName,
+            createdAt: cleanItem.createdAt || nowIso,
+            updatedAt: nowIso,
             _version: nextVersion,
             _updatedAt: currentTimestamp,
-            _lastModifiedByTab: CLIENT_TAB_ID
+            _lastModifiedByTab: CLIENT_TAB_ID,
+            ...(colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes' ? { _agendaType: colName } : {})
           };
           batch.set(ref, payload, { merge: true });
           chunkOps++;
+          canonicalRoots.forEach((rootCol) => {
+            batch.set(doc(db, rootCol, itemId), payload, { merge: true });
+            chunkOps++;
+          });
           writtenCount++;
         }
       }
@@ -2072,29 +2244,49 @@ export async function pushCollectionToFirestore(
     notifyCloudStatusChange('connected', true);
     return { success: true, count: writtenCount };
   } catch (err: any) {
-    const errMsg = err?.message || String(err);
-    if (!checkAndHandleQuotaError(err)) {
-      console.warn(`Firestore bulk save batch commit failed [${schoolId}/${colName}], executing atomic setDoc fallback:`, err);
-      const defaultSchoolName = schoolId === 'sch_20320123'
+    const errMsg = checkAndHandleQuotaError(err)
+      ? 'Kuota Firestore harian terlampaui'
+      : isOfflineFirestoreError(err)
+        ? 'Offline - menunggu sinkron'
+        : handleFirestoreError(err, 'write', `schools/${schoolId}/${colName}`);
+
+    if (!isQuotaExceeded) {
+      if (isOfflineFirestoreError(err)) {
+        notifyCloudStatusChange('offline', false);
+      } else {
+        notifyCloudStatusChange('error', false, errMsg);
+      }
+      const fallbackSchoolName = schoolId === 'sch_20320123'
         ? 'SMP N 2 Susukan'
         : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan');
+      const fallbackIso = new Date().toISOString();
+      const isAgendaCol = colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes';
       for (const item of sortedItems) {
         if (item && item.id) {
           const hasAssignedId = extractRecordSchoolId(item) !== '' && !item.isLegacyUnmigrated;
           if (!hasAssignedId && !options?.stampMissingSchoolId) continue;
           try {
-            const itemSchoolName = item.schoolName || defaultSchoolName;
-            const ref = getSchoolDocRef(colName, String(item.id), schoolId);
-            setDoc(ref, {
+            const itemId = String(item.id);
+            const itemSchoolName = item.schoolName || fallbackSchoolName;
+            const payload = {
               ...item,
+              id: itemId,
               isDeleted: false,
               schoolId,
               sekolahId: item.sekolahId || schoolId,
               schoolName: itemSchoolName,
+              namaSekolah: item.namaSekolah || itemSchoolName,
+              createdAt: item.createdAt || fallbackIso,
+              updatedAt: fallbackIso,
               _version: getItemVersion(item) || 1,
               _updatedAt: getItemTimestamp(item) || Date.now(),
-              _lastModifiedByTab: CLIENT_TAB_ID
-            }, { merge: true }).catch(() => {});
+              _lastModifiedByTab: CLIENT_TAB_ID,
+              ...(isAgendaCol ? { _agendaType: colName } : {})
+            };
+            setDoc(getSchoolDocRef(colName, itemId, schoolId), payload, { merge: true }).catch(() => {});
+            getCanonicalRootCollections(colName).forEach((rootCol) => {
+              setDoc(doc(db, rootCol, itemId), payload, { merge: true }).catch(() => {});
+            });
           } catch {}
         }
       }
@@ -2762,12 +2954,24 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
     uniqueCollectionMap.get(colName)!.push(localKey);
   });
 
-  // Listen to each unique collection in BOTH schools/{schoolId}/{colName} AND root/{colName} (untuk data lama tanpa schoolId)
+  // Listen to each unique collection in BOTH schools/{schoolId}/{colName} AND canonical root collections (e.g. siswa, pelanggaran, restitusi, layanan, agenda)
   uniqueCollectionMap.forEach((localKeys, colName) => {
     if (isQuotaExceeded) return;
 
     const subDocsMap = new Map<string, any>();
     const rootDocsMap = new Map<string, any>();
+    const rootAliasMaps = new Map<string, Map<string, any>>();
+    const serverConfirmedIds = new Set<string>();
+    const hardRemovedFromServer = new Set<string>();
+
+    const rebuildRootDocs = () => {
+      rootDocsMap.clear();
+      rootAliasMaps.forEach((aliasMap) => {
+        aliasMap.forEach((val, k) => {
+          rootDocsMap.set(k, val);
+        });
+      });
+    };
 
     const flushMergedDocs = (snapshotDeletedIds: Set<string>, deletedSet: Set<string>) => {
       const mergedRemoteMap = new Map<string, any>();
@@ -2778,6 +2982,7 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
         if (!deletedSet.has(k) && !snapshotDeletedIds.has(k)) mergedRemoteMap.set(k, val);
       });
       const rawDocs = Array.from(mergedRemoteMap.values());
+      const pendingIds = new Set(getPendingCloudQueue().map((q) => String(q.id).trim()));
 
       localKeys.forEach((localKey) => {
         const cacheKey = `${currentSchoolId}_${localKey}`;
@@ -2793,12 +2998,13 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
 
         const mergedDocsMap = new Map<string, any>();
 
-        // 1. Pertahankan data lokal aktif (termasuk data lama tanpa schoolId) kecuali sudah dihapus
+        // 1. Pertahankan data lokal aktif (termasuk data lama tanpa schoolId) kecuali sudah dihapus di server (soft atau hard delete)
         if (Array.isArray(currentLocalList)) {
           currentLocalList.forEach((localItem: any) => {
             if (!localItem || !isValidDeleteId(localItem.id)) return;
             const lid = String(localItem.id).trim();
             if (localItem.isDeleted === true || deletedSet.has(lid) || snapshotDeletedIds.has(lid)) return;
+            if (hardRemovedFromServer.has(lid) && !mergedRemoteMap.has(lid) && !pendingIds.has(lid)) return;
             if (isDummyRecord(localItem, localKey)) return;
             if (!matchesSchoolOrLegacy(localItem, currentSchoolId)) return;
             mergedDocsMap.set(lid, localItem);
@@ -2849,20 +3055,44 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
             data: sortedDocs,
             schoolId: currentSchoolId
           });
-          notifyCloudStatusChange('connected');
         }
       });
+
+      notifyCloudStatusChange('connected');
     };
 
-    const ingestIntoMap = (targetMap: Map<string, any>, snapshot: any) => {
+    const ingestIntoMap = (targetMap: Map<string, any>, snapshot: any, aliasName?: string) => {
       const deletedSet = new Set(getDeletedIds());
       const snapshotDeletedIds = new Set<string>();
+      const fromCache = Boolean(snapshot?.metadata?.fromCache);
+
+      // Track hard deletes (deleteDoc) delivered live from server
+      if (!fromCache && typeof snapshot.docChanges === 'function') {
+        snapshot.docChanges().forEach((change: any) => {
+          const cid = String(change.doc?.id || '').trim();
+          if (!cid) return;
+          if (change.type === 'removed' && serverConfirmedIds.has(cid)) {
+            hardRemovedFromServer.add(cid);
+          } else if (change.type === 'added' || change.type === 'modified') {
+            serverConfirmedIds.add(cid);
+            hardRemovedFromServer.delete(cid);
+          }
+        });
+      }
+
       targetMap.clear();
 
       snapshot.forEach((d: any) => {
         const item = { id: d.id, ...d.data() } as any;
         if (item && isValidDeleteId(item.id)) {
           const itemId = String(item.id).trim();
+
+          // Filter agenda canonical collection so each type goes strictly to its matching sub-collection
+          if (aliasName === 'agenda') {
+            const agendaType = item._agendaType || 'daily_journals';
+            if (agendaType !== colName) return;
+          }
+
           if (item.isDeleted === true) {
             registerDeletedId(itemId);
             deletedSet.add(itemId);
@@ -2875,11 +3105,18 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
           }
           if (!isDummyRecord(item, localKeys[0]) && matchesSchoolOrLegacy(item, currentSchoolId)) {
             const isLegacy = isLegacyUnassignedRecord(item);
+            if (!fromCache) {
+              serverConfirmedIds.add(itemId);
+              hardRemovedFromServer.delete(itemId);
+            }
             targetMap.set(itemId, isLegacy ? { ...item, isLegacyUnmigrated: true } : item);
           }
         }
       });
 
+      if (aliasName) {
+        rebuildRootDocs();
+      }
       flushMergedDocs(snapshotDeletedIds, deletedSet);
     };
 
@@ -2895,24 +3132,73 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
       ingestIntoMap(subDocsMap, snapshot);
     }, (error) => {
       if (!checkAndHandleQuotaError(error)) {
-        console.error(`Realtime onSnapshot listener error [${currentSchoolId}/${colName}]:`, error);
-        notifyCloudStatusChange('offline');
+        if (isOfflineFirestoreError(error)) {
+          notifyCloudStatusChange('offline', false);
+        } else {
+          const errMsg = handleFirestoreError(error, 'list', colRef.path);
+          notifyCloudStatusChange('error', false, errMsg);
+        }
       }
     });
     unsubscribes.push(unsubSub);
 
-    // Juga dengarkan koleksi root untuk menangkap data lama (schoolId == null / "" / tidak ada) tanpa auto-migrasi
-    const rootColRef = collection(db, colName);
-    const unsubRoot = onSnapshot(rootColRef, (snapshot) => {
-      if (isQuotaExceeded) return;
-      ingestIntoMap(rootDocsMap, snapshot);
+    // Subscribe to canonical root collection(s) (e.g. siswa, pelanggaran, restitusi, layanan, agenda) + legacy root
+    const rootAliases = Array.from(new Set([colName, ...getCanonicalRootCollections(colName)]));
+    rootAliases.forEach((rootColName) => {
+      const aliasMap = new Map<string, any>();
+      rootAliasMaps.set(rootColName, aliasMap);
+      const rootColRef = collection(db, rootColName);
+      const unsubRoot = onSnapshot(rootColRef, (snapshot) => {
+        if (isQuotaExceeded) return;
+        ingestIntoMap(aliasMap, snapshot, rootColName);
+      }, (error) => {
+        if (!checkAndHandleQuotaError(error)) {
+          if (isOfflineFirestoreError(error)) {
+            notifyCloudStatusChange('offline', false);
+          } else {
+            const errMsg = handleFirestoreError(error, 'list', rootColRef.path);
+            notifyCloudStatusChange('error', false, errMsg);
+          }
+        }
+      });
+      unsubscribes.push(unsubRoot);
+    });
+  });
+
+  // Real-time listener for school settings & profile in `pengaturan/{schoolId}`
+  try {
+    const pengaturanRef = doc(db, 'pengaturan', currentSchoolId);
+    const unsubPengaturan = onSnapshot(pengaturanRef, (docSnap) => {
+      if (isQuotaExceeded || !docSnap.exists()) return;
+      const data = docSnap.data() as any;
+      if (!data) return;
+      if (data._lastModifiedByTab === CLIENT_TAB_ID) return;
+
+      if (data.schoolName) {
+        const currentCfg = getSchoolConfig(currentSchoolId);
+        saveSchoolConfig({ ...currentCfg, ...data, schoolId: currentSchoolId });
+        window.dispatchEvent(new Event('bk_school_config_updated'));
+      }
+      if (Array.isArray(data.walikelasConfig) && data.walikelasConfig.length > 0) {
+        saveSchoolData('bk_walikelas_config', data.walikelasConfig, currentSchoolId);
+        broadcastRealtimeChange({ type: 'sync', key: 'bk_walikelas_config', data: data.walikelasConfig, schoolId: currentSchoolId });
+      }
+      if (Array.isArray(data.violationRules) && data.violationRules.length > 0) {
+        saveSchoolData('bk_violation_rules', data.violationRules, currentSchoolId);
+        window.dispatchEvent(new CustomEvent('bk_violation_rules_changed', { detail: { schoolId: currentSchoolId, categories: data.violationRules } }));
+      }
+      if (Array.isArray(data.parentSummonTemplates)) {
+        saveSchoolData('bk_parent_summon_templates', data.parentSummonTemplates, currentSchoolId);
+      }
+      notifyCloudStatusChange('connected');
     }, (error) => {
-      if (!checkAndHandleQuotaError(error)) {
-        console.warn(`Realtime root onSnapshot notice [${colName}]:`, error);
+      if (!checkAndHandleQuotaError(error) && !isOfflineFirestoreError(error)) {
+        const errMsg = handleFirestoreError(error, 'get', `pengaturan/${currentSchoolId}`);
+        notifyCloudStatusChange('error', false, errMsg);
       }
     });
-    unsubscribes.push(unsubRoot);
-  });
+    unsubscribes.push(unsubPengaturan);
+  } catch {}
 
   // Dedicated real-time listener for global account registrations (pengajuan akun baru)
   try {
@@ -3027,6 +3313,9 @@ export async function forceFullCloudSync(): Promise<void> {
   const currentSchoolId = getActiveSchoolId();
   notifyCloudStatusChange('syncing');
 
+  let firstError: string | undefined;
+  let hasOfflineErr = false;
+
   // 1. Pull global account requests
   const pullAccReqs = async () => {
     try {
@@ -3044,7 +3333,45 @@ export async function forceFullCloudSync(): Promise<void> {
         window.dispatchEvent(new CustomEvent('bk_account_requests_updated', { detail: { requests: allReqs } }));
       }
     } catch (e) {
-      console.warn('Force pull error for account_requests:', e);
+      if (isOfflineFirestoreError(e)) {
+        hasOfflineErr = true;
+      } else if (!checkAndHandleQuotaError(e)) {
+        console.warn('Force pull error for account_requests:', e);
+      }
+    }
+  };
+
+  // 1b. Pull sekolah pengaturan/{schoolId}
+  const pullPengaturan = async () => {
+    try {
+      const snap = await getDoc(doc(db, 'pengaturan', currentSchoolId));
+      if (snap.exists()) {
+        const data = snap.data() as any;
+        if (data?.schoolName) {
+          const currentCfg = getSchoolConfig(currentSchoolId);
+          saveSchoolConfig({ ...currentCfg, ...data, schoolId: currentSchoolId });
+          if (typeof window !== 'undefined') window.dispatchEvent(new Event('bk_school_config_updated'));
+        }
+        if (Array.isArray(data?.walikelasConfig) && data.walikelasConfig.length > 0) {
+          saveSchoolData('bk_walikelas_config', data.walikelasConfig, currentSchoolId);
+          broadcastRealtimeChange({ type: 'sync', key: 'bk_walikelas_config', data: data.walikelasConfig, schoolId: currentSchoolId });
+        }
+        if (Array.isArray(data?.violationRules) && data.violationRules.length > 0) {
+          saveSchoolData('bk_violation_rules', data.violationRules, currentSchoolId);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('bk_violation_rules_changed', { detail: { schoolId: currentSchoolId, categories: data.violationRules } }));
+          }
+        }
+        if (Array.isArray(data?.parentSummonTemplates)) {
+          saveSchoolData('bk_parent_summon_templates', data.parentSummonTemplates, currentSchoolId);
+        }
+      }
+    } catch (e) {
+      if (isOfflineFirestoreError(e)) {
+        hasOfflineErr = true;
+      } else if (!checkAndHandleQuotaError(e)) {
+        firstError = firstError || handleFirestoreError(e, 'get', `pengaturan/${currentSchoolId}`);
+      }
     }
   };
 
@@ -3060,10 +3387,14 @@ export async function forceFullCloudSync(): Promise<void> {
       const deletedSet = new Set(getDeletedIds());
       const docMap = new Map<string, any>();
 
-      const ingestSnapshot = (snap: any) => {
+      const ingestSnapshot = (snap: any, rootColName?: string) => {
         snap.forEach((d: any) => {
           const item = { id: d.id, ...d.data() } as any;
           if (item && item.id) {
+            if (rootColName === 'agenda') {
+              const agendaType = item._agendaType || 'daily_journals';
+              if (agendaType !== colName) return;
+            }
             const rid = String(item.id);
             if (item.isDeleted === true) {
               registerDeletedId(rid);
@@ -3079,13 +3410,31 @@ export async function forceFullCloudSync(): Promise<void> {
         });
       };
 
-      // 1 & 2. Pull BOTH school subcollection AND root collection (2-syarat: schoolId == currentSchoolId OR kosong/null/missing)
-      const [subRes, rootRes] = await Promise.allSettled([
+      const rootAliases = Array.from(new Set([colName, ...getCanonicalRootCollections(colName)]));
+      const [subRes, ...rootResults] = await Promise.allSettled([
         getDocs(getSchoolColRef(colName, currentSchoolId)),
-        getDocs(collection(db, colName))
+        ...rootAliases.map((rc) => getDocs(collection(db, rc)))
       ]);
-      if (rootRes.status === 'fulfilled' && !rootRes.value.empty) ingestSnapshot(rootRes.value);
-      if (subRes.status === 'fulfilled' && !subRes.value.empty) ingestSnapshot(subRes.value);
+
+      rootResults.forEach((res, idx) => {
+        if (res.status === 'fulfilled') {
+          if (!res.value.empty) ingestSnapshot(res.value, rootAliases[idx]);
+        } else {
+          if (isOfflineFirestoreError(res.reason)) hasOfflineErr = true;
+          else if (!checkAndHandleQuotaError(res.reason)) {
+            firstError = firstError || handleFirestoreError(res.reason, 'list', rootAliases[idx]);
+          }
+        }
+      });
+
+      if (subRes.status === 'fulfilled') {
+        if (!subRes.value.empty) ingestSnapshot(subRes.value);
+      } else {
+        if (isOfflineFirestoreError(subRes.reason)) hasOfflineErr = true;
+        else if (!checkAndHandleQuotaError(subRes.reason)) {
+          firstError = firstError || handleFirestoreError(subRes.reason, 'list', `schools/${currentSchoolId}/${colName}`);
+        }
+      }
 
       // Pastikan dokumen yang punya flag isDeleted di salah satu sumber dihapus dari docMap
       deletedSet.forEach(dId => docMap.delete(dId));
@@ -3140,18 +3489,24 @@ export async function forceFullCloudSync(): Promise<void> {
           }).catch(() => {});
         }
       }
-    } catch (e) {
-      if (!checkAndHandleQuotaError(e)) {
-        console.warn(`Force sync pull error for ${colName}:`, e);
+    } catch (e: any) {
+      if (isOfflineFirestoreError(e)) {
+        hasOfflineErr = true;
+      } else if (!checkAndHandleQuotaError(e)) {
+        firstError = firstError || handleFirestoreError(e, 'list', colName);
       }
     }
   });
 
-  await Promise.all([pullAccReqs(), ...pullCollections]);
-  notifyCloudStatusChange('connected', true);
+  await Promise.all([pullAccReqs(), pullPengaturan(), ...pullCollections]);
+  if (hasOfflineErr || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+    notifyCloudStatusChange('offline', false);
+  } else if (firstError) {
+    notifyCloudStatusChange('error', false, firstError);
+  } else {
+    notifyCloudStatusChange('connected', true);
+  }
 }
-
-let hasRegisteredSchoolListener = false;
 
 /**
  * Clean up subscriptions
@@ -3160,16 +3515,6 @@ export function stopRealtimeFirestoreSync(): void {
   unsubscribes.forEach((unsub) => unsub());
   unsubscribes.length = 0;
   isSyncingActive = false;
-}
-
-if (typeof window !== 'undefined' && !hasRegisteredSchoolListener) {
-  hasRegisteredSchoolListener = true;
-  window.addEventListener('bk_school_changed', () => {
-    stopRealtimeFirestoreSync();
-    setTimeout(() => {
-      initRealtimeFirestoreSync();
-    }, 100);
-  });
 }
 
 /**

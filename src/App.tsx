@@ -863,6 +863,10 @@ export default function App() {
             return Array.from(map.values());
           });
         }
+      } else if (key === 'bk_walikelas_config') {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('storage'));
+        }
       }
     };
 
@@ -2069,26 +2073,47 @@ export default function App() {
     const oldService = services.find(s => s.id === updated.id);
     if (!oldService) return;
 
-    setServices(prev => prev.map(s => s.id === updated.id ? updated : s));
+    const currentSchoolId = getActiveSchoolId();
+    const nowIso = new Date().toISOString();
+    const ensuredUpdated: CounselingService = {
+      ...updated,
+      updatedAt: nowIso,
+      createdAt: (updated as any).createdAt || (oldService as any).createdAt || nowIso,
+    } as CounselingService;
+
+    setServices(prev => {
+      const next = prev.map(s => s.id === ensuredUpdated.id ? ensuredUpdated : s);
+      saveSchoolData('bk_services', next, currentSchoolId);
+      return next;
+    });
+    saveToFirestore('bk_services', ensuredUpdated, currentSchoolId).catch((err) => {
+      showToast('Gagal menyimpan perubahan layanan ke cloud: ' + (err?.message || err), 'error');
+    });
 
     const oldParticipantIds = oldService.students.map(st => st.id);
-    const newParticipantIds = updated.students.map(st => st.id);
+    const newParticipantIds = ensuredUpdated.students.map(st => st.id);
 
     const removedIds = oldParticipantIds.filter(id => !newParticipantIds.includes(id));
     const addedIds = newParticipantIds.filter(id => !oldParticipantIds.includes(id));
 
     if (removedIds.length > 0 || addedIds.length > 0) {
-      setStudents(prevStudents =>
-        prevStudents.map(student => {
+      setStudents(prevStudents => {
+        const nextStudents = prevStudents.map(student => {
           if (removedIds.includes(student.id)) {
-            return { ...student, bkServicesCount: Math.max(0, student.bkServicesCount - 1) };
+            const upd = { ...student, bkServicesCount: Math.max(0, student.bkServicesCount - 1), updatedAt: nowIso };
+            saveToFirestore('bk_students', upd, currentSchoolId).catch(() => {});
+            return upd;
           }
           if (addedIds.includes(student.id)) {
-            return { ...student, bkServicesCount: student.bkServicesCount + 1 };
+            const upd = { ...student, bkServicesCount: student.bkServicesCount + 1, updatedAt: nowIso };
+            saveToFirestore('bk_students', upd, currentSchoolId).catch(() => {});
+            return upd;
           }
           return student;
-        })
-      );
+        });
+        saveSchoolData('bk_students', nextStudents, currentSchoolId);
+        return nextStudents;
+      });
     }
 
     const today = new Date();

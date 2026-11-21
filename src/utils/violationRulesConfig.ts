@@ -1,5 +1,5 @@
 import { loadSchoolData, saveSchoolData, getActiveSchoolId, getSchoolConfig } from './schoolConfig';
-import { saveToFirestore } from './firestoreSync';
+import { saveToFirestore, syncSettingsToPengaturan } from './firestoreSync';
 
 export interface ViolationOption {
   id: string;
@@ -449,7 +449,7 @@ export function saveSchoolViolationCategories(categories: ViolationCategory[], s
     );
   }
 
-  // Also sync to Firestore under school settings asynchronously
+  // Also sync to Firestore under school settings & canonical pengaturan/{schoolId}
   try {
     saveToFirestore('violation_rules', {
       id: 'custom_rules',
@@ -457,6 +457,7 @@ export function saveSchoolViolationCategories(categories: ViolationCategory[], s
       updatedAt: new Date().toISOString(),
       schoolId: sId
     }, sId).catch(err => console.warn('Could not sync violation rules to cloud:', err));
+    syncSettingsToPengaturan(sId, { violationRules: categories }).catch(() => {});
   } catch (e) {}
 }
 

@@ -19,11 +19,15 @@ import {
   markCloudSyncCompleted,
   deduplicateCollectionItems,
   sortCollectionData,
+  getCanonicalRootCollections,
+  getSchoolDocRef,
+  syncSettingsToPengaturan,
+  SYNC_MAP,
 } from './firestoreSync';
 import { getDeletedIds, unregisterDeletedId } from './deletionTracker';
 import { isDummyRecord } from './purgeDummyData';
 import { drawLetterhead, finalizeAndSavePdf, getActiveCounselorSigner } from './pdfGenerator';
-import { doc, setDoc } from 'firebase/firestore';
+import { collection, doc, getDocs, setDoc, writeBatch } from 'firebase/firestore';
 import {
   Student,
   ViolationRecord,
@@ -1390,3 +1394,247 @@ export async function syncAllLocalDataToFirestore(
     };
   }
 }
+
+export const LEGACY_MIGRATION_FLAG_PREFIX = 'bk_legacy_firestore_migrated_';
+
+export interface LegacyMigrationResult {
+  success: boolean;
+  alreadyMigrated: boolean;
+  migratedStudents: number;
+  migratedViolations: number;
+  migratedServices: number;
+  migratedOther: number;
+  skippedDuplicates: number;
+  totalMigrated: number;
+  message: string;
+  error?: string;
+}
+
+export function hasCompletedLegacyFirestoreMigration(schoolIdInput?: string): boolean {
+  if (typeof localStorage === 'undefined') return false;
+  const sId = sanitizeSchoolId(schoolIdInput || getActiveSchoolId());
+  return localStorage.getItem(`${LEGACY_MIGRATION_FLAG_PREFIX}${sId}`) === 'true';
+}
+
+function normStr(val: any): string {
+  return String(val || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * Migrasi satu kali seluruh data lama dari localStorage ke Firebase Firestore.
+ * Mengecek duplikat terlebih dahulu berdasarkan id / nis / nama+kelas agar tidak ganda,
+ * tidak pernah menimpa Firestore dengan data kosong, dan menandai selesai setelah sukses.
+ */
+export async function migrateLegacyLocalDataToFirestore(
+  activeCounselor?: Counselor | null,
+  liveState?: LiveAppDataInput
+): Promise<LegacyMigrationResult> {
+  const schoolId = sanitizeSchoolId(activeCounselor?.schoolId || getActiveSchoolId());
+  const schoolConfig = getSchoolConfig(schoolId);
+  const schoolName = schoolConfig.schoolName || activeCounselor?.schoolName || 'SMP N 2 Susukan';
+  const snapshot = collectFullBackupSnapshot(activeCounselor, liveState);
+  const c = snapshot.collections;
+  const s = snapshot.settings;
+
+  try {
+    await ensureFirebaseAuth();
+    await registerSchoolToCloud(s.schoolConfig, schoolId);
+
+    const targets: Array<{ localKey: string; colName: string; items: any[] }> = [
+      { localKey: 'bk_students', colName: SYNC_MAP['bk_students'] || 'students', items: c.students },
+      { localKey: 'bk_violations', colName: SYNC_MAP['bk_violations'] || 'violations', items: c.violations },
+      { localKey: 'bk_services', colName: SYNC_MAP['bk_services'] || 'services', items: c.services },
+      { localKey: 'bk_home_visits', colName: SYNC_MAP['bk_home_visits'] || 'home_visits', items: c.homeVisits },
+      { localKey: 'bk_parent_summons', colName: SYNC_MAP['bk_parent_summons'] || 'parent_summons', items: c.parentSummons },
+      { localKey: 'bk_daily_journals', colName: SYNC_MAP['bk_daily_journals'] || 'daily_journals', items: c.dailyJournals },
+      { localKey: 'bk_attendance_history', colName: SYNC_MAP['bk_attendance_history'] || 'attendance_history', items: c.attendanceHistory },
+      { localKey: 'bk_achievements', colName: SYNC_MAP['bk_achievements'] || 'achievements', items: c.achievements },
+      { localKey: 'bk_surat_perjanjian_list', colName: SYNC_MAP['bk_surat_perjanjian_list'] || 'surat_perjanjian_list', items: c.suratPerjanjianList },
+      { localKey: 'bk_kontrak_perilaku_list', colName: SYNC_MAP['bk_kontrak_perilaku_list'] || 'kontrak_perilaku_list', items: c.kontrakPerilakuList },
+      { localKey: 'bk_jurnal_pembinaan_disiplin_list', colName: SYNC_MAP['bk_jurnal_pembinaan_disiplin_list'] || 'jurnal_pembinaan_disiplin_list', items: c.jurnalPembinaanDisiplinList },
+      { localKey: 'bk_komitmen_rtl_list', colName: SYNC_MAP['bk_komitmen_rtl_list'] || 'komitmen_rtl_list', items: c.komitmenRtlList },
+      { localKey: 'bk_teaching_schedule', colName: SYNC_MAP['bk_teaching_schedule'] || 'teaching_schedule', items: c.teachingSchedule },
+      { localKey: 'bk_class_teaching_progress', colName: SYNC_MAP['bk_class_teaching_progress'] || 'class_teaching_progress', items: c.classTeachingProgress },
+      { localKey: 'bk_sticky_notes', colName: SYNC_MAP['bk_sticky_notes'] || 'sticky_notes', items: c.stickyNotes },
+      { localKey: 'bk_program_evaluations', colName: SYNC_MAP['bk_program_evaluations'] || 'program_evaluations', items: c.programEvaluations },
+      { localKey: 'bk_service_evaluations', colName: SYNC_MAP['bk_service_evaluations'] || 'service_evaluations', items: c.serviceEvaluations },
+      { localKey: 'bk_logs', colName: SYNC_MAP['bk_logs'] || 'activity_logs', items: c.activityLogs },
+      { localKey: 'bk_counselors', colName: SYNC_MAP['bk_counselors'] || 'counselors', items: c.counselors },
+    ];
+
+    let migratedStudents = 0;
+    let migratedViolations = 0;
+    let migratedServices = 0;
+    let migratedOther = 0;
+    let skippedDuplicates = 0;
+
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+
+    for (const target of targets) {
+      if (!Array.isArray(target.items) || target.items.length === 0) continue;
+
+      const rootAliases = Array.from(new Set([target.colName, ...getCanonicalRootCollections(target.colName)]));
+      const existingIds = new Set<string>();
+      const existingNis = new Set<string>();
+      const existingNameClass = new Set<string>();
+      const existingViolationKeys = new Set<string>();
+      const existingServiceKeys = new Set<string>();
+
+      const snapResults = await Promise.allSettled([
+        getDocs(collection(db, 'schools', schoolId, target.colName)),
+        ...rootAliases.map((rc) => getDocs(collection(db, rc))),
+      ]);
+
+      snapResults.forEach((res) => {
+        if (res.status !== 'fulfilled') return;
+        res.value.forEach((docSnap) => {
+          const d = docSnap.data() as any;
+          if (!d || d.isDeleted === true) return;
+          const rid = String(d.id || docSnap.id || '').trim();
+          if (rid) existingIds.add(rid);
+
+          if (target.localKey === 'bk_students') {
+            const nis = String(d.nis || '').trim();
+            if (nis) existingNis.add(nis);
+            const nc = `${normStr(d.name)}::${normStr(d.class)}`;
+            if (normStr(d.name)) existingNameClass.add(nc);
+          } else if (target.localKey === 'bk_violations') {
+            if (d.ticketId) existingIds.add(String(d.ticketId).trim());
+            const vk = `${normStr(d.studentName)}::${normStr(d.category || d.violationType)}::${normStr(d.date)}`;
+            if (normStr(d.studentName)) existingViolationKeys.add(vk);
+          } else if (target.localKey === 'bk_services') {
+            const studentNames = Array.isArray(d.students) ? d.students.map((st: any) => normStr(st.name)).sort().join(',') : '';
+            const sk = `${normStr(d.date)}::${normStr(d.problem || d.serviceType)}::${studentNames}`;
+            if (normStr(d.date)) existingServiceKeys.add(sk);
+          }
+        });
+      });
+
+      const toUpload: any[] = [];
+      for (const rawItem of target.items) {
+        if (!rawItem || typeof rawItem !== 'object' || rawItem.isDeleted === true) continue;
+        if (isDummyRecord(rawItem, target.localKey)) continue;
+
+        const clean = { ...rawItem };
+        delete clean._storageKeyTag;
+        delete clean.isLegacyUnmigrated;
+
+        const docId = String(clean.id || `mig_${target.colName}_${nowMs}_${Math.random().toString(36).slice(2, 7)}`).trim();
+        let isDup = existingIds.has(docId);
+
+        if (!isDup && target.localKey === 'bk_students') {
+          const nis = String(clean.nis || '').trim();
+          const nc = `${normStr(clean.name)}::${normStr(clean.class)}`;
+          if ((nis && existingNis.has(nis)) || (normStr(clean.name) && existingNameClass.has(nc))) {
+            isDup = true;
+          }
+        } else if (!isDup && target.localKey === 'bk_violations') {
+          const ticket = clean.ticketId ? String(clean.ticketId).trim() : '';
+          const vk = `${normStr(clean.studentName)}::${normStr(clean.category || clean.violationType)}::${normStr(clean.date)}`;
+          if ((ticket && existingIds.has(ticket)) || (normStr(clean.studentName) && existingViolationKeys.has(vk))) {
+            isDup = true;
+          }
+        } else if (!isDup && target.localKey === 'bk_services') {
+          const studentNames = Array.isArray(clean.students) ? clean.students.map((st: any) => normStr(st.name)).sort().join(',') : '';
+          const sk = `${normStr(clean.date)}::${normStr(clean.problem || clean.serviceType)}::${studentNames}`;
+          if (normStr(clean.date) && existingServiceKeys.has(sk)) {
+            isDup = true;
+          }
+        }
+
+        if (isDup) {
+          skippedDuplicates++;
+          continue;
+        }
+
+        existingIds.add(docId);
+        const isAgendaCol = target.colName === 'daily_journals' || target.colName === 'teaching_schedule' || target.colName === 'sticky_notes';
+        const payload = {
+          ...clean,
+          id: docId,
+          isDeleted: false,
+          schoolId,
+          sekolahId: clean.sekolahId || schoolId,
+          schoolName: clean.schoolName || schoolName,
+          namaSekolah: clean.namaSekolah || clean.schoolName || schoolName,
+          createdAt: clean.createdAt || nowIso,
+          updatedAt: nowIso,
+          _version: Number(clean._version) > 0 ? Number(clean._version) : 1,
+          _updatedAt: nowMs,
+          ...(isAgendaCol ? { _agendaType: target.colName } : {}),
+        };
+        toUpload.push(payload);
+      }
+
+      if (toUpload.length === 0) continue;
+
+      const opsPerItem = 1 + rootAliases.length;
+      const maxItemsPerBatch = Math.max(1, Math.floor(400 / opsPerItem));
+
+      for (let i = 0; i < toUpload.length; i += maxItemsPerBatch) {
+        const chunk = toUpload.slice(i, i + maxItemsPerBatch);
+        const batch = writeBatch(db);
+        for (const docPayload of chunk) {
+          batch.set(getSchoolDocRef(target.colName, docPayload.id, schoolId), docPayload, { merge: true });
+          rootAliases.forEach((rootCol) => {
+            batch.set(doc(db, rootCol, docPayload.id), docPayload, { merge: true });
+          });
+        }
+        await batch.commit();
+      }
+
+      if (target.localKey === 'bk_students') migratedStudents += toUpload.length;
+      else if (target.localKey === 'bk_violations') migratedViolations += toUpload.length;
+      else if (target.localKey === 'bk_services') migratedServices += toUpload.length;
+      else migratedOther += toUpload.length;
+    }
+
+    // Sinkronkan pengaturan sekolah & konfigurasi ke dokumen pengaturan/{schoolId}
+    await syncSettingsToPengaturan(schoolId, {
+      schoolConfig: s.schoolConfig,
+      walikelasConfig: s.walikelasConfig || [],
+      violationRules: s.violationRules || [],
+      parentSummonTemplates: s.parentSummonTemplates || [],
+      akpdClassSessions: s.akpdClassSessions || [],
+      autoJournalSettings: s.autoJournalSettings || null,
+      siBecikFabEnabled: s.siBecikFabEnabled,
+    });
+
+    await flushPendingCloudQueue();
+    await forceFullCloudSync();
+
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(`${LEGACY_MIGRATION_FLAG_PREFIX}${schoolId}`, 'true');
+    }
+    markCloudSyncCompleted(schoolId);
+
+    const totalMigrated = migratedStudents + migratedViolations + migratedServices + migratedOther;
+    return {
+      success: true,
+      alreadyMigrated: false,
+      migratedStudents,
+      migratedViolations,
+      migratedServices,
+      migratedOther,
+      skippedDuplicates,
+      totalMigrated,
+      message: `Berhasil migrasi ${migratedStudents} siswa, ${migratedViolations} pelanggaran ke Firestore`,
+    };
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    return {
+      success: false,
+      alreadyMigrated: false,
+      migratedStudents: 0,
+      migratedViolations: 0,
+      migratedServices: 0,
+      migratedOther: 0,
+      skippedDuplicates: 0,
+      totalMigrated: 0,
+      message: `Gagal migrasi data lama ke Firestore: ${errMsg}`,
+      error: errMsg,
+    };
+  }
+}
+
