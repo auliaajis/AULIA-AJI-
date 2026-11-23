@@ -1589,18 +1589,8 @@ export default function DataSiswaView({
               </button>
             </div>
 
-            {/* Inner actions */}
+            {/* Inner actions (Catat Pelanggaran disembunyikan) */}
             <div className="flex gap-3 pt-3 border-t border-[#bcc9c6]/20">
-              <button
-                onClick={() => {
-                  onNavigateToForm('pelanggaran', currentStudent.id);
-                  setShowDossierModal(null);
-                }}
-                className="flex-grow flex items-center justify-center gap-2 py-2.5 px-4 bg-[#ba1a1a] hover:bg-[#ba1a1a]/90 text-white rounded-xl text-xs font-bold transition-all shadow-md active:scale-97 cursor-pointer"
-              >
-                <AlertTriangle className="w-4 h-4" />
-                Catat Pelanggaran
-              </button>
               <button
                 onClick={() => {
                   onNavigateToForm('tambah-layanan', currentStudent.id);
@@ -1952,21 +1942,6 @@ export default function DataSiswaView({
                   <span className="flex items-center gap-2.5">
                     <Download className="w-4 h-4 text-[#1A5C4A]" />
                     <span>Unduh PDF</span>
-                  </span>
-                  <ChevronRight className="w-4 h-4 text-gray-400" />
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedDetailStudent(null);
-                    onNavigateToForm('pelanggaran', s.id);
-                  }}
-                  className="w-full px-3.5 py-2.5 flex items-center justify-between text-xs font-bold text-[#0b1c30] hover:bg-[#f8faf9] transition-colors cursor-pointer"
-                >
-                  <span className="flex items-center gap-2.5">
-                    <AlertTriangle className="w-4 h-4 text-rose-600" />
-                    <span>Catat Pelanggaran</span>
                   </span>
                   <ChevronRight className="w-4 h-4 text-gray-400" />
                 </button>

@@ -24,9 +24,10 @@ import { getSchoolConfig } from '../utils/schoolConfig';
 interface UserManualModalProps {
   isOpen: boolean;
   onClose: () => void;
+  embedded?: boolean;
 }
 
-export default function UserManualModal({ isOpen, onClose }: UserManualModalProps) {
+export default function UserManualModal({ isOpen, onClose, embedded = false }: UserManualModalProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const config = getSchoolConfig();
 
@@ -144,17 +145,9 @@ export default function UserManualModal({ isOpen, onClose }: UserManualModalProp
     },
   ];
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 md:p-6 overflow-y-auto">
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-[#0b1c30]/60 backdrop-blur-xs transition-opacity"
-        onClick={onClose}
-      />
-
-      {/* Modal Card */}
-      <div className="relative w-full max-w-4xl bg-white rounded-2xl shadow-2xl border border-[#bcc9c6]/40 overflow-hidden flex flex-col max-h-[90vh] z-10 animate-in fade-in zoom-in-95 duration-200">
-        {/* Header */}
+  const innerContent = (
+    <div className={embedded ? 'flex flex-col flex-1 min-h-0 overflow-hidden' : 'relative w-full max-w-4xl bg-white rounded-2xl shadow-2xl border border-[#bcc9c6]/40 overflow-hidden flex flex-col max-h-[90vh] z-10 animate-in fade-in zoom-in-95 duration-200'}>
+      {!embedded && (
         <div className="bg-[#00685f] text-white p-5 sm:p-6 flex items-start justify-between relative overflow-hidden">
           <div className="relative z-10 max-w-2xl">
             <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-white/15 text-white text-[11px] font-extrabold uppercase tracking-wider mb-2.5 backdrop-blur-xs">
@@ -180,6 +173,7 @@ export default function UserManualModal({ isOpen, onClose }: UserManualModalProp
           {/* Subtle Decorative Background Wave */}
           <div className="absolute right-0 bottom-0 translate-x-8 translate-y-8 w-48 h-48 bg-white/5 rounded-full pointer-events-none blur-2xl" />
         </div>
+      )}
 
         {/* Action Bar / Download Banner */}
         <div className="bg-[#e6f4f1] border-b border-[#00685f]/20 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -265,17 +259,19 @@ export default function UserManualModal({ isOpen, onClose }: UserManualModalProp
         </div>
 
         {/* Footer */}
-        <div className="p-4 bg-white border-t border-[#bcc9c6]/30 flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div className="p-4 bg-white border-t border-[#bcc9c6]/30 flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
           <p className="text-xs text-gray-500 font-semibold text-center sm:text-left">
             Disusun untuk Koordinator BK, Guru Pembimbing, dan Wali Kelas.
           </p>
           <div className="flex items-center gap-2.5 w-full sm:w-auto">
-            <button
-              onClick={onClose}
-              className="flex-1 sm:flex-none px-4 py-2 bg-gray-100 hover:bg-gray-200 text-[#3d4947] rounded-xl text-xs font-bold transition-colors cursor-pointer"
-            >
-              Tutup
-            </button>
+            {!embedded && (
+              <button
+                onClick={onClose}
+                className="flex-1 sm:flex-none px-4 py-2 bg-gray-100 hover:bg-gray-200 text-[#3d4947] rounded-xl text-xs font-bold transition-colors cursor-pointer"
+              >
+                Tutup
+              </button>
+            )}
             <button
               onClick={handleDownload}
               disabled={isGenerating}
@@ -287,6 +283,19 @@ export default function UserManualModal({ isOpen, onClose }: UserManualModalProp
           </div>
         </div>
       </div>
+  );
+
+  if (embedded) {
+    return innerContent;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 md:p-6 overflow-y-auto">
+      <div
+        className="fixed inset-0 bg-[#0b1c30]/60 backdrop-blur-xs transition-opacity"
+        onClick={onClose}
+      />
+      {innerContent}
     </div>
   );
 }

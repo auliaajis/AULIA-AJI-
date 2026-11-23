@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Plus, ShieldAlert, HeartHandshake, Calendar, Mail, Award, X } from 'lucide-react';
+import { Plus, HeartHandshake, Calendar, Mail, Award } from 'lucide-react';
 
 interface MobileFabProps {
   onNavigate: (view: string) => void;
@@ -10,12 +10,6 @@ export const MobileFab: React.FC<MobileFabProps> = ({ onNavigate }) => {
   const [isOpen, setIsOpen] = useState(false);
 
   const actions = [
-    {
-      id: 'pelanggaran',
-      label: 'Catat Pelanggaran',
-      icon: <ShieldAlert className="w-4 h-4 text-red-600" />,
-      color: 'bg-red-50 text-red-900 border-red-200 hover:bg-red-100',
-    },
     {
       id: 'tambah-layanan',
       label: 'Konseling & Layanan BK',

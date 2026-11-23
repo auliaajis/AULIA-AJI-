@@ -753,7 +753,7 @@ export default function ProfilSiswaView({
         {/* Filter Buttons */}
         <div className="flex items-center gap-1.5 flex-wrap text-xs">
           {[
-            { id: 'all', label: 'Semua', count: timelineEvents.length },
+            { id: 'all', label: 'Riwayat Lengkap', count: timelineEvents.length },
             { id: 'pelanggaran', label: 'Pelanggaran', count: timelineEvents.filter((e) => e.type === 'pelanggaran').length },
             { id: 'reward', label: 'Reward', count: timelineEvents.filter((e) => e.type === 'reward').length },
             { id: 'konseling', label: 'Konseling', count: timelineEvents.filter((e) => e.type === 'konseling').length },
@@ -858,13 +858,61 @@ export default function ProfilSiswaView({
                         </div>
                       )}
 
-                      {/* Petugas Pencatat */}
-                      <div className="flex items-center justify-between text-[11px] text-gray-500 pt-1">
-                        <span>Oleh: <strong className="text-gray-700">{item.reporter}</strong></span>
-                        <span className="uppercase text-[9px] font-bold tracking-wider text-gray-400">
-                          {item.type}
-                        </span>
-                      </div>
+                      {/* Petugas Pencatat & Asal Data */}
+                      {(item.type === 'pelanggaran' || item.type === 'absensi') && item.originalRecord ? (() => {
+                        const vr = item.originalRecord as ViolationRecord;
+                        const viaRaw = String(vr.reportedVia || '').trim();
+                        const srcRaw = String(vr.source || '').trim().toLowerCase();
+                        const repRaw = String(vr.reportedBy || item.reporter || '').trim();
+                        const isFromPiket =
+                          viaRaw.toLowerCase().includes('piket') ||
+                          srcRaw === 'link_piket' ||
+                          srcRaw === 'piket' ||
+                          repRaw.toLowerCase().includes('piket');
+                        const reporterLabel = isFromPiket
+                          ? repRaw || 'Guru Piket'
+                          : repRaw
+                          ? `${repRaw} (BK - Data Lama)`
+                          : 'BK - Data Lama';
+                        const reportedViaLabel = isFromPiket
+                          ? viaRaw || 'Link Piket'
+                          : viaRaw || 'Input BK Lama';
+
+                        return (
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-gray-500 pt-1.5 border-t border-gray-200/60">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span>
+                                Dilaporkan oleh: <strong className="text-gray-700">{reporterLabel}</strong>
+                              </span>
+                              <span className="text-gray-300">•</span>
+                              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200">
+                                reportedVia: {reportedViaLabel}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              {isFromPiket ? (
+                                <span className="px-2 py-0.5 rounded-md bg-teal-50 text-[#00685f] border border-teal-200 text-[10px] font-extrabold">
+                                  Link Piket
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-extrabold">
+                                  Data Lama
+                                </span>
+                              )}
+                              <span className="uppercase text-[9px] font-bold tracking-wider text-gray-400">
+                                {item.type}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })() : (
+                        <div className="flex items-center justify-between text-[11px] text-gray-500 pt-1">
+                          <span>Oleh: <strong className="text-gray-700">{item.reporter}</strong></span>
+                          <span className="uppercase text-[9px] font-bold tracking-wider text-gray-400">
+                            {item.type}
+                          </span>
+                        </div>
+                      )}
                     </div>
 
                   </div>
@@ -888,17 +936,7 @@ export default function ProfilSiswaView({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap w-full md:w-auto justify-end">
-            {/* 1. Catat Kasus Baru */}
-            <button
-              type="button"
-              onClick={() => onNavigateToForm('pelanggaran', student.id)}
-              className="px-3.5 py-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-xl text-xs font-black shadow-2xs transition-all cursor-pointer active:scale-95 flex items-center gap-1.5"
-            >
-              <AlertCircle className="w-3.5 h-3.5" />
-              <span>Catat Kasus Baru</span>
-            </button>
-
-            {/* 2. Mulai Konseling */}
+            {/* 1. Mulai Konseling */}
             <button
               type="button"
               onClick={() => onNavigateToForm('input-konseling', student.id)}

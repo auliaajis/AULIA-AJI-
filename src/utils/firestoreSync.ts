@@ -1183,6 +1183,7 @@ export async function saveToFirestore(
     sekolahId: item.sekolahId || schoolId,
     schoolName,
     namaSekolah: item.namaSekolah || schoolName,
+    ...(colName === 'violations' ? { migratedAt: item.migratedAt !== undefined ? item.migratedAt : null } : {}),
     createdAt: item.createdAt || optimisticNowIso,
     updatedAt: optimisticNowIso,
     _version: optimisticVersion,
@@ -3121,7 +3122,11 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
               serverConfirmedIds.add(itemId);
               hardRemovedFromServer.delete(itemId);
             }
-            targetMap.set(itemId, isLegacy ? { ...item, isLegacyUnmigrated: true } : item);
+            let normalizedItem: any = isLegacy ? { ...item, isLegacyUnmigrated: true } : { ...item };
+            if (colName === 'violations' && normalizedItem.migratedAt === undefined) {
+              normalizedItem.migratedAt = null;
+            }
+            targetMap.set(itemId, normalizedItem);
           }
         }
       });
@@ -3316,6 +3321,64 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
   } catch (err) {
     console.warn('Failed to attach account_requests realtime listener:', err);
   }
+
+  // Read-only realtime listener for `teachers` collection (for Pelapor dropdown in Arsip/Rujukan)
+  try {
+    const teachersCol = collection(db, 'teachers');
+    const teachersUnsub = onSnapshot(teachersCol, (snapshot) => {
+      if (isQuotaExceeded) return;
+      const list: TeacherDirectoryEntry[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data() as any;
+        if (!data || data.isDeleted === true) return;
+        const rawName = String(data.name || data.nama || data.fullName || data.displayName || '').trim();
+        if (!rawName) return;
+        list.push({
+          id: d.id,
+          name: rawName,
+          role: String(data.role || data.jabatan || data.posisi || '').trim() || undefined,
+          schoolId: data.schoolId ? sanitizeSchoolId(data.schoolId) : undefined,
+        });
+      });
+      cachedTeachersList = list;
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('bk_teachers_updated', { detail: list }));
+      }
+    }, () => {
+      // Silently ignore if teachers collection has restricted permissions or does not exist yet
+    });
+    unsubscribes.push(teachersUnsub);
+  } catch {}
+}
+
+export interface TeacherDirectoryEntry {
+  id: string;
+  name: string;
+  role?: string;
+  schoolId?: string;
+}
+
+let cachedTeachersList: TeacherDirectoryEntry[] = [];
+
+export function getTeachersFromCloud(schoolId?: string): TeacherDirectoryEntry[] {
+  const sid = sanitizeSchoolId(schoolId || getActiveSchoolId());
+  return cachedTeachersList.filter((t) => !t.schoolId || t.schoolId === sid);
+}
+
+export function subscribeTeachers(
+  callback: (teachers: TeacherDirectoryEntry[]) => void,
+  schoolId?: string
+): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const sid = sanitizeSchoolId(schoolId || getActiveSchoolId());
+  callback(getTeachersFromCloud(sid));
+  const handler = () => {
+    callback(getTeachersFromCloud(sid));
+  };
+  window.addEventListener('bk_teachers_updated', handler);
+  return () => {
+    window.removeEventListener('bk_teachers_updated', handler);
+  };
 }
 
 /**
@@ -3414,7 +3477,11 @@ export async function forceFullCloudSync(): Promise<void> {
             }
             if (!deletedSet.has(rid) && !isDummyRecord(item, localKeys[0]) && matchesSchoolOrLegacy(item, currentSchoolId)) {
               const isLegacy = isLegacyUnassignedRecord(item);
-              docMap.set(rid, isLegacy ? { ...item, isLegacyUnmigrated: true } : item);
+              const normalizedItem: any = isLegacy ? { ...item, isLegacyUnmigrated: true } : { ...item };
+              if (colName === 'violations' && normalizedItem.migratedAt === undefined) {
+                normalizedItem.migratedAt = null;
+              }
+              docMap.set(rid, normalizedItem);
             }
           }
         });

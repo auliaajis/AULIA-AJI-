@@ -52,9 +52,10 @@ import jsPDF from 'jspdf';
 interface PanduanBskap2022ModalProps {
   isOpen: boolean;
   onClose: () => void;
+  embedded?: boolean;
 }
 
-export default function PanduanBskap2022Modal({ isOpen, onClose }: PanduanBskap2022ModalProps) {
+export default function PanduanBskap2022Modal({ isOpen, onClose, embedded = false }: PanduanBskap2022ModalProps) {
   const [activeTab, setActiveTab] = useState<'filosofi' | 'riasec' | 'analisis_responsif' | 'restitusi' | 'triase_situasi' | 'ppksp' | 'kemitraan_keluarga'>('filosofi');
   const [isApplyingPreset, setIsApplyingPreset] = useState(false);
 
@@ -298,10 +299,30 @@ export default function PanduanBskap2022Modal({ isOpen, onClose }: PanduanBskap2
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
-      <div className="bg-white rounded-3xl w-full max-w-5xl max-h-[92vh] flex flex-col shadow-2xl border border-gray-100 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-        {/* Header Modal */}
+  const innerContent = (
+    <div className={embedded ? 'flex flex-col flex-1 min-h-0 overflow-hidden bg-white' : 'bg-white rounded-3xl w-full max-w-5xl max-h-[92vh] flex flex-col shadow-2xl border border-gray-100 overflow-hidden animate-in fade-in zoom-in-95 duration-200'}>
+      {embedded ? (
+        <div className="bg-[#e6f4f1] border-b border-[#00685f]/20 px-5 py-3 flex flex-wrap items-center justify-between gap-3 shrink-0">
+          <div>
+            <span className="text-[10px] font-black uppercase text-[#00685f] tracking-wider block">
+              BSKAP &amp; Permendikbudristek 46/2023
+            </span>
+            <p className="text-xs font-extrabold text-[#0b1c30]">
+              Standar Penyelenggaraan BK Komprehensif, Disiplin Positif, &amp; Alur TPPK
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleApplyConfig}
+            disabled={isApplyingPreset}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-[#00685f] hover:bg-[#005049] active:scale-97 text-white rounded-xl text-xs font-black transition-all shadow-xs cursor-pointer disabled:opacity-50"
+            title="Terapkan Preset Tata Tertib & Bobot Kurikulum Merdeka ke sekolah ini"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>{isApplyingPreset ? 'Menerapkan...' : 'Terapkan Standar ke Sekolah'}</span>
+          </button>
+        </div>
+      ) : (
         <div className="bg-[#00685f] p-5 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
           <div className="flex items-center gap-3.5">
             <div className="p-2.5 bg-white/10 rounded-2xl border border-white/20">
@@ -339,6 +360,7 @@ export default function PanduanBskap2022Modal({ isOpen, onClose }: PanduanBskap2
             </button>
           </div>
         </div>
+      )}
 
         {/* Tab Navigation Menu */}
         <div className="flex items-center gap-1.5 p-2 bg-gray-100 border-b border-gray-200 overflow-x-auto text-xs font-bold shrink-0">
@@ -1163,14 +1185,25 @@ export default function PanduanBskap2022Modal({ isOpen, onClose }: PanduanBskap2
           <span className="text-gray-500 font-medium">
             Rujukan: Buku Panduan Implementasi BK Jenjang Dikdasmen (Kemendikbudristek BSKAP 2022)
           </span>
-          <button
-            onClick={onClose}
-            className="px-5 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-xl font-bold transition-all cursor-pointer"
-          >
-            Tutup
-          </button>
+          {!embedded && (
+            <button
+              onClick={onClose}
+              className="px-5 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-xl font-bold transition-all cursor-pointer"
+            >
+              Tutup
+            </button>
+          )}
         </div>
       </div>
+  );
+
+  if (embedded) {
+    return innerContent;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
+      {innerContent}
     </div>
   );
 }

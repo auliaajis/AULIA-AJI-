@@ -46,6 +46,100 @@ import {
   ViolationOption,
   getSchoolViolationCategories
 } from '../utils/violationRulesConfig';
+import { subscribeTeachers, TeacherDirectoryEntry } from '../utils/firestoreSync';
+
+export const ARCHIVE_CATEGORY_CHIPS = [
+  'Perundungan',
+  'Kekerasan Fisik',
+  'Kekerasan Seksual',
+  'Diskriminasi',
+  'Kedisiplinan',
+  'Integritas Akademik',
+] as const;
+
+export type ArchiveStatusFilterKey = 'Baru' | 'Sudah Ditindaklanjuti' | 'Selesai';
+export type ArchiveTimeFilterKey = 'all' | 'today' | 'week' | 'month';
+
+export function isPiketReferralViolation(v: ViolationRecord | any): boolean {
+  if (!v) return false;
+  const via = String(v.reportedVia || '').toLowerCase().trim();
+  const src = String(v.source || '').toLowerCase().trim();
+  const rep = String(v.reportedBy || '').toLowerCase().trim();
+  return (
+    via.includes('piket') ||
+    src === 'link_piket' ||
+    src === 'piket' ||
+    rep.includes('piket')
+  );
+}
+
+export function getViolationOriginDisplay(v: ViolationRecord | any): {
+  isPiket: boolean;
+  reporterLabel: string;
+  reportedViaLabel: string;
+} {
+  const isPiket = isPiketReferralViolation(v);
+  const rawRep = String(v?.reportedBy || '').trim();
+  const rawVia = String(v?.reportedVia || '').trim();
+
+  if (isPiket) {
+    return {
+      isPiket: true,
+      reporterLabel: rawRep || 'Guru Piket',
+      reportedViaLabel: rawVia || 'Link Piket',
+    };
+  }
+  return {
+    isPiket: false,
+    reporterLabel: rawRep ? `${rawRep} (BK - Data Lama)` : 'BK - Data Lama',
+    reportedViaLabel: rawVia || 'Input BK Lama',
+  };
+}
+
+function normalizeShortClassName(cls: string): string {
+  return String(cls || '')
+    .replace(/^kelas\s+/i, '')
+    .replace(/\s+/g, '')
+    .trim()
+    .toUpperCase();
+}
+
+function matchesArchiveCategoryChip(v: ViolationRecord, chip: string): boolean {
+  const hay = `${v.category || ''} ${v.notes || ''} ${v.handlingProgress || ''}`.toLowerCase();
+  switch (chip) {
+    case 'Perundungan':
+      return /perundung|bully|bullying|ejek|intimid|olok|ancam|malak/.test(hay);
+    case 'Kekerasan Fisik':
+      return /fisik|kelahi|berkelahi|pukul|tampar|tendang|tawur|dorong|serang|senjata|benda tajam|keras/.test(hay);
+    case 'Kekerasan Seksual':
+      return /seksual|asusila|peleceh|cabu|mesum|pornografi/.test(hay);
+    case 'Diskriminasi':
+      return /diskrimin|sara|rasis|intoleran|kucil|beda-beda/.test(hay);
+    case 'Integritas Akademik':
+      return /akademik|contek|nyontek|mencontek|plagiat|ujian|ulangan|tugas|bohong|jujur|titip absen/.test(hay);
+    case 'Kedisiplinan':
+      return /disiplin|tata tertib|terlambat|telat|alpa|alpha|bolos|membolos|tidak masuk|seragam|atribut|rapi|rambut|rokok|hp|ponsel|keluar kelas|upacara|piket|kantin|absensi/.test(hay) ||
+        (!/perundung|bully|fisik|kelahi|seksual|asusila|diskrimin|contek|plagiat/.test(hay));
+    default:
+      return hay.includes(chip.toLowerCase());
+  }
+}
+
+function getViolationSortTimestamp(v: ViolationRecord | any): number {
+  const datePart = String(v?.date || '').slice(0, 10);
+  const timePart = String(v?.time || '00:00').replace('.', ':').slice(0, 5);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+    const parsed = new Date(`${datePart}T${/^\d{2}:\d{2}$/.test(timePart) ? timePart : '00:00'}:00`).getTime();
+    if (!isNaN(parsed)) return parsed;
+  }
+  const ca = v?.createdAt || v?.updatedAt || v?._updatedAt;
+  if (typeof ca === 'number') return ca;
+  if (typeof ca === 'string') {
+    const t = new Date(ca).getTime();
+    if (!isNaN(t)) return t;
+  }
+  return 0;
+}
 
 export const RESTITUTION_STATUS_CONFIG: Record<
   RestitutionStatusType,
@@ -152,6 +246,8 @@ interface CatatPelanggaranFormProps {
   preSelectedStudentId?: string;
   initialTab?: 'input' | 'arsip';
   initialArchiveSearch?: string;
+  initialOpenViolationId?: string;
+  onClearInitialOpenViolation?: () => void;
   onNavigateToProfile?: (studentIdOrName: string) => void;
   onSaveViolation: (record: Omit<ViolationRecord, 'id' | 'ticketId'>) => void;
   onUpdateViolation?: (record: ViolationRecord) => void;
@@ -185,6 +281,8 @@ export default function CatatPelanggaranForm({
   preSelectedStudentId,
   initialTab,
   initialArchiveSearch,
+  initialOpenViolationId,
+  onClearInitialOpenViolation,
   onNavigateToProfile,
   onSaveViolation,
   onUpdateViolation,
@@ -194,9 +292,16 @@ export default function CatatPelanggaranForm({
   onCreateFollowUpCounseling,
   onCancel,
 }: CatatPelanggaranFormProps) {
-  // Tab switcher & search states
-  const [activeTab, setActiveTab] = useState<'input' | 'arsip'>(initialTab || 'input');
+  // Tab switcher & search states (Default ke Arsip; Form Catat Pelanggaran Guru BK disembunyikan)
+  const [activeTab, setActiveTab] = useState<'input' | 'arsip'>('arsip');
   const [archiveSearch, setArchiveSearch] = useState(initialArchiveSearch || '');
+  const [archiveOriginTab, setArchiveOriginTab] = useState<'rujukan' | 'lama'>('rujukan');
+  const [selectedClasses, setSelectedClasses] = useState<string[]>([]);
+  const [selectedCategoryChips, setSelectedCategoryChips] = useState<string[]>([]);
+  const [timeFilter, setTimeFilter] = useState<ArchiveTimeFilterKey>('all');
+  const [selectedStatusChips, setSelectedStatusChips] = useState<ArchiveStatusFilterKey[]>([]);
+  const [selectedPelapor, setSelectedPelapor] = useState<string>('Semua');
+  const [teachersList, setTeachersList] = useState<TeacherDirectoryEntry[]>([]);
   const [isPrivacyMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem('bk_privacy_mode') === 'true';
@@ -205,10 +310,17 @@ export default function CatatPelanggaranForm({
     }
   });
 
+  // Subscribe to realtime Firestore `teachers` collection for Pelapor dropdown
   useEffect(() => {
-    if (initialTab) {
-      setActiveTab(initialTab);
-    }
+    const unsub = subscribeTeachers((list) => {
+      setTeachersList(list);
+    }, activeCounselor?.schoolId);
+    return () => unsub();
+  }, [activeCounselor?.schoolId]);
+
+  useEffect(() => {
+    // Tetap di arsip (tombol Catat Pelanggaran di UI Guru BK disembunyikan)
+    setActiveTab('arsip');
   }, [initialTab]);
 
   useEffect(() => {
@@ -216,6 +328,17 @@ export default function CatatPelanggaranForm({
       setArchiveSearch(initialArchiveSearch);
     }
   }, [initialArchiveSearch]);
+
+  // Auto-select tab Rujukan vs Riwayat Lama when initial data loads and Rujukan is empty while Legacy has items (only once on initial mount)
+  const hasAutoPickedOriginRef = useRef(false);
+  useEffect(() => {
+    if (hasAutoPickedOriginRef.current || !Array.isArray(violations) || violations.length === 0) return;
+    const hasPiket = violations.some((v) => isPiketReferralViolation(v));
+    if (!hasPiket) {
+      setArchiveOriginTab('lama');
+    }
+    hasAutoPickedOriginRef.current = true;
+  }, [violations]);
 
   // Sesi Layanan Konseling Tindak Lanjut Otomatis State
   const [autoCreateCounseling, setAutoCreateCounseling] = useState(false);
@@ -242,10 +365,26 @@ export default function CatatPelanggaranForm({
   const [detailViolation, setDetailViolation] = useState<ViolationRecord | null>(null);
   const [isProcessingDrivePdf, setIsProcessingDrivePdf] = useState(false);
   const [caseDriveFailed, setCaseDriveFailed] = useState(false);
+
+  useEffect(() => {
+    if (!initialOpenViolationId) return;
+    const target = (violations || []).find(
+      (v) => v && (v.id === initialOpenViolationId || v.ticketId === initialOpenViolationId)
+    );
+    if (target) {
+      setActiveTab('arsip');
+      setArchiveOriginTab(isPiketReferralViolation(target) ? 'rujukan' : 'lama');
+      setDetailViolation(target);
+      setCaseDriveFailed(false);
+      onClearInitialOpenViolation?.();
+    }
+  }, [initialOpenViolationId, violations, onClearInitialOpenViolation]);
   const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<{
     type: 'violation' | 'student';
     id: string;
+    title?: string;
     message: string;
+    step: 1 | 2;
   } | null>(null);
 
   const handleProcessCaseDrivePdf = async (v: ViolationRecord) => {
@@ -272,29 +411,64 @@ export default function CatatPelanggaranForm({
   const [editStudentClass, setEditStudentClass] = useState('');
   const [editStudentNis, setEditStudentNis] = useState('');
 
-  // Date range filter states for archive list
+  // Date range filter states (kept compatible) & legacy sub-filter
   const [archiveStartDate, setArchiveStartDate] = useState('');
   const [archiveEndDate, setArchiveEndDate] = useState('');
-
-  // Sub-tab for Archive: 'perilaku' (default) vs 'absensi'
   const [archiveSubTab, setArchiveSubTab] = useState<'perilaku' | 'absensi'>('perilaku');
 
-  // Total counts for Absensi vs Perilaku (Partition: total = violations.length)
-  const { absensiTotalCount, perilakuTotalCount } = useMemo(() => {
-    if (!Array.isArray(violations)) return { absensiTotalCount: 0, perilakuTotalCount: 0 };
-    let abs = 0;
-    let per = 0;
-    violations.forEach(v => {
-      if (isAttendanceViolation(v)) {
-        abs++;
-      } else {
-        per++;
-      }
+  // Counts for Rujukan Baru dari Piket vs Riwayat Lama
+  const { rujukanCount, riwayatLamaCount } = useMemo(() => {
+    if (!Array.isArray(violations)) return { rujukanCount: 0, riwayatLamaCount: 0 };
+    let rujukan = 0;
+    let lama = 0;
+    violations.forEach((v) => {
+      if (!v) return;
+      if (isPiketReferralViolation(v)) rujukan++;
+      else lama++;
     });
-    return { absensiTotalCount: abs, perilakuTotalCount: per };
+    return { rujukanCount: rujukan, riwayatLamaCount: lama };
   }, [violations]);
 
-  // Restitution Status Filter state (for Perilaku tab)
+  const studentNisMap = useMemo(() => {
+    const map = new Map<string, string>();
+    (students || []).forEach((s) => {
+      if (s.id && s.nis) map.set(String(s.id), String(s.nis));
+      if (s.name && s.nis) map.set(s.name.trim().toLowerCase(), String(s.nis));
+    });
+    return map;
+  }, [students]);
+
+  const classFilterChips = useMemo(() => {
+    const base = ['7A', '7B', '7C', '8A', '8B', '8C', '9A', '9B', '9C'];
+    const set = new Set<string>(base);
+    (students || []).forEach((s) => {
+      const c = normalizeShortClassName(s.class);
+      if (c) set.add(c);
+    });
+    (violations || []).forEach((v) => {
+      const c = normalizeShortClassName(v.studentClass);
+      if (c) set.add(c);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'id', { numeric: true }));
+  }, [students, violations]);
+
+  const pelaporOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    (teachersList || []).forEach((t) => {
+      const clean = String(t.name || '').trim();
+      if (clean) map.set(clean.toLowerCase(), t.role ? `${clean} (${t.role})` : clean);
+    });
+    (violations || []).forEach((v) => {
+      const clean = String(v.reportedBy || '').trim();
+      if (clean && !map.has(clean.toLowerCase())) {
+        map.set(clean.toLowerCase(), clean);
+      }
+    });
+    return Array.from(map.entries())
+      .map(([key, label]) => ({ value: key, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'id'));
+  }, [teachersList, violations]);
+
   const [restitutionStatusFilter, setRestitutionStatusFilter] = useState<'Semua' | RestitutionStatusType>('Semua');
 
   // Active month calculation for Dashboard Pemulihan
@@ -447,46 +621,139 @@ export default function CatatPelanggaranForm({
     showToast(`Status penanganan berhasil diubah ke "${modalTargetStatus}"`, 'success');
   };
 
-  // Filtered violation records for archive list
+  const handleResetArchiveFilters = () => {
+    setArchiveSearch('');
+    setSelectedClasses([]);
+    setSelectedCategoryChips([]);
+    setTimeFilter('all');
+    setSelectedStatusChips([]);
+    setSelectedPelapor('Semua');
+    setArchiveStartDate('');
+    setArchiveEndDate('');
+    setRestitutionStatusFilter('Semua');
+  };
+
+  // Filtered violation records for Rujukan Baru dari Piket & Riwayat Lama (sorted newest first)
   const filteredViolations = useMemo(() => {
     if (!Array.isArray(violations)) return [];
-    const q = archiveSearch.toLowerCase().trim();
-    return violations.filter(v => {
+    const rawQ = archiveSearch.trim();
+    const q = rawQ.length >= 2 ? rawQ.toLowerCase() : '';
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const nowDate = new Date();
+    const weekAgo = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - 7)
+      .toISOString()
+      .slice(0, 10);
+    const monthPrefix = todayStr.slice(0, 7);
+
+    const list = violations.filter((v) => {
       if (!v) return false;
 
-      // 1. Strict partition by sub-tab: Absensi vs Perilaku
-      const isAtt = isAttendanceViolation(v);
-      if (archiveSubTab === 'absensi' && !isAtt) return false;
-      if (archiveSubTab === 'perilaku' && isAtt) return false;
+      // 1. Partition by origin tab: Rujukan Baru dari Piket vs Riwayat Lama
+      const isPiket = isPiketReferralViolation(v);
+      if (archiveOriginTab === 'rujukan' && !isPiket) return false;
+      if (archiveOriginTab === 'lama' && isPiket) return false;
 
-      // 2. Search query filter
-      const matchesQuery = !q || (
-        String(v.studentName || '').toLowerCase().includes(q) ||
-        String(v.studentClass || '').toLowerCase().includes(q) ||
-        String(v.category || '').toLowerCase().includes(q) ||
-        String(v.ticketId || '').toLowerCase().includes(q)
-      );
-      if (!matchesQuery) return false;
-
-      // 3. Date range filters
-      if (archiveStartDate) {
-        const vDate = String(v.date || '').slice(0, 10);
-        if (vDate && vDate < archiveStartDate) return false;
-      }
-      if (archiveEndDate) {
-        const vDate = String(v.date || '').slice(0, 10);
-        if (vDate && vDate > archiveEndDate) return false;
+      // 2. Instant search query filter (>= 2 huruf langsung filter Nama Siswa / NIS)
+      if (q) {
+        const resolvedNis =
+          String(v.nis || '').trim() ||
+          studentNisMap.get(String(v.studentId || '')) ||
+          studentNisMap.get(String(v.studentName || '').trim().toLowerCase()) ||
+          '';
+        const matchesQuery =
+          String(v.studentName || '').toLowerCase().includes(q) ||
+          resolvedNis.toLowerCase().includes(q) ||
+          String(v.studentClass || '').toLowerCase().includes(q) ||
+          String(v.category || '').toLowerCase().includes(q) ||
+          String(v.ticketId || '').toLowerCase().includes(q);
+        if (!matchesQuery) return false;
       }
 
-      // 4. Status Restitusi filter (applies only in Tab Perilaku)
-      if (archiveSubTab === 'perilaku' && restitutionStatusFilter !== 'Semua') {
-        const st = getViolationRestitutionStatus(v);
-        if (st !== restitutionStatusFilter) return false;
+      // 3. Multi-select Kelas filter
+      if (selectedClasses.length > 0) {
+        const normCls = normalizeShortClassName(v.studentClass);
+        if (!selectedClasses.some((c) => normalizeShortClassName(c) === normCls)) {
+          return false;
+        }
+      }
+
+      // 4. Multi-select Kategori filter
+      if (selectedCategoryChips.length > 0) {
+        if (!selectedCategoryChips.some((chip) => matchesArchiveCategoryChip(v, chip))) {
+          return false;
+        }
+      }
+
+      // 5. Waktu filter (Hari Ini | Minggu Ini | Bulan Ini | Semua)
+      const vDate = String(v.date || '').slice(0, 10);
+      if (timeFilter === 'today' && vDate !== todayStr) return false;
+      if (timeFilter === 'week' && (!vDate || vDate < weekAgo)) return false;
+      if (timeFilter === 'month' && (!vDate || !vDate.startsWith(monthPrefix))) return false;
+
+      // Custom date bounds if any
+      if (archiveStartDate && vDate && vDate < archiveStartDate) return false;
+      if (archiveEndDate && vDate && vDate > archiveEndDate) return false;
+
+      // 6. Status filter (Baru | Sudah Ditindaklanjuti | Selesai)
+      if (selectedStatusChips.length > 0) {
+        const restStatus = getViolationRestitutionStatus(v);
+        const mappedKey: ArchiveStatusFilterKey =
+          restStatus === 'Selesai / Dipantau'
+            ? 'Selesai'
+            : restStatus === 'Sudah Konseling' || restStatus === 'Proses Restitusi'
+            ? 'Sudah Ditindaklanjuti'
+            : 'Baru';
+        if (!selectedStatusChips.includes(mappedKey)) return false;
+      }
+
+      // 7. Pelapor dropdown filter
+      if (selectedPelapor && selectedPelapor !== 'Semua') {
+        const rep = String(v.reportedBy || '').trim().toLowerCase();
+        if (!rep.includes(selectedPelapor.toLowerCase())) return false;
       }
 
       return true;
     });
-  }, [violations, archiveSubTab, archiveSearch, archiveStartDate, archiveEndDate, restitutionStatusFilter]);
+
+    // Urutkan terbaru ke terlama
+    return [...list].sort((a, b) => getViolationSortTimestamp(b) - getViolationSortTimestamp(a));
+  }, [
+    violations,
+    archiveOriginTab,
+    archiveSearch,
+    studentNisMap,
+    selectedClasses,
+    selectedCategoryChips,
+    timeFilter,
+    archiveStartDate,
+    archiveEndDate,
+    selectedStatusChips,
+    selectedPelapor,
+  ]);
+
+  const activeFilterSummaryParts = useMemo(() => {
+    const parts: string[] = [];
+    if (archiveSearch.trim().length >= 2) parts.push(`"${archiveSearch.trim()}"`);
+    if (selectedClasses.length > 0) parts.push(`Kelas ${selectedClasses.join(', ')}`);
+    if (selectedCategoryChips.length > 0) parts.push(selectedCategoryChips.join(', '));
+    if (timeFilter === 'today') parts.push('Hari Ini');
+    else if (timeFilter === 'week') parts.push('Minggu Ini');
+    else if (timeFilter === 'month') parts.push('Bulan Ini');
+    if (selectedStatusChips.length > 0) parts.push(`Status: ${selectedStatusChips.join(', ')}`);
+    if (selectedPelapor !== 'Semua') {
+      const foundOpt = pelaporOptions.find((o) => o.value === selectedPelapor);
+      parts.push(`Pelapor: ${foundOpt ? foundOpt.label : selectedPelapor}`);
+    }
+    return parts;
+  }, [
+    archiveSearch,
+    selectedClasses,
+    selectedCategoryChips,
+    timeFilter,
+    selectedStatusChips,
+    selectedPelapor,
+    pelaporOptions,
+  ]);
 
   // Autocomplete student query & class filter state
   const [studentQuery, setStudentQuery] = useState('');
@@ -1147,50 +1414,66 @@ SMP Negeri 2 Susukan`,
         </button>
         <ChevronRight className="w-3 h-3 text-[#bcc9c6]" />
         <button onClick={onCancel} className="hover:text-[#00685f] cursor-pointer">
-          Disiplin Positif & Restitusi
+          Disiplin Positif &amp; Restitusi
         </button>
         <ChevronRight className="w-3 h-3 text-[#bcc9c6]" />
         <span className="text-[#00685f] font-bold">
-          {activeTab === 'input' ? 'Catat Pembinaan & Restitusi' : 'Arsip Pendampingan Perilaku & Restitusi'}
+          Arsip Pembinaan &amp; Riwayat Pelanggaran
         </span>
       </nav>
 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h2 className="text-2xl font-extrabold text-[#00685f] tracking-tight">
-            {activeTab === 'input' ? 'Formulir Refleksi & Restitusi Perilaku' : 'Arsip Kasus Perilaku & Restitusi'}
+            Arsip Pembinaan &amp; Riwayat Pelanggaran
           </h2>
           <p className="text-sm text-[#3d4947]/70 font-semibold mt-1">
-            {activeTab === 'input'
-              ? 'Mendokumentasikan refleksi perilaku secara objektif sesuai Permendikbudristek 46/2023 untuk mendukung pemulihan karakter siswa.'
-              : 'Daftar rekam perkembangan perilaku dan upaya pembinaan karakter terintegrasi.'}
+            Pantau rujukan baru dari Link Piket dan seluruh riwayat data lama sebelum sistem baru. Semua data lama tetap terjaga utuh dan dapat ditindaklanjuti.
           </p>
         </div>
       </div>
 
-      {/* Tab Switcher */}
-      <div className="flex border-b border-gray-200">
+      {/* 2 Tabs Utama di Arsip: Rujukan Baru dari Piket | Riwayat Lama (Tanpa tombol Catat Pelanggaran Guru BK) */}
+      <div className="flex flex-wrap border-b border-gray-200 gap-2">
         <button
           type="button"
-          onClick={() => setActiveTab('input')}
-          className={`pb-3 px-6 text-sm font-extrabold transition-all border-b-2 cursor-pointer ${
-            activeTab === 'input'
+          onClick={() => setArchiveOriginTab('rujukan')}
+          className={`pb-3 px-5 text-sm font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-2 ${
+            archiveOriginTab === 'rujukan'
               ? 'border-[#00685f] text-[#00685f]'
               : 'border-transparent text-gray-500 hover:text-gray-700'
           }`}
         >
-          Catat Pembinaan & Restitusi
+          <span>Rujukan Baru dari Piket</span>
+          <span
+            className={`text-[11px] font-black px-2 py-0.5 rounded-full ${
+              archiveOriginTab === 'rujukan'
+                ? 'bg-[#00685f] text-white'
+                : 'bg-gray-100 text-gray-600'
+            }`}
+          >
+            {rujukanCount}
+          </span>
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab('arsip')}
-          className={`pb-3 px-6 text-sm font-extrabold transition-all border-b-2 cursor-pointer ${
-            activeTab === 'arsip'
+          onClick={() => setArchiveOriginTab('lama')}
+          className={`pb-3 px-5 text-sm font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-2 ${
+            archiveOriginTab === 'lama'
               ? 'border-[#00685f] text-[#00685f]'
               : 'border-transparent text-gray-500 hover:text-gray-700'
           }`}
         >
-          Arsip Pendampingan Perilaku & Restitusi ({violations?.length || 0})
+          <span>Riwayat Lama</span>
+          <span
+            className={`text-[11px] font-black px-2 py-0.5 rounded-full ${
+              archiveOriginTab === 'lama'
+                ? 'bg-amber-600 text-white'
+                : 'bg-amber-50 text-amber-800 border border-amber-200'
+            }`}
+          >
+            {riwayatLamaCount}
+          </span>
         </button>
       </div>
 
@@ -1374,514 +1657,521 @@ SMP Negeri 2 Susukan`,
             </div>
           </div>
 
-          {/* Table Container Below */}
+          {/* Archive Container: Always-Visible Search + Multi-Chip Filter + Cards/Table */}
           <div className="bg-white rounded-2xl shadow-sm border border-[#bcc9c6]/30 overflow-hidden">
-          {/* Detail Header banner */}
-          <div className="p-6 border-b border-[#bcc9c6]/30 bg-[#f8f9ff] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-xl bg-[#ffdad6] text-[#ba1a1a] flex items-center justify-center shadow-sm flex-shrink-0">
-                <Gavel className="w-5.5 h-5.5" />
+            {/* Header & Always-Visible Main Search Bar */}
+            <div className="p-5 sm:p-6 border-b border-[#bcc9c6]/30 bg-[#f8f9ff] space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#00685f]/10 text-[#00685f] flex items-center justify-center shadow-2xs shrink-0">
+                    <Gavel className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-extrabold text-[#0b1c30]">
+                      {archiveOriginTab === 'rujukan'
+                        ? 'Rujukan Baru dari Piket'
+                        : 'Riwayat Lama (Data Pelanggaran Sebelum Sistem Baru)'}
+                    </h3>
+                    <p className="text-xs text-[#3d4947]/80 font-medium">
+                      {archiveOriginTab === 'rujukan'
+                        ? 'Laporan masuk dari Link Piket yang belum maupun sudah ditindaklanjuti.'
+                        : 'Seluruh data pelanggaran lama tetap aman, diberi label Data Lama, dan tetap dapat dibuka atau ditindaklanjuti.'}
+                    </p>
+                  </div>
+                </div>
+                <div className="text-xs font-extrabold text-[#00685f] bg-white px-3.5 py-2 rounded-xl border border-[#00685f]/25 shadow-2xs self-start sm:self-auto shrink-0">
+                  Ditemukan {filteredViolations.length} laporan
+                </div>
               </div>
-              <div>
-                <h3 className="text-base font-bold text-[#0b1c30]">
-                  Arsip Laporan Pemulihan Perilaku
-                </h3>
-                <p className="text-xs text-[#3d4947]/70 font-semibold mt-0.5">
-                  Unduh dokumen pendukung bimbingan dan restitusi dalam format PDF resmi.
-                </p>
-              </div>
-            </div>
-            <div className="relative w-full sm:w-72">
-              <Search className="w-4 h-4 text-gray-400 absolute left-3.5 top-3" />
-              <input
-                type="text"
-                placeholder="Cari nama, kelas, kategori..."
-                value={archiveSearch}
-                onChange={(e) => setArchiveSearch(e.target.value)}
-                className="w-full bg-white border border-[#bcc9c6]/40 rounded-xl pl-10 pr-4 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-[#00685f]/50 font-semibold text-[#0b1c30]"
-              />
-            </div>
-          </div>
 
-          {/* Sub-Tabs: [Absensi] vs [Perilaku] */}
-          <div className="px-6 pt-3 bg-[#f8f9ff] border-b border-[#bcc9c6]/30 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setArchiveSubTab('absensi')}
-              className={`pb-3 px-5 text-sm font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-2 ${
-                archiveSubTab === 'absensi'
-                  ? 'border-[#00685f] text-[#00685f]'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <span>Absensi ({absensiTotalCount})</span>
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                archiveSubTab === 'absensi' ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-500'
-              }`}>
-                Wali Kelas
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setArchiveSubTab('perilaku')}
-              className={`pb-3 px-5 text-sm font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-2 ${
-                archiveSubTab === 'perilaku'
-                  ? 'border-[#00685f] text-[#00685f]'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <span>Perilaku ({perilakuTotalCount})</span>
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                archiveSubTab === 'perilaku' ? 'bg-[#00685f]/10 text-[#00685f]' : 'bg-gray-100 text-gray-500'
-              }`}>
-                Wajib BK
-              </span>
-            </button>
-          </div>
-
-          {/* Date-Range Picker & Quick Filter Bar */}
-          <div className="p-3.5 sm:px-6 bg-[#f8faf9] border-b border-[#bcc9c6]/30 flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-extrabold text-[#00685f] flex items-center gap-1.5 text-xs">
-                <Calendar className="w-4 h-4" />
-                <span>Filter Periode Tanggal:</span>
-              </span>
-
-              {/* Start Date */}
-              <div className="flex items-center gap-1.5 bg-white border border-[#bcc9c6]/50 rounded-xl px-2.5 py-1 shadow-2xs">
-                <span className="text-[10px] font-bold text-gray-500 uppercase">Dari:</span>
+              {/* 1 Baris Pencarian Utama yang Selalu Terlihat */}
+              <div className="relative">
+                <Search className="w-4.5 h-4.5 text-[#00685f] absolute left-4 top-3.5 pointer-events-none" />
                 <input
-                  type="date"
-                  value={archiveStartDate}
-                  onChange={(e) => setArchiveStartDate(e.target.value)}
-                  className="bg-transparent text-xs font-bold text-[#0b1c30] focus:outline-none cursor-pointer"
+                  type="text"
+                  placeholder="🔍 Cari Nama Siswa / NIS..."
+                  value={archiveSearch}
+                  onChange={(e) => setArchiveSearch(e.target.value)}
+                  className="w-full bg-white border-2 border-[#bcc9c6]/60 focus:border-[#00685f] rounded-xl pl-11 pr-24 py-3 text-sm font-bold text-[#0b1c30] focus:outline-none shadow-xs transition-colors"
                 />
-              </div>
-
-              <span className="text-gray-400 font-bold text-xs">s/d</span>
-
-              {/* End Date */}
-              <div className="flex items-center gap-1.5 bg-white border border-[#bcc9c6]/50 rounded-xl px-2.5 py-1 shadow-2xs">
-                <span className="text-[10px] font-bold text-gray-500 uppercase">Sampai:</span>
-                <input
-                  type="date"
-                  value={archiveEndDate}
-                  onChange={(e) => setArchiveEndDate(e.target.value)}
-                  className="bg-transparent text-xs font-bold text-[#0b1c30] focus:outline-none cursor-pointer"
-                />
-              </div>
-
-              {/* Quick Presets */}
-              <div className="flex flex-wrap items-center gap-1 ml-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const today = new Date().toISOString().slice(0, 10);
-                    setArchiveStartDate(today);
-                    setArchiveEndDate(today);
-                  }}
-                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
-                >
-                  Hari Ini
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const d = new Date();
-                    d.setDate(d.getDate() - 7);
-                    setArchiveStartDate(d.toISOString().slice(0, 10));
-                    setArchiveEndDate(new Date().toISOString().slice(0, 10));
-                  }}
-                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
-                >
-                  7 Hari
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const d = new Date();
-                    d.setDate(d.getDate() - 30);
-                    setArchiveStartDate(d.toISOString().slice(0, 10));
-                    setArchiveEndDate(new Date().toISOString().slice(0, 10));
-                  }}
-                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
-                >
-                  30 Hari
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const now = new Date();
-                    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-                    setArchiveStartDate(firstDay);
-                    setArchiveEndDate(new Date().toISOString().slice(0, 10));
-                  }}
-                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-teal-50 border border-gray-200 text-gray-700 hover:text-[#00685f] transition-all cursor-pointer shadow-2xs active:scale-95"
-                >
-                  Bulan Ini
-                </button>
-                {(archiveStartDate || archiveEndDate) && (
+                {archiveSearch && (
                   <button
                     type="button"
-                    onClick={() => {
-                      setArchiveStartDate('');
-                      setArchiveEndDate('');
-                    }}
-                    className="px-2.5 py-1 rounded-lg text-[11px] font-extrabold bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 transition-all cursor-pointer shadow-2xs"
+                    onClick={() => setArchiveSearch('')}
+                    className="absolute right-3 top-2.5 px-2.5 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-[11px] font-bold text-gray-600 cursor-pointer"
                   >
-                    Reset Tanggal ✕
+                    Bersihkan
                   </button>
                 )}
+                {archiveSearch.trim().length === 1 && (
+                  <p className="text-[11px] text-amber-700 font-semibold mt-1 pl-1">
+                    Ketik minimal 2 huruf untuk langsung memfilter nama siswa atau NIS...
+                  </p>
+                )}
               </div>
-            </div>
 
-            <div className="text-[11px] text-gray-600 font-semibold">
-              Menampilkan <strong className="text-[#00685f]">{filteredViolations.length}</strong> dari {archiveSubTab === 'perilaku' ? perilakuTotalCount : absensiTotalCount} catatan ({archiveSubTab === 'perilaku' ? 'Perilaku' : 'Absensi'})
-            </div>
-          </div>
+              {/* Quick Filter Chips & Dropdowns */}
+              <div className="space-y-3 pt-1">
+                {/* Baris 1: Dropdown Kelas, Kategori, & Pelapor + Waktu */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                  {/* Dropdown Kelas */}
+                  <div className="bg-white border border-[#bcc9c6]/50 rounded-xl px-3 py-2 flex items-center gap-2 shadow-2xs">
+                    <span className="text-[11px] font-extrabold text-[#3d4947] shrink-0">Kelas:</span>
+                    <select
+                      value={selectedClasses.length === 1 ? selectedClasses[0] : 'Semua'}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === 'Semua') setSelectedClasses([]);
+                        else setSelectedClasses([val]);
+                      }}
+                      className="w-full bg-transparent text-xs font-extrabold text-[#0b1c30] focus:outline-none cursor-pointer"
+                    >
+                      <option value="Semua">Semua ({classFilterChips.length} Kelas)</option>
+                      {classFilterChips.map((cls) => (
+                        <option key={cls} value={cls}>
+                          Kelas {cls}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-          {/* Status Restitusi Filter Bar (Hanya tampil untuk Tab Perilaku) */}
-          {archiveSubTab === 'perilaku' ? (
-            <div className="p-3.5 sm:px-6 bg-[#f0f9f8] border-b border-[#bcc9c6]/30 flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-extrabold text-[#00685f] flex items-center gap-1.5 text-xs mr-1">
-                  <Sliders className="w-4 h-4" />
-                  <span>Filter Status Restitusi:</span>
-                </span>
+                  {/* Dropdown Kategori */}
+                  <div className="bg-white border border-[#bcc9c6]/50 rounded-xl px-3 py-2 flex items-center gap-2 shadow-2xs">
+                    <span className="text-[11px] font-extrabold text-[#3d4947] shrink-0">Kategori:</span>
+                    <select
+                      value={selectedCategoryChips.length === 1 ? selectedCategoryChips[0] : 'Semua'}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === 'Semua') setSelectedCategoryChips([]);
+                        else setSelectedCategoryChips([val]);
+                      }}
+                      className="w-full bg-transparent text-xs font-extrabold text-[#0b1c30] focus:outline-none cursor-pointer"
+                    >
+                      <option value="Semua">Semua Kategori</option>
+                      {ARCHIVE_CATEGORY_CHIPS.map((cat) => (
+                        <option key={cat} value={cat}>
+                          {cat}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-                <button
-                  type="button"
-                  onClick={() => setRestitutionStatusFilter('Semua')}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    restitutionStatusFilter === 'Semua'
-                      ? 'bg-[#00685f] text-white shadow-xs'
-                      : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
-                  }`}
-                >
-                  Semua ({perilakuTotalCount})
-                </button>
+                  {/* Dropdown Pelapor (realtime Firestore `teachers` + pelapor laporan) */}
+                  <div className="bg-white border border-[#bcc9c6]/50 rounded-xl px-3 py-2 flex items-center gap-2 shadow-2xs">
+                    <span className="text-[11px] font-extrabold text-[#3d4947] shrink-0">Pelapor:</span>
+                    <select
+                      value={selectedPelapor}
+                      onChange={(e) => setSelectedPelapor(e.target.value)}
+                      className="w-full bg-transparent text-xs font-extrabold text-[#0b1c30] focus:outline-none cursor-pointer"
+                    >
+                      <option value="Semua">Semua Pelapor</option>
+                      {pelaporOptions.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
 
-                {(['Baru Dicatat', 'Sudah Konseling', 'Proses Restitusi', 'Selesai / Dipantau'] as RestitutionStatusType[]).map((st) => {
-                  const count = (violations || [])
-                    .filter(v => !isAttendanceViolation(v) && getViolationRestitutionStatus(v) === st).length;
-                  const cfg = RESTITUTION_STATUS_CONFIG[st];
-                  const isActive = restitutionStatusFilter === st;
-                  return (
+                {/* Multi-select Chips: Kelas */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] font-extrabold text-[#3d4947] mr-1">Kelas:</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedClasses([])}
+                    className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                      selectedClasses.length === 0
+                        ? 'bg-[#00685f] text-white border-[#00685f]'
+                        : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    Semua
+                  </button>
+                  {classFilterChips.map((cls) => {
+                    const active = selectedClasses.includes(cls);
+                    return (
+                      <button
+                        key={cls}
+                        type="button"
+                        onClick={() =>
+                          setSelectedClasses((prev) =>
+                            prev.includes(cls) ? prev.filter((item) => item !== cls) : [...prev, cls]
+                          )
+                        }
+                        className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                          active
+                            ? 'bg-[#00685f] text-white border-[#00685f] shadow-2xs'
+                            : 'bg-white text-gray-700 border-gray-200 hover:border-[#00685f]/50 hover:bg-teal-50/40'
+                        }`}
+                      >
+                        {cls}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Multi-select Chips: Kategori */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] font-extrabold text-[#3d4947] mr-1">Kategori:</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedCategoryChips([])}
+                    className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                      selectedCategoryChips.length === 0
+                        ? 'bg-[#00685f] text-white border-[#00685f]'
+                        : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    Semua
+                  </button>
+                  {ARCHIVE_CATEGORY_CHIPS.map((cat) => {
+                    const active = selectedCategoryChips.includes(cat);
+                    return (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() =>
+                          setSelectedCategoryChips((prev) =>
+                            prev.includes(cat) ? prev.filter((item) => item !== cat) : [...prev, cat]
+                          )
+                        }
+                        className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                          active
+                            ? 'bg-[#00685f] text-white border-[#00685f] shadow-2xs'
+                            : 'bg-white text-gray-700 border-gray-200 hover:border-[#00685f]/50 hover:bg-teal-50/40'
+                        }`}
+                      >
+                        {cat}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Chips: Waktu & Status */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                  {/* Waktu */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-extrabold text-[#3d4947] mr-1">Waktu:</span>
+                    {(
+                      [
+                        { id: 'today', label: 'Hari Ini' },
+                        { id: 'week', label: 'Minggu Ini' },
+                        { id: 'month', label: 'Bulan Ini' },
+                        { id: 'all', label: 'Semua' },
+                      ] as { id: ArchiveTimeFilterKey; label: string }[]
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setTimeFilter(opt.id)}
+                        className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                          timeFilter === opt.id
+                            ? 'bg-[#00685f] text-white border-[#00685f] shadow-2xs'
+                            : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Status Multi-Select */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-extrabold text-[#3d4947] mr-1">Status:</span>
                     <button
-                      key={st}
                       type="button"
-                      onClick={() => setRestitutionStatusFilter(isActive ? 'Semua' : st)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 border shadow-2xs ${
-                        isActive
-                          ? `${cfg.colorBadge} ring-2 ring-offset-1 ring-[#00685f]/40 font-black shadow-xs`
+                      onClick={() => setSelectedStatusChips([])}
+                      className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                        selectedStatusChips.length === 0
+                          ? 'bg-[#00685f] text-white border-[#00685f]'
                           : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
                       }`}
-                      title={cfg.description}
                     >
-                      <span className={`w-2 h-2 rounded-full ${cfg.colorDot}`} />
-                      <span>{st}</span>
-                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${isActive ? 'bg-white/80 font-black text-gray-800' : 'bg-gray-100 text-gray-600'}`}>
-                        {count}
-                      </span>
+                      Semua
                     </button>
-                  );
-                })}
+                    {(['Baru', 'Sudah Ditindaklanjuti', 'Selesai'] as ArchiveStatusFilterKey[]).map((st) => {
+                      const active = selectedStatusChips.includes(st);
+                      return (
+                        <button
+                          key={st}
+                          type="button"
+                          onClick={() =>
+                            setSelectedStatusChips((prev) =>
+                              prev.includes(st) ? prev.filter((item) => item !== st) : [...prev, st]
+                            )
+                          }
+                          className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                            active
+                              ? 'bg-[#00685f] text-white border-[#00685f] shadow-2xs'
+                              : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                          }`}
+                        >
+                          {st}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
 
-              {restitutionStatusFilter !== 'Semua' && (
-                <button
-                  type="button"
-                  onClick={() => setRestitutionStatusFilter('Semua')}
-                  className="px-2.5 py-1 rounded-lg text-[11px] font-extrabold bg-teal-100 text-[#00685f] hover:bg-teal-200 border border-teal-300 transition-all cursor-pointer"
-                >
-                  Tampilkan Semua Status ✕
-                </button>
+              {/* Active Filter Summary Banner */}
+              {activeFilterSummaryParts.length > 0 && (
+                <div className="bg-teal-50/80 border border-teal-200 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-bold text-[#0b1c30]">
+                    Menampilkan <strong className="text-[#00685f]">{filteredViolations.length}</strong> hasil untuk:{' '}
+                    <span className="text-[#00685f] font-extrabold">{activeFilterSummaryParts.join(' - ')}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleResetArchiveFilters}
+                    className="px-3 py-1 bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-[11px] font-extrabold cursor-pointer transition-colors"
+                  >
+                    Reset Filter
+                  </button>
+                </div>
               )}
             </div>
-          ) : (
-            <div className="p-3 sm:px-6 bg-amber-50/70 border-b border-amber-200/60 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-900 font-semibold">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
-                <span>Pelanggaran dari Absensi Harian (Alpha, Terlambat, Tanpa Keterangan). Ditindaklanjuti secara langsung oleh Wali Kelas.</span>
-              </div>
-              <span className="text-[11px] text-amber-800 font-bold bg-amber-100 px-2.5 py-0.5 rounded-lg border border-amber-300 shrink-0">
-                Total {absensiTotalCount} Catatan
-              </span>
-            </div>
-          )}
 
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-left text-xs">
-              <thead className="bg-[#f8f9ff] border-b border-[#bcc9c6]/30">
-                <tr>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">No</th>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Tiket ID</th>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Nama Siswa</th>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Kelas</th>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Kategori</th>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Bobot</th>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">Waktu / Pelapor</th>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px]">
-                    {archiveSubTab === 'perilaku' ? 'STATUS RESTITUSI & PENANGANAN BK' : 'PENANGANAN WALI KELAS'}
-                  </th>
-                  <th className="px-6 py-4 font-bold text-[#3d4947] uppercase text-[10px] text-center">Unduh Bukti</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#bcc9c6]/20">
-                {filteredViolations.length > 0 ? (
-                  filteredViolations.map((v, index) => (
-                    <tr key={v.id} className="hover:bg-[#eff4ff]/25 transition-colors">
-                      <td className="px-6 py-4 font-semibold text-gray-500">{index + 1}</td>
-                      <td className="px-6 py-4 font-bold text-[#ba1a1a]">{v.ticketId}</td>
-                      <td className="px-6 py-4">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (onNavigateToProfile) {
-                              onNavigateToProfile(v.studentId || v.studentName);
-                            } else {
-                              const st = students.find(s => s.id === v.studentId || s.name === v.studentName);
-                              if (st) {
-                                setSelectedStudentForEdit(st);
-                                setEditStudentName(st.name);
-                                setEditStudentClass(st.class);
-                                setEditStudentNis(st.nis);
-                              }
-                            }
-                          }}
-                          className="font-extrabold text-[#0b1c30] hover:text-[#00685f] hover:underline cursor-pointer text-left block"
-                          title="Klik untuk membuka Profil Siswa Khusus Guru BK"
-                        >
-                          {isPrivacyMode ? `Siswa ${index + 1} (${v.studentClass})` : v.studentName}
-                        </button>
-                      </td>
-                      <td className="px-6 py-4 font-semibold text-gray-600">{v.studentClass}</td>
-                      <td className="px-6 py-4">
-                        <span className="px-2 py-0.5 rounded bg-red-50 text-[#ba1a1a] font-bold text-[10px]">
-                          {v.category}
-                        </span>
-                        {v.proofPhotoUrl && (
-                          <div className="mt-1 flex items-center gap-1.5">
-                            <img
-                              src={v.proofPhotoUrl}
-                              alt="Bukti Foto"
-                              className="w-7 h-7 rounded object-cover border border-gray-200 shadow-xs"
-                              referrerPolicy="no-referrer"
-                            />
-                            <span className="text-[9px] text-emerald-700 font-bold bg-emerald-50 px-1 py-0.2 rounded border border-emerald-200">Foto Bukti</span>
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 font-bold text-red-600">+{v.pointsAdded}</td>
-                      <td className="px-6 py-4 text-gray-500">
-                        <div className="font-semibold text-gray-700">{formatCardDateTime(v.date, v.time)}</div>
-                        <div className="text-[10px] opacity-75 font-semibold">Oleh: {v.reportedBy}</div>
-                      </td>
-                      <td className="px-6 py-4">
-                        {archiveSubTab === 'absensi' ? (
-                          <div className="space-y-1 max-w-[240px]">
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-black bg-amber-100 text-amber-900 border border-amber-300 shadow-2xs">
-                              <User className="w-3.5 h-3.5 text-amber-700" />
-                              <span>Wali Kelas</span>
+            {/* List Laporan (Urut Terbaru ke Terlama) */}
+            <div className="p-4 sm:p-6 space-y-3 bg-[#f8faf9]">
+              {filteredViolations.length > 0 ? (
+                filteredViolations.map((v, index) => {
+                  const curStatus = getViolationRestitutionStatus(v);
+                  const cfg = RESTITUTION_STATUS_CONFIG[curStatus];
+                  const origin = getViolationOriginDisplay(v);
+                  const resolvedNis =
+                    String(v.nis || '').trim() ||
+                    studentNisMap.get(String(v.studentId || '')) ||
+                    studentNisMap.get(String(v.studentName || '').trim().toLowerCase()) ||
+                    '';
+
+                  return (
+                    <div
+                      key={v.id}
+                      className="bg-white border border-[#bcc9c6]/40 hover:border-[#00685f]/40 rounded-2xl p-4 sm:p-5 shadow-2xs transition-all space-y-3"
+                    >
+                      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
+                        {/* Kiri: Identitas Siswa, Asal Data & Kategori */}
+                        <div className="space-y-1.5 min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[11px] font-bold text-gray-400">#{index + 1}</span>
+                            {v.ticketId && (
+                              <span className="text-[11px] font-extrabold text-[#ba1a1a] bg-red-50 border border-red-200 px-2 py-0.5 rounded-lg">
+                                {v.ticketId}
+                              </span>
+                            )}
+                            <span className="px-2 py-0.5 rounded-lg bg-[#00685f]/10 text-[#00685f] font-extrabold text-[11px]">
+                              Kelas {v.studentClass}
                             </span>
-                            <p className="text-[11px] text-gray-600 font-medium leading-snug">
-                              {v.handlingProgress || 'Teguran persuasif & pembinaan tingkat kelas oleh Wali Kelas.'}
-                            </p>
+                            {!origin.isPiket ? (
+                              <span className="px-2 py-0.5 rounded-lg bg-amber-50 text-amber-800 border border-amber-300 text-[10px] font-extrabold">
+                                Data Lama
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-300 text-[10px] font-extrabold">
+                                Link Piket
+                              </span>
+                            )}
+                            <span className="px-2 py-0.5 rounded-lg bg-red-50 text-red-700 font-black text-[11px]">
+                              +{v.pointsAdded} Poin
+                            </span>
                           </div>
-                        ) : (
-                          <div className="space-y-1.5 min-w-[190px]">
-                            {/* Label Status Warna (Bisa diklik untuk ubah status) */}
-                            {(() => {
-                              const curStatus = getViolationRestitutionStatus(v);
-                              const cfg = RESTITUTION_STATUS_CONFIG[curStatus];
-                              return (
-                                <button
-                                  type="button"
-                                  onClick={() => handleOpenStatusModal(v)}
-                                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black border shadow-2xs transition-all cursor-pointer active:scale-95 hover:shadow-xs group ${cfg.colorBadge}`}
-                                  title="Klik untuk mengubah status penanganan & restitusi"
-                                >
-                                  <span className={`w-2 h-2 rounded-full ${cfg.colorDot} animate-pulse`} />
-                                  <span>{curStatus}</span>
-                                  <ChevronDown className="w-3.5 h-3.5 opacity-60 group-hover:opacity-100 transition-opacity" />
-                                </button>
-                              );
-                            })()}
 
-                            {/* Keterangan detail tahap penanganan */}
-                            {(() => {
-                              const curStatus = getViolationRestitutionStatus(v);
-                              if (curStatus === 'Proses Restitusi') {
-                                return (
-                                  <div className="bg-amber-50/90 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-950 space-y-1 shadow-2xs">
-                                    <div>
-                                      <span className="font-bold text-amber-900 block text-[10px] uppercase tracking-wider">Isi Kesepakatan:</span>
-                                      <span className="leading-snug block mt-0.5 font-medium">
-                                        {v.restitutionAgreement || (v.handlingProgress && !v.handlingProgress.includes('Disinkronkan otomatis') ? v.handlingProgress : 'Sedang menjalankan komitmen perbaikan')}
-                                      </span>
-                                    </div>
-                                    <div className="pt-1 border-t border-amber-200/60 flex flex-wrap items-center justify-between gap-1 text-[10px]">
-                                      <span className="text-amber-800 font-bold flex items-center gap-1">
-                                        <Clock className="w-3 h-3 text-amber-600" />
-                                        Deadline: {formatCardDate(v.restitutionDeadline || v.date)}
-                                      </span>
-                                      <span className="text-amber-700 font-medium flex items-center gap-1">
-                                        <User className="w-3 h-3 text-amber-600" />
-                                        {v.restitutionSupervisor || 'Wali Kelas / BK'}
-                                      </span>
-                                    </div>
-                                  </div>
-                                );
-                              }
-                              if (curStatus === 'Selesai / Dipantau') {
-                                return (
-                                  <div className="bg-emerald-50/90 border border-emerald-200 rounded-xl p-2 text-[11px] text-emerald-950 flex items-start gap-1.5 shadow-2xs">
-                                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
-                                    <div className="leading-snug">
-                                      <span className="font-bold text-emerald-900">Selesai: </span>
-                                      <span className="font-medium">{formatCardDate(v.restitutionCompletedDate || v.date)}</span>
-                                      <span className="block text-[10px] text-emerald-700 font-bold mt-0.5">Masa Pantau: 2 Minggu</span>
-                                    </div>
-                                  </div>
-                                );
-                              }
-                              if (curStatus === 'Sudah Konseling') {
-                                return (
-                                  <div className="bg-blue-50/70 border border-blue-200/70 rounded-lg px-2 py-1 text-[10.5px] text-blue-800 font-semibold flex items-center gap-1">
-                                    <span>💬 Sudah bicara dengan siswa</span>
-                                  </div>
-                                );
-                              }
-                              return (
-                                <div className="bg-gray-100/70 border border-gray-200/70 rounded-lg px-2 py-1 text-[10.5px] text-gray-600 font-semibold flex items-center gap-1">
-                                  <span>⏳ Baru masuk, belum dipanggil</span>
-                                </div>
-                              );
-                            })()}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <div className="flex items-center justify-center gap-1.5">
-                          {onCreateFollowUpCounseling && (
+                          <div className="flex flex-wrap items-baseline gap-2">
                             <button
                               type="button"
                               onClick={() => {
-                                const st = students.find((s) => s.id === v.studentId || s.name === v.studentName);
-                                const studentObj: Student = st || {
-                                  id: v.studentId,
-                                  name: v.studentName,
-                                  class: v.studentClass,
-                                  nis: '-',
-                                  gender: 'L',
-                                  violationPoints: v.pointsAdded,
-                                  bkServicesCount: 0,
-                                  initials: (v.studentName || 'S').slice(0, 2).toUpperCase(),
-                                };
-                                onCreateFollowUpCounseling({
-                                  students: [studentObj],
-                                  problem: `Tindak Lanjut Pembinaan Disiplin: ${v.category}`,
-                                  description: `Sesi tindak lanjut layanan konseling dan restitusi disiplin positif atas pelanggaran "${v.category}" (${v.date}). Tiket: #${v.ticketId || v.id}. Catatan kejadian: ${v.notes || '-'}`,
-                                  serviceType: 'Layanan Konseling Perorangan (Individual)',
-                                  targetType: 'Individu',
-                                  status: 'Terjadwal',
-                                  violationContext: {
-                                    category: v.category,
-                                    pointsAdded: v.pointsAdded,
-                                    date: v.date,
-                                    notes: v.notes,
-                                    ticketId: v.ticketId,
-                                    violationId: v.id,
-                                  },
-                                });
+                                if (onNavigateToProfile) {
+                                  onNavigateToProfile(v.studentId || v.studentName);
+                                } else {
+                                  const st = students.find(
+                                    (s) => s.id === v.studentId || s.name === v.studentName
+                                  );
+                                  if (st) {
+                                    setSelectedStudentForEdit(st);
+                                    setEditStudentName(st.name);
+                                    setEditStudentClass(st.class);
+                                    setEditStudentNis(st.nis);
+                                  }
+                                }
                               }}
-                              className="px-2.5 py-1.5 bg-emerald-50 text-[#00685f] hover:bg-[#00685f] hover:text-white rounded-lg font-bold text-[11px] transition-all cursor-pointer shadow-2xs border border-emerald-300 flex items-center gap-1 active:scale-97"
-                              title="Tindak lanjuti pelanggaran ini melalui Sesi Layanan Konseling BK"
+                              className="text-base font-extrabold text-[#0b1c30] hover:text-[#00685f] hover:underline cursor-pointer text-left"
+                              title="Klik untuk membuka Profil Siswa (Riwayat Lengkap)"
                             >
-                              <HeartHandshake className="w-3.5 h-3.5" />
-                              <span className="hidden xl:inline">Tindak Lanjut</span>
+                              {isPrivacyMode ? `Siswa ${index + 1} (${v.studentClass})` : v.studentName}
                             </button>
+                            {resolvedNis && !isPrivacyMode && (
+                              <span className="text-xs font-mono text-gray-500">NIS: {resolvedNis}</span>
+                            )}
+                          </div>
+
+                          <p className="text-xs font-bold text-[#0b1c30]">
+                            Kategori: <span className="text-[#ba1a1a]">{v.category}</span>
+                          </p>
+
+                          {v.notes && (
+                            <p className="text-xs text-[#3d4947] bg-[#f8faf9] border border-gray-200/70 rounded-xl px-3 py-2 line-clamp-2">
+                              {v.notes}
+                            </p>
                           )}
 
-                          {/* Tombol Detail Kasus */}
+                          {/* Asal Data Wajib Jelas */}
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-600 pt-1">
+                            <span className="flex items-center gap-1 font-semibold text-gray-700">
+                              <Clock className="w-3.5 h-3.5 text-[#00685f]" />
+                              {formatCardDateTime(v.date, v.time)}
+                            </span>
+                            <span className="text-gray-300">•</span>
+                            <span>
+                              Dilaporkan oleh: <strong className="text-[#0b1c30]">{origin.reporterLabel}</strong>
+                            </span>
+                            <span className="text-gray-300">•</span>
+                            <span className="font-mono text-[10px] px-2 py-0.5 rounded-lg bg-gray-100 text-gray-700 border border-gray-200">
+                              reportedVia: {origin.reportedViaLabel}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Kanan: Status Restitusi & Tombol Aksi */}
+                        <div className="flex flex-col items-start lg:items-end justify-between gap-3 shrink-0">
                           <button
                             type="button"
-                            onClick={() => {
-                              setDetailViolation(v);
-                              setCaseDriveFailed(false);
-                            }}
-                            className="px-2 py-1.5 bg-[#00685f]/10 text-[#00685f] hover:bg-[#00685f] hover:text-white rounded-lg font-bold text-[11px] transition-all cursor-pointer shadow-2xs border border-[#00685f]/30 flex items-center gap-1"
-                            title="Buka Detail Kasus & Berkas Layanan"
+                            onClick={() => handleOpenStatusModal(v)}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black border shadow-2xs transition-all cursor-pointer active:scale-95 ${cfg.colorBadge}`}
+                            title="Klik untuk mengubah status penanganan & restitusi"
                           >
-                            <FileText className="w-3.5 h-3.5" />
-                            <span>Detail</span>
+                            <span className={`w-2 h-2 rounded-full ${cfg.colorDot}`} />
+                            <span>{curStatus}</span>
+                            <ChevronDown className="w-3.5 h-3.5 opacity-60" />
                           </button>
 
-                          {/* Tombol Lihat PDF di Drive jika sudah tersimpan */}
-                          {v.pdfUrl && (
-                            <a
-                              href={v.pdfUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="p-1.5 bg-emerald-50 text-emerald-800 hover:bg-emerald-600 hover:text-white rounded-lg font-bold transition-all cursor-pointer shadow-xs border border-emerald-300"
-                              title="Lihat PDF di Google Drive"
-                            >
-                              <ExternalLink className="w-3.5 h-3.5" />
-                            </a>
-                          )}
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {onCreateFollowUpCounseling && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const st = students.find(
+                                    (s) => s.id === v.studentId || s.name === v.studentName
+                                  );
+                                  const studentObj: Student = st || {
+                                    id: v.studentId,
+                                    name: v.studentName,
+                                    class: v.studentClass,
+                                    nis: resolvedNis || '-',
+                                    gender: 'L',
+                                    violationPoints: v.pointsAdded,
+                                    bkServicesCount: 0,
+                                    initials: (v.studentName || 'S').slice(0, 2).toUpperCase(),
+                                  };
+                                  onCreateFollowUpCounseling({
+                                    students: [studentObj],
+                                    problem: `Tindak Lanjut Pembinaan Disiplin: ${v.category}`,
+                                    description: `Sesi tindak lanjut layanan konseling dan restitusi disiplin positif atas pelanggaran "${v.category}" (${v.date}). Tiket: #${v.ticketId || v.id}. Catatan kejadian: ${v.notes || '-'}`,
+                                    serviceType: 'Layanan Konseling Perorangan (Individual)',
+                                    targetType: 'Individu',
+                                    status: 'Terjadwal',
+                                    violationContext: {
+                                      category: v.category,
+                                      pointsAdded: v.pointsAdded,
+                                      date: v.date,
+                                      notes: v.notes,
+                                      ticketId: v.ticketId,
+                                      violationId: v.id,
+                                    },
+                                  });
+                                }}
+                                className="px-2.5 py-1.5 bg-emerald-50 text-[#00685f] hover:bg-[#00685f] hover:text-white rounded-xl font-bold text-[11px] transition-all cursor-pointer shadow-2xs border border-emerald-300 flex items-center gap-1"
+                                title="Tindak lanjuti melalui Sesi Layanan Konseling BK"
+                              >
+                                <HeartHandshake className="w-3.5 h-3.5" />
+                                <span>Tindak Lanjut</span>
+                              </button>
+                            )}
 
-                          {/* Tombol Download / Download Ulang PDF */}
-                          <button
-                            type="button"
-                            onClick={() => downloadViolationPDF(v)}
-                            className="p-1.5 bg-[#ba1a1a]/10 text-[#ba1a1a] hover:bg-[#ba1a1a] hover:text-white rounded-lg font-bold transition-all cursor-pointer shadow-xs"
-                            title={v.pdfUrl ? "Download Ulang PDF" : "Unduh Bukti Pelanggaran PDF"}
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                          </button>
-                          
-                          <button
-                            type="button"
-                            onClick={() => setEditingViolation(v)}
-                            className="p-1.5 bg-blue-50 text-blue-700 hover:bg-blue-600 hover:text-white rounded-lg font-bold transition-all cursor-pointer shadow-xs border border-blue-200"
-                            title="Edit Catatan Pelanggaran Ini"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-
-
-                          {onDeleteViolation && (
                             <button
                               type="button"
-                              onClick={() =>
-                                setConfirmDeleteTarget({
-                                  type: 'violation',
-                                  id: v.id,
-                                  message: `Hapus kasus "${v.category}" milik ${v.studentName} saja? Kasus lain tidak akan terhapus.`,
-                                })
-                              }
-                              className="p-1.5 bg-red-50 text-red-600 hover:bg-red-600 hover:text-white rounded-lg font-bold transition-all cursor-pointer shadow-xs border border-red-200"
-                              title="Hapus Catatan Pelanggaran Ini"
+                              onClick={() => {
+                                setDetailViolation(v);
+                                setCaseDriveFailed(false);
+                              }}
+                              className="px-2.5 py-1.5 bg-[#00685f]/10 text-[#00685f] hover:bg-[#00685f] hover:text-white rounded-xl font-bold text-[11px] transition-all cursor-pointer shadow-2xs border border-[#00685f]/30 flex items-center gap-1"
+                              title="Buka Detail Laporan"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <FileText className="w-3.5 h-3.5" />
+                              <span>Detail</span>
                             </button>
-                          )}
+
+                            {v.pdfUrl && (
+                              <a
+                                href={v.pdfUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="p-1.5 bg-emerald-50 text-emerald-800 hover:bg-emerald-600 hover:text-white rounded-xl font-bold transition-all cursor-pointer shadow-2xs border border-emerald-300"
+                                title="Lihat PDF di Google Drive"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                              </a>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => downloadViolationPDF(v)}
+                              className="p-1.5 bg-[#ba1a1a]/10 text-[#ba1a1a] hover:bg-[#ba1a1a] hover:text-white rounded-xl font-bold transition-all cursor-pointer shadow-2xs"
+                              title={v.pdfUrl ? 'Download Ulang PDF' : 'Unduh Bukti Pelanggaran PDF'}
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => setEditingViolation(v)}
+                              className="p-1.5 bg-blue-50 text-blue-700 hover:bg-blue-600 hover:text-white rounded-xl font-bold transition-all cursor-pointer shadow-2xs border border-blue-200"
+                              title="Edit Catatan Ini"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+
+                            {onDeleteViolation && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setConfirmDeleteTarget({
+                                    type: 'violation',
+                                    id: v.id,
+                                    title: `Hapus Laporan ${v.studentName}`,
+                                    message: `Hapus laporan "${v.category}" milik ${v.studentName} (${v.studentClass})?`,
+                                    step: 1,
+                                  })
+                                }
+                                className="p-1.5 bg-red-50 text-red-600 hover:bg-red-600 hover:text-white rounded-xl font-bold transition-all cursor-pointer shadow-2xs border border-red-200"
+                                title="Hapus 1 Laporan Ini (Pindah ke Sampah)"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
                         </div>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={9} className="px-6 py-12 text-center text-gray-400 italic">
-                      Tidak ada arsip pelanggaran yang cocok dengan kriteria pencarian.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="bg-white rounded-2xl border border-[#bcc9c6]/40 p-10 text-center space-y-3">
+                  <p className="text-sm font-bold text-gray-600">
+                    Tidak ada laporan untuk pencarian ini.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleResetArchiveFilters}
+                    className="px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-extrabold rounded-xl transition-colors cursor-pointer"
+                  >
+                    Reset Filter
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
         </div>
       ) : (
         <>
@@ -3115,7 +3405,9 @@ SMP Negeri 2 Susukan`,
                     setConfirmDeleteTarget({
                       type: 'student',
                       id: selectedStudentForEdit.id,
+                      title: `Hapus Siswa ${selectedStudentForEdit.name}`,
                       message: `Hapus ${selectedStudentForEdit.name} (${selectedStudentForEdit.class}) saja? Siswa lain tidak akan terhapus.`,
+                      step: 1,
                     })
                   }
                   className="px-3 py-2 text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 rounded-xl cursor-pointer flex items-center gap-1"
@@ -3588,11 +3880,28 @@ SMP Negeri 2 Susukan`,
                 </div>
               )}
 
-              {/* Pelapor & Penanganan */}
-              <div className="flex flex-wrap items-center justify-between text-xs text-gray-500 border-t border-gray-100 pt-3">
-                <span>Dilaporkan oleh: <strong className="text-gray-800">{detailViolation.reportedBy || 'Piket / Wali Kelas'}</strong></span>
-                <span>Ditangani oleh: <strong className="text-gray-800">{detailViolation.handledBy || 'Guru BK'}</strong></span>
-              </div>
+              {/* Pelapor, Origin & Penanganan */}
+              {(() => {
+                const origin = getViolationOriginDisplay(detailViolation);
+                return (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500 border-t border-gray-100 pt-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span>
+                        Dilaporkan oleh: <strong className="text-gray-800">{origin.reporterLabel}</strong>
+                      </span>
+                      <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200">
+                        reportedVia: {origin.reportedViaLabel}
+                      </span>
+                      {!origin.isPiket && (
+                        <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-extrabold">
+                          Data Lama
+                        </span>
+                      )}
+                    </div>
+                    <span>Ditangani oleh: <strong className="text-gray-800">{detailViolation.handledBy || 'Guru BK'}</strong></span>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Modal Footer Actions */}
@@ -3673,8 +3982,19 @@ SMP Negeri 2 Susukan`,
                 <Trash2 className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="text-sm font-black text-[#0b1c30]">Konfirmasi Hapus 1 Data</h3>
-                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">{confirmDeleteTarget.message}</p>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-rose-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
+                  Konfirmasi {confirmDeleteTarget.step} / 2
+                </span>
+                <h3 className="text-sm font-black text-[#0b1c30] mt-1">
+                  {confirmDeleteTarget.step === 1
+                    ? (confirmDeleteTarget.title || 'Konfirmasi Hapus 1 Data')
+                    : 'Konfirmasi Akhir Pindah ke Sampah'}
+                </h3>
+                <p className="text-xs text-[#3d4947] mt-1 leading-relaxed">
+                  {confirmDeleteTarget.step === 1
+                    ? confirmDeleteTarget.message
+                    : 'Yakin hapus laporan ini? Data akan dipindah ke sampah, tidak hilang permanen.'}
+                </p>
               </div>
             </div>
             <div className="flex items-center justify-end gap-2">
@@ -3685,26 +4005,38 @@ SMP Negeri 2 Susukan`,
               >
                 Batal
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const target = confirmDeleteTarget;
-                  setConfirmDeleteTarget(null);
-                  if (!isValidDeleteId(target.id)) {
-                    showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
-                    return;
+              {confirmDeleteTarget.step === 1 ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setConfirmDeleteTarget((prev) => (prev ? { ...prev, step: 2 } : null))
                   }
-                  if (target.type === 'violation' && onDeleteViolation) {
-                    onDeleteViolation(target.id);
-                  } else if (target.type === 'student' && onDeleteStudent) {
-                    onDeleteStudent(target.id);
-                    setSelectedStudentForEdit(null);
-                  }
-                }}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
-              >
-                Ya, Hapus 1 Ini Saja
-              </button>
+                  className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold cursor-pointer"
+                >
+                  Lanjut Konfirmasi
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = confirmDeleteTarget;
+                    setConfirmDeleteTarget(null);
+                    if (!isValidDeleteId(target.id)) {
+                      showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
+                      return;
+                    }
+                    if (target.type === 'violation' && onDeleteViolation) {
+                      onDeleteViolation(target.id);
+                    } else if (target.type === 'student' && onDeleteStudent) {
+                      onDeleteStudent(target.id);
+                      setSelectedStudentForEdit(null);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+                >
+                  Ya, Pindahkan ke Sampah
+                </button>
+              )}
             </div>
           </div>
         </div>

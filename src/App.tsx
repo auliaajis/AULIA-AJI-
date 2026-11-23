@@ -98,6 +98,7 @@ export default function App() {
   const [preSelectedStudentId, setPreSelectedStudentId] = useState<string | undefined>(undefined);
   const [violationInitialTab, setViolationInitialTab] = useState<'input' | 'arsip'>('input');
   const [violationInitialSearch, setViolationInitialSearch] = useState('');
+  const [violationInitialOpenId, setViolationInitialOpenId] = useState<string | undefined>(undefined);
   const [selectedProfileStudentId, setSelectedProfileStudentId] = useState<string | null>(null);
   const [previousView, setPreviousView] = useState<string>('dashboard');
   const [presetServiceData, setPresetServiceData] = useState<PresetServiceData | null>(null);
@@ -880,6 +881,7 @@ export default function App() {
     } else if (tab === 'tambah-layanan' || tab === 'input-konseling' || tab === 'layanan-konseling' || tab === 'konseling') {
       setCurrentView('tambah-layanan');
     } else if (tab === 'pelanggaran' || tab === 'catat-pelanggaran' || tab === 'arsip-pelanggaran' || tab === 'arsip-restitusi') {
+      setViolationInitialOpenId(undefined);
       if (searchQueryOrClass) {
         setViolationInitialSearch(searchQueryOrClass);
         setViolationInitialTab('arsip');
@@ -948,6 +950,7 @@ export default function App() {
     } else if (form === 'input-konseling' || form === 'layanan-konseling' || form === 'konseling' || form === 'tambah-layanan') {
       setCurrentView('tambah-layanan');
     } else if (form === 'pelanggaran' || form === 'catat-pelanggaran') {
+      setViolationInitialTab('arsip');
       setCurrentView('pelanggaran');
     } else if (form === 'apresiasi' || form === 'catat-apresiasi') {
       setCurrentView('apresiasi');
@@ -2267,6 +2270,12 @@ export default function App() {
             activeCounselor={activeCounselor}
             onNavigateToTab={handleNavigateToTab}
             onNavigateToForm={handleNavigateToForm}
+            onOpenViolationDetail={(v) => {
+              setViolationInitialTab('arsip');
+              setViolationInitialSearch(v.ticketId || v.studentName || '');
+              setViolationInitialOpenId(v.id);
+              setCurrentView('pelanggaran');
+            }}
             onUpdateViolationStatus={handleUpdateViolationStatus}
             onUpdateServiceStatus={handleUpdateServiceStatus}
             onEditService={(srv) => setEditingService(srv)}
@@ -2323,6 +2332,8 @@ export default function App() {
             preSelectedStudentId={preSelectedStudentId}
             initialTab={violationInitialTab}
             initialArchiveSearch={violationInitialSearch}
+            initialOpenViolationId={violationInitialOpenId}
+            onClearInitialOpenViolation={() => setViolationInitialOpenId(undefined)}
             onNavigateToProfile={handleNavigateToProfile}
             onSaveViolation={handleSaveViolation}
             onUpdateViolation={handleUpdateViolation}
@@ -2424,62 +2435,14 @@ export default function App() {
             }),
           };
 
-          const searchedAndFilteredServices = filteredServices.filter((srv) => {
-            const matchesStatus =
-              serviceStatusFilter === 'semua' || srv.status === serviceStatusFilter;
-            const currentPillar = srv.bkComponent || getBKComponentForService(srv.serviceType);
-            const matchesPillar =
-              servicePillarFilter === 'semua' || currentPillar === servicePillarFilter;
-            const term = serviceSearchTerm.toLowerCase();
-            const matchesSearch =
-              !term ||
-              srv.problem.toLowerCase().includes(term) ||
-              srv.serviceType.toLowerCase().includes(term) ||
-              (srv.focusIssue && srv.focusIssue.toLowerCase().includes(term)) ||
-              (srv.description && srv.description.toLowerCase().includes(term)) ||
-              srv.students.some(
-                (st) =>
-                  st &&
-                  (String(st.name || '').toLowerCase().includes(term) ||
-                    String(st.class || '').toLowerCase().includes(term) ||
-                    String(st.nis ?? '').toLowerCase().includes(term))
-              );
-            return matchesStatus && matchesPillar && matchesSearch;
-          });
-
           return (
-            <div className="space-y-6 animate-in fade-in duration-300">
-              {/* Module Header Banner */}
-              <PageHeaderBanner
-                category="Layanan & Bimbingan"
-                title="Layanan Konseling & Advokasi Siswa"
-                description="Pusat pendokumentasian sesi konseling individual/kelompok, kunjungan rumah (home visit), serta pemanggilan resmi orang tua/wali."
-                icon={<HeartHandshake className="w-5 h-5" />}
-                badge="4 Pilar BK Komprehensif"
-                workflowHint="1. Pilih Sub-modul (Sesi / Home Visit / Panggilan) › 2. Input Rekam Bimbingan › 3. Simpan & Cetak Berita Acara PDF"
-                stats={[
-                  { label: 'Sesi Selesai', value: filteredServices.filter(s => s.status === 'Selesai').length, color: 'text-emerald-700' },
-                  { label: 'Sesi Terjadwal', value: filteredServices.filter(s => s.status === 'Terjadwal').length, color: 'text-amber-700' },
-                  { label: 'Home Visit', value: filteredHomeVisits.length },
-                  { label: 'Total Sesi', value: filteredServices.length, color: 'text-[#00685f]' }
-                ]}
-                actions={
-                  <button
-                    onClick={() => handleNavigateToForm('tambah-layanan')}
-                    className="flex items-center gap-2 px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold transition-all shadow-md cursor-pointer active:scale-97"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>Tambah Sesi Baru</span>
-                  </button>
-                }
-              />
-
+            <div className="space-y-4 animate-in fade-in duration-300">
               {/* Top Sub-tab Switcher: Sesi Layanan vs Home Visit vs Panggilan Orang Tua */}
               <div className="flex items-center gap-1.5 p-1.5 bg-gray-100 rounded-2xl border border-[#bcc9c6]/40 w-fit flex-wrap shadow-2xs">
                 <button
                   type="button"
                   onClick={() => handleSwitchLayananSubTab('sesi')}
-                  className={`relative px-4 py-2.5 rounded-xl text-xs font-extrabold transition-all duration-200 cursor-pointer flex items-center gap-2 select-none active:scale-98 ${
+                  className={`relative px-4 py-2 rounded-xl text-xs font-extrabold transition-all duration-200 cursor-pointer flex items-center gap-2 select-none active:scale-98 whitespace-nowrap ${
                     activeTab === 'sesi'
                       ? 'text-white'
                       : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-gray-200/50'
@@ -2493,9 +2456,9 @@ export default function App() {
                     />
                   )}
                   <HeartHandshake className="w-4 h-4 relative z-10" />
-                  <span className="relative z-10">Sesi Layanan BK & Konseling</span>
+                  <span className="relative z-10">Daftar Layanan BK</span>
                   <span
-                    className={`relative z-10 px-1.5 py-0.5 text-[10px] rounded-full font-black transition-colors ${
+                    className={`relative z-10 px-1.5 py-0.5 text-[10px] rounded-full font-black transition-colors tabular-nums ${
                       activeTab === 'sesi'
                         ? 'bg-white/20 text-white'
                         : 'bg-gray-200 text-[#3d4947]'
@@ -2507,7 +2470,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => handleSwitchLayananSubTab('homevisit')}
-                  className={`relative px-4 py-2.5 rounded-xl text-xs font-extrabold transition-all duration-200 cursor-pointer flex items-center gap-2 select-none active:scale-98 ${
+                  className={`relative px-4 py-2 rounded-xl text-xs font-extrabold transition-all duration-200 cursor-pointer flex items-center gap-2 select-none active:scale-98 whitespace-nowrap ${
                     activeTab === 'homevisit'
                       ? 'text-white'
                       : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-gray-200/50'
@@ -2521,9 +2484,9 @@ export default function App() {
                     />
                   )}
                   <Home className="w-4 h-4 relative z-10" />
-                  <span className="relative z-10">Kunjungan Rumah (Home Visit)</span>
+                  <span className="relative z-10">Home Visit</span>
                   <span
-                    className={`relative z-10 px-1.5 py-0.5 text-[10px] rounded-full font-black transition-colors ${
+                    className={`relative z-10 px-1.5 py-0.5 text-[10px] rounded-full font-black transition-colors tabular-nums ${
                       activeTab === 'homevisit'
                         ? 'bg-white/20 text-white'
                         : 'bg-gray-200 text-[#3d4947]'
@@ -2535,7 +2498,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => handleSwitchLayananSubTab('panggilan')}
-                  className={`relative px-4 py-2.5 rounded-xl text-xs font-extrabold transition-all duration-200 cursor-pointer flex items-center gap-2 select-none active:scale-98 ${
+                  className={`relative px-4 py-2 rounded-xl text-xs font-extrabold transition-all duration-200 cursor-pointer flex items-center gap-2 select-none active:scale-98 whitespace-nowrap ${
                     activeTab === 'panggilan'
                       ? 'text-white'
                       : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-gray-200/50'
@@ -2553,7 +2516,7 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Sub-tab Content with Smooth Directional Slide Transitions */}
+              {/* Sub-tab Content */}
               <div className="overflow-hidden">
                 <AnimatePresence mode="wait" custom={layananTabDirection} initial={false}>
                   {activeTab === 'homevisit' ? (
@@ -2592,349 +2555,25 @@ export default function App() {
                       initial="enter"
                       animate="center"
                       exit="exit"
-                      className="space-y-6"
                     >
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                      <div>
-                        <h2 className="text-2xl font-extrabold text-[#0b1c30]">Daftar Layanan BK</h2>
-                        <p className="text-sm text-[#3d4947]/70 font-semibold mt-0.5">
-                          Kelola, edit, dan pantau seluruh sesi bimbingan dan konseling siswa.
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2.5">
-                        <button
-                          onClick={() => exportServicesToIcs(
-                            searchedAndFilteredServices,
-                            `Jadwal-Layanan-BK-${new Date().toISOString().slice(0, 10)}.ics`,
-                            'Jadwal Layanan BK SMPN 2 Susukan'
-                          )}
-                          className="flex items-center gap-1.5 px-3.5 py-3 bg-[#00685f]/10 hover:bg-[#00685f] text-[#00685f] hover:text-white rounded-xl text-sm font-bold transition-all border border-[#00685f]/30 cursor-pointer shadow-xs active:scale-97"
-                          title="Ekspor daftar jadwal sesi layanan ini ke format file kalender .ics (Google Calendar / HP)"
-                        >
-                          <Download className="w-4 h-4" />
-                          <span>Ekspor .ics ({searchedAndFilteredServices.length})</span>
-                        </button>
-
-                        <button
-                          onClick={() => handleNavigateToForm('tambah-layanan')}
-                          className="flex items-center gap-2 px-5 py-3 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-sm font-bold transition-all shadow-md cursor-pointer active:scale-97"
-                        >
-                          <Plus className="w-4 h-4" />
-                          <span>Tambah Sesi Layanan</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Filters & Search Control Bar */}
-                    <div className="bg-white p-4 rounded-2xl border border-[#bcc9c6]/30 shadow-xs space-y-3">
-                      <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-                        {/* Search Bar */}
-                        <div className="relative w-full md:w-80">
-                          <Search className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                          <input
-                            type="text"
-                            value={serviceSearchTerm}
-                            onChange={(e) => setServiceSearchTerm(e.target.value)}
-                            placeholder="Cari nama siswa, topik, pilar, masalah..."
-                            className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f]"
-                          />
-                          {serviceSearchTerm && (
-                            <button
-                              onClick={() => setServiceSearchTerm('')}
-                              className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-400 hover:text-gray-600"
-                            >
-                              ✕
-                            </button>
-                          )}
-                        </div>
-
-                        {/* Status Filter Tabs */}
-                        <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl w-full md:w-auto overflow-x-auto">
-                          {(['semua', 'Terjadwal', 'Selesai', 'Dibatalkan'] as const).map((st) => {
-                            const isActive = serviceStatusFilter === st;
-                            const count =
-                              st === 'semua'
-                                ? filteredServices.length
-                                : filteredServices.filter((s) => s.status === st).length;
-                            return (
-                              <button
-                                key={st}
-                                onClick={() => setServiceStatusFilter(st)}
-                                className={`relative px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap select-none ${
-                                  isActive
-                                    ? 'text-[#00685f]'
-                                    : 'text-gray-600 hover:text-gray-900'
-                                }`}
-                              >
-                                {isActive && (
-                                  <motion.div
-                                    layoutId="layanan-status-filter-pill"
-                                    className="absolute inset-0 bg-white rounded-lg shadow-xs"
-                                    transition={{ type: 'spring', stiffness: 450, damping: 32 }}
-                                  />
-                                )}
-                                <span className="relative z-10">{st === 'semua' ? 'Semua Status' : st}</span>
-                                <span className={`relative z-10 ml-1.5 px-1.5 py-0.2 text-[10px] rounded-full ${isActive ? 'bg-[#00685f]/10 text-[#00685f]' : 'bg-gray-200 text-gray-600'}`}>
-                                  {count}
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* 4 Pillars Filter Segmented Bar */}
-                      <div className="pt-2 border-t border-gray-100 flex items-center gap-1.5 overflow-x-auto pb-1">
-                        <button
-                          onClick={() => setServicePillarFilter('semua')}
-                          className={`relative px-3 py-1.5 rounded-xl text-[11px] font-extrabold transition-colors cursor-pointer whitespace-nowrap flex items-center gap-1.5 select-none ${
-                            servicePillarFilter === 'semua'
-                              ? 'text-white'
-                              : 'bg-gray-50 text-[#3d4947] hover:bg-gray-100 border border-gray-200/60'
-                          }`}
-                        >
-                          {servicePillarFilter === 'semua' && (
-                            <motion.div
-                              layoutId="layanan-pillar-filter-pill"
-                              className="absolute inset-0 bg-[#00685f] rounded-xl shadow-xs"
-                              transition={{ type: 'spring', stiffness: 450, damping: 32 }}
-                            />
-                          )}
-                          <span className="relative z-10">Semua 4 Pilar BK</span>
-                          <span className={`relative z-10 px-1.5 py-0.2 text-[10px] rounded-full ${servicePillarFilter === 'semua' ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-700'}`}>
-                            {filteredServices.length}
-                          </span>
-                        </button>
-
-                        {BK_COMPONENTS_DATA.map((comp) => {
-                          const isActive = servicePillarFilter === comp.id;
-                          const pilarCount = filteredServices.filter(
-                            (s) => (s.bkComponent || getBKComponentForService(s.serviceType)) === comp.id
-                          ).length;
-
-                          return (
-                            <button
-                              key={comp.id}
-                              onClick={() => setServicePillarFilter(comp.id)}
-                              className={`relative px-3 py-1.5 rounded-xl text-[11px] font-extrabold transition-colors cursor-pointer whitespace-nowrap flex items-center gap-1.5 select-none ${
-                                isActive
-                                  ? 'text-white'
-                                  : 'bg-gray-50 text-[#3d4947] hover:bg-gray-100 border border-gray-200/60'
-                              }`}
-                            >
-                              {isActive && (
-                                <motion.div
-                                  layoutId="layanan-pillar-filter-pill"
-                                  className="absolute inset-0 bg-[#00685f] rounded-xl shadow-xs"
-                                  transition={{ type: 'spring', stiffness: 450, damping: 32 }}
-                                />
-                              )}
-                              <span className="relative z-10">Pilar {comp.pilarNumber}: {comp.name}</span>
-                              <span className={`relative z-10 px-1.5 py-0.2 text-[10px] rounded-full ${isActive ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-700'}`}>
-                                {pilarCount}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {searchedAndFilteredServices.length === 0 ? (
-                      <div className="bg-white rounded-2xl p-12 text-center border border-[#bcc9c6]/30">
-                        <HeartHandshake className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                        <p className="text-sm font-bold text-[#0b1c30]">Tidak ada rekam layanan BK ditemukan</p>
-                        <p className="text-xs text-gray-500 mt-1">Coba sesuaikan kata kunci pencarian, filter status, atau pilar BK.</p>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {searchedAndFilteredServices.map((srv) => {
-                          let badgeColor = 'bg-[#00685f]/10 text-[#00685f]';
-                          if (srv.status === 'Selesai') badgeColor = 'bg-[#6b38d4]/10 text-[#6b38d4]';
-                          else if (srv.status === 'Dibatalkan') badgeColor = 'bg-[#ba1a1a]/10 text-[#ba1a1a]';
-
-                          const pilarName = srv.bkComponent || getBKComponentForService(srv.serviceType);
-                          const pilarBadgeInfo = getPilarBadge(pilarName);
-                          const isServiceEvaluated = serviceEvaluations.some((ev) => ev.serviceId === srv.id);
-
-                          return (
-                            <div
-                              key={srv.id}
-                              className="bg-white rounded-2xl p-5 border border-[#bcc9c6]/30 shadow-sm hover:shadow-md transition-all flex flex-col justify-between group"
-                            >
-                              <div>
-                                <div className="flex justify-between items-start mb-2 gap-2">
-                                  <div className="flex flex-wrap items-center gap-1.5">
-                                    <span className="text-xs bg-[#eff4ff] text-[#00685f] font-extrabold px-2.5 py-1 rounded-lg">
-                                      {srv.serviceType}
-                                    </span>
-                                    {!isServiceEvaluated && (
-                                      <span
-                                        className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300"
-                                        title="Badge terkunci sampai Evaluasi Layanan diisi"
-                                      >
-                                        Belum Dievaluasi
-                                      </span>
-                                    )}
-                                    <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-md border ${pilarBadgeInfo.badgeClass}`}>
-                                      {pilarBadgeInfo.pilar}
-                                    </span>
-                                    {(srv.bidangBimbingan || srv.specificDetails?.bidangBimbingan) && (
-                                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200/70">
-                                        Bidang: {srv.bidangBimbingan || srv.specificDetails?.bidangBimbingan}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="flex items-center gap-1.5 shrink-0">
-                                    <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${badgeColor}`}>
-                                      {srv.status}
-                                    </span>
-                                    {/* Edit Modal Trigger Button */}
-                                    <button
-                                      onClick={() => setEditingService(srv)}
-                                      className="p-1.5 bg-gray-50 hover:bg-[#00685f]/10 text-gray-600 hover:text-[#00685f] rounded-lg transition-colors cursor-pointer border border-gray-200/80"
-                                      title="Edit Sesi Layanan"
-                                    >
-                                      <Edit2 className="w-3.5 h-3.5" />
-                                    </button>
-                                  </div>
-                                </div>
-
-                                {srv.focusIssue && (
-                                  <div className="mb-2">
-                                    <span className="inline-block text-[10px] font-bold text-purple-800 bg-purple-50 border border-purple-200/70 px-2 py-0.5 rounded-md">
-                                      Fokus: {srv.focusIssue}
-                                    </span>
-                                  </div>
-                                )}
-
-                                <div 
-                                  onClick={() => setDetailService(srv)}
-                                  className="cursor-pointer group-hover:text-[#00685f] transition-colors"
-                                >
-                                  <h4 className="font-bold text-[#0b1c30] text-sm line-clamp-1 group-hover:text-[#00685f]">
-                                    {srv.problem}
-                                  </h4>
-                                  <p className="text-xs text-[#3d4947]/80 line-clamp-2 mt-1 leading-relaxed">
-                                    {srv.description}
-                                  </p>
-                                </div>
-
-                                {srv.proofPhotoUrl && (
-                                  <div 
-                                    onClick={() => setDetailService(srv)}
-                                    className="mt-3 relative rounded-lg overflow-hidden border border-gray-100 bg-gray-50 h-20 flex items-center justify-center cursor-pointer"
-                                  >
-                                    <img
-                                      src={srv.proofPhotoUrl}
-                                      alt="Bukti Sesi"
-                                      className="h-full object-contain"
-                                      referrerPolicy="no-referrer"
-                                    />
-                                    <span className="absolute bottom-1 right-1 bg-black/60 text-white text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">
-                                      Bukti Foto
-                                    </span>
-                                  </div>
-                                )}
-
-                                <div className="mt-4 pt-3 border-t border-[#bcc9c6]/10 space-y-1.5">
-                                  <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
-                                    Peserta Siswa:
-                                  </p>
-                                  <div className="flex flex-wrap gap-1.5">
-                                    {srv.students.map((st) => (
-                                      <span
-                                        key={st.id}
-                                        className="text-[10px] font-semibold bg-gray-100 text-gray-700 px-2 py-0.5 rounded"
-                                      >
-                                        {st.name} ({st.class})
-                                      </span>
-                                    ))}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="mt-4 pt-3 border-t border-[#bcc9c6]/10 space-y-3">
-                                <div className="flex items-center gap-1.5 text-[11px] font-bold text-gray-600">
-                                  <Calendar className="w-3.5 h-3.5 text-[#00685f]" />
-                                  <span>{formatCardDateTime(srv.date, srv.startTime)}</span>
-                                </div>
-
-                                {/* Quick Action Controls */}
-                                <div className="flex items-center justify-between gap-1.5 pt-1">
-                                  <div className="flex flex-wrap items-center gap-1.5 flex-1">
-                                    <button
-                                      onClick={() => setDetailService(srv)}
-                                      className="py-1.5 px-2 bg-gray-100 hover:bg-gray-200 text-[#3d4947] rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 transition-all cursor-pointer border border-gray-200/80 active:scale-97"
-                                      title="Buka Dokumen Lengkap & Rekam Jejak"
-                                    >
-                                      <FileText className="w-3 h-3" />
-                                      <span>Detail</span>
-                                    </button>
-
-                                    <button
-                                      onClick={() => generateServicePDF(srv)}
-                                      className="py-1.5 px-2.5 bg-[#e6f4f1] hover:bg-[#d0ebe6] text-[#00685f] hover:text-[#005049] rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer border border-[#00685f]/30 shadow-2xs active:scale-97"
-                                      title="Cetak PDF Laporan Sesi Spesifik"
-                                    >
-                                      <Printer className="w-3 h-3 text-[#00685f]" />
-                                      <span>Cetak PDF</span>
-                                    </button>
-
-                                    <button
-                                      onClick={() => exportSingleServiceToIcs(srv)}
-                                      className="py-1.5 px-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 transition-all cursor-pointer border border-emerald-300 shadow-2xs active:scale-97"
-                                      title="Ekspor sesi ini ke format file kalender .ics (Google Calendar / HP)"
-                                    >
-                                      <Calendar className="w-3 h-3 text-emerald-600" />
-                                      <span>.ics</span>
-                                    </button>
-
-                                    {srv.status === 'Terjadwal' && (
-                                      <button
-                                        onClick={() =>
-                                          handleUpdateServiceStatus(
-                                            srv.id,
-                                            'Selesai',
-                                            srv.followUp || 'Sesi konseling telah diselesaikan.'
-                                          )
-                                        }
-                                        className="py-1.5 px-2 bg-[#00685f] hover:bg-[#005049] text-white rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 transition-all cursor-pointer shadow-xs active:scale-97"
-                                      >
-                                        <CheckCircle2 className="w-3 h-3" />
-                                        <span>Selesaikan</span>
-                                      </button>
-                                    )}
-
-                                    {!isServiceEvaluated && (
-                                      <button
-                                        onClick={() => setGlobalEvalServiceTarget(srv)}
-                                        className="py-1.5 px-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 transition-all cursor-pointer shadow-xs active:scale-97"
-                                        title="Nilai Layanan Ini Sekarang"
-                                      >
-                                        <Sparkles className="w-3 h-3" />
-                                        <span>Nilai</span>
-                                      </button>
-                                    )}
-                                  </div>
-
-                                  <button
-                                    onClick={() => handleDeleteService(srv.id)}
-                                    className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer shrink-0"
-                                    title="Hapus Rekam Layanan"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
+                      <RiwayatLayananView
+                        services={filteredServices}
+                        students={filteredStudents}
+                        serviceEvaluations={serviceEvaluations}
+                        activeCounselor={activeCounselor}
+                        onNavigateToTab={handleNavigateToTab}
+                        onNavigateToForm={handleNavigateToForm}
+                        onEditService={(srv) => setEditingService(srv)}
+                        onUpdateService={handleUpdateService}
+                        onUpdateServiceStatus={(id, st) => handleUpdateServiceStatus(id, st)}
+                        onSaveServiceEvaluation={handleSaveServiceEvaluation}
+                        onDeleteService={handleDeleteService}
+                        onEvaluateService={(srv) => setGlobalEvalServiceTarget(srv)}
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
             </div>
           );
     }
@@ -2980,6 +2619,7 @@ export default function App() {
             onNavigateToForm={handleNavigateToForm}
             onEditService={(srv) => setEditingService(srv)}
             onUpdateService={handleUpdateService}
+            onUpdateServiceStatus={(id, st) => handleUpdateServiceStatus(id, st)}
             onSaveServiceEvaluation={handleSaveServiceEvaluation}
             onDeleteService={handleDeleteService}
             onEvaluateService={(srv) => setGlobalEvalServiceTarget(srv)}
@@ -3123,6 +2763,9 @@ export default function App() {
               allCounselors,
             }}
             onBack={() => setCurrentView('lainnya')}
+            onClearAllStudents={handleClearAllStudents}
+            onAddStudent={handleAddStudent}
+            onNavigateToGoogleSync={() => setCurrentView('google-sync')}
             onDataRestored={() => {
               const sid = getActiveSchoolId();
               setStudents(getCloudCollectionData('bk_students', sid));
@@ -3220,6 +2863,12 @@ export default function App() {
             activeCounselor={activeCounselor}
             onNavigateToTab={handleNavigateToTab}
             onNavigateToForm={handleNavigateToForm}
+            onOpenViolationDetail={(v) => {
+              setViolationInitialTab('arsip');
+              setViolationInitialSearch(v.ticketId || v.studentName || '');
+              setViolationInitialOpenId(v.id);
+              setCurrentView('pelanggaran');
+            }}
             onUpdateViolationStatus={handleUpdateViolationStatus}
             onUpdateServiceStatus={handleUpdateServiceStatus}
             onEditService={(srv) => setEditingService(srv)}
@@ -3444,7 +3093,7 @@ export default function App() {
         return selectedAbsensiClass ? `Presensi Kelas ${selectedAbsensiClass}` : 'Absen Siswa Hari Ini';
       case 'pelanggaran':
       case 'catat-pelanggaran':
-        return 'Catat Kasus Siswa';
+        return 'Arsip Pembinaan & Riwayat Pelanggaran';
       case 'tambah-layanan':
       case 'input-konseling':
       case 'layanan-konseling':
@@ -3534,7 +3183,7 @@ export default function App() {
     !isFormOrModalOpen;
 
   return (
-    <div className="min-h-screen bg-[#f8fafa] text-[#0b1c30] app-root">
+    <div className={`min-h-screen text-[#0b1c30] app-root ${currentView === 'dashboard' ? 'bg-[#F6F7F9]' : 'bg-[#f8fafa]'}`}>
       {/* Main Full-Width Column (Sidebar removed for clean, focused layout) */}
       <div className="min-h-screen flex flex-col transition-all duration-300 app-main-column">
         {/* Top Header bar with direct student search */}

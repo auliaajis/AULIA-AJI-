@@ -5,28 +5,14 @@ import {
   CounselingService,
   ActivityLog,
   StudentAchievement,
-  ClassAttendanceRecord,
   Counselor,
   ProgramEvaluation,
+  BKJournalEntry,
 } from '../types';
 import { getCloudCollectionData, subscribeCloudCollection } from '../utils/firestoreSync';
-import { getSchoolConfig, hasConfiguredSchool } from '../utils/schoolConfig';
-import { getAllowedClassesList, filterAttendanceHistory } from '../utils/accessControl';
-import { isEvaluationDueFor14DayFollowUp } from '../utils/evaluationHelpers';
 import { isRealNonDummyService, isRealNonDummyViolation } from '../utils/purgeDummyData';
 import { getViolationRestitutionStatus } from './CatatPelanggaranForm';
-import {
-  AlertTriangle,
-  BellRing,
-  CheckCircle2,
-  ChevronRight,
-  ClipboardCheck,
-  Clock,
-  HeartHandshake,
-  LogOut,
-  ShieldAlert,
-  UserCheck,
-} from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 
 interface DashboardViewProps {
   students: Student[];
@@ -50,6 +36,7 @@ interface DashboardViewProps {
     }
   ) => void;
   onNavigateToForm: (form: string, selectStudentId?: string) => void;
+  onOpenViolationDetail?: (violation: ViolationRecord) => void;
   onUpdateViolationStatus?: (id: string, status: any, progress: string) => void;
   onUpdateServiceStatus?: (id: string, status: any, followUp?: string) => void;
   onEditService?: (service: CounselingService) => void;
@@ -58,529 +45,413 @@ interface DashboardViewProps {
   onLogout?: () => void;
 }
 
+// 7 Tips BK Harian SMP (index = Date.getDay(): 0 Minggu .. 6 Sabtu)
+const DAILY_BK_TIPS: string[] = [
+  'Luangkan waktu sejenak menandai kasus prioritas minggu depan agar Senin pagi lebih tenang dan terarah.',
+  'Siswa yang sering telat biasanya bukan malas, tapi kurang tidur. Coba tanya jam tidurnya dulu.',
+  'Sebelum menasihati siswa yang emosional, dengarkan ceritanya 3 menit tanpa menyela agar ia merasa aman.',
+  'Anak SMP lebih terbuka diajak bicara sambil duduk sejajar dan santai, bukan berhadapan di meja formal.',
+  'Jika dua siswa berkonflik, tanyakan dulu apa kebutuhan mereka yang belum terpenuhi sebelum mencari siapa yang salah.',
+  'Catat 1 hal positif kecil dari siswa yang sedang dalam pembinaan, lalu sampaikan ke wali kelas atau orang tuanya.',
+  'Siswa yang nilainya tiba-tiba turun atau menjadi pendiam sering menyimpan masalah di rumah—lakukan check-in singkat.',
+];
+
+const getInitials = (name: string): string => {
+  const parts = String(name || 'S')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length === 0) return 'S';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+};
+
+const getAvatarTintClass = (name: string): string => {
+  const tints = [
+    'bg-rose-100 text-rose-800',
+    'bg-amber-100 text-amber-800',
+    'bg-sky-100 text-sky-800',
+    'bg-teal-100 text-teal-800',
+    'bg-indigo-100 text-indigo-800',
+  ];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = (hash * 31 + name.charCodeAt(i)) % tints.length;
+  }
+  return tints[Math.abs(hash) % tints.length];
+};
+
+const toLocalYmd = (d: Date): string => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
 export default function DashboardView({
   students = [],
   violations = [],
   services = [],
-  serviceEvaluations = [],
   activeCounselor,
   onNavigateToTab,
-  onNavigateToForm,
-  onLogout,
+  onOpenViolationDetail,
 }: DashboardViewProps) {
-  // Reactive Attendance records state strictly from Firestore cloud store
-  const [attendanceHistory, setAttendanceHistory] = useState<ClassAttendanceRecord[]>(() => {
-    return getCloudCollectionData<ClassAttendanceRecord>('bk_attendance_history', activeCounselor?.schoolId);
-  });
-
-  const [schoolCfg, setSchoolCfg] = useState(() => getSchoolConfig(activeCounselor?.schoolId));
+  const [now, setNow] = useState<Date>(() => new Date());
 
   useEffect(() => {
-    setSchoolCfg(getSchoolConfig(activeCounselor?.schoolId));
-  }, [activeCounselor?.schoolId, activeCounselor?.schoolName]);
+    const timer = window.setInterval(() => {
+      setNow(new Date());
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Subscribe ke koleksi cloud daily_journals untuk statistik Agenda ("X hari ini")
+  const [dailyJournals, setDailyJournals] = useState<BKJournalEntry[]>(() =>
+    getCloudCollectionData<BKJournalEntry>('bk_daily_journals', activeCounselor?.schoolId)
+  );
 
   useEffect(() => {
-    const unsubAtt = subscribeCloudCollection<ClassAttendanceRecord>(
-      'bk_attendance_history',
-      (data) => setAttendanceHistory(data),
+    setDailyJournals(getCloudCollectionData<BKJournalEntry>('bk_daily_journals', activeCounselor?.schoolId));
+    const unsub = subscribeCloudCollection<BKJournalEntry>(
+      'bk_daily_journals',
+      (list) => setDailyJournals(list),
       activeCounselor?.schoolId
     );
-
-    const handleAttendanceUpdate = (e?: any) => {
-      if (Array.isArray(e?.detail)) {
-        setAttendanceHistory(e.detail);
-      } else if (e?.detail?.key === 'bk_attendance_history' && Array.isArray(e.detail.data)) {
-        setAttendanceHistory(e.detail.data);
-      } else {
-        setAttendanceHistory(getCloudCollectionData<ClassAttendanceRecord>('bk_attendance_history', activeCounselor?.schoolId));
-      }
-    };
-
-    const handleSchoolConfigUpdate = () => {
-      setSchoolCfg(getSchoolConfig(activeCounselor?.schoolId));
-    };
-
-    window.addEventListener('bk_attendance_history_changed', handleAttendanceUpdate);
-    window.addEventListener('bk_school_changed', handleAttendanceUpdate);
-    window.addEventListener('bk_school_config_updated', handleSchoolConfigUpdate);
-    window.addEventListener('bk_school_changed', handleSchoolConfigUpdate);
-
-    return () => {
-      unsubAtt();
-      window.removeEventListener('bk_attendance_history_changed', handleAttendanceUpdate);
-      window.removeEventListener('bk_school_changed', handleAttendanceUpdate);
-      window.removeEventListener('bk_school_config_updated', handleSchoolConfigUpdate);
-      window.removeEventListener('bk_school_changed', handleSchoolConfigUpdate);
-    };
+    return () => unsub();
   }, [activeCounselor?.schoolId]);
 
-  // Filter strictly real (non-dummy) records — never display dummy placeholders like "Siswa 1..4"
+  // Data asli non-dummy dari koleksi students, violations, services
+  const activeStudents = useMemo(
+    () => (students || []).filter((s) => s && s.isDeleted !== true),
+    [students]
+  );
+
+  const activeClassCount = useMemo(
+    () => new Set(activeStudents.map((s) => String(s.class || '').trim()).filter(Boolean)).size,
+    [activeStudents]
+  );
+
   const realViolations = useMemo(
-    () => (violations || []).filter(isRealNonDummyViolation),
+    () => (violations || []).filter((v) => v && v.isDeleted !== true && isRealNonDummyViolation(v)),
     [violations]
   );
 
   const realServices = useMemo(
-    () => (services || []).filter(isRealNonDummyService),
+    () => (services || []).filter((s) => s && s.isDeleted !== true && isRealNonDummyService(s)),
     [services]
   );
 
-  // 1. Overdue Restitution (> 7 days) count
-  const restitutionOverdueCount = useMemo(() => {
-    const now = new Date();
-    return realViolations.filter((v) => {
-      if (getViolationRestitutionStatus(v) !== 'Proses Restitusi') return false;
-      const dateStr = String(v.date || '').slice(0, 10);
-      if (!dateStr) return false;
-      const recordDate = new Date(dateStr);
-      if (isNaN(recordDate.getTime())) return false;
-      const diffDays = Math.floor((now.getTime() - recordDate.getTime()) / (1000 * 60 * 60 * 24));
-      return diffDays >= 7;
-    }).length;
+  const activeJournals = useMemo(
+    () => (dailyJournals || []).filter((j) => j && j.isDeleted !== true),
+    [dailyJournals]
+  );
+
+  // Kasus violations yang statusnya belum selesai, diurutkan dari yang terbaru
+  const unfinishedViolations = useMemo(() => {
+    return realViolations
+      .filter((v) => getViolationRestitutionStatus(v) !== 'Selesai / Dipantau')
+      .slice()
+      .sort((a, b) => {
+        const dateA = String(a.date || '').slice(0, 10);
+        const dateB = String(b.date || '').slice(0, 10);
+        if (dateB !== dateA) return dateB.localeCompare(dateA);
+
+        const timeA = String(a.time || '');
+        const timeB = String(b.time || '');
+        if (timeB !== timeA) return timeB.localeCompare(timeA);
+
+        const updA = Number((a as any)._updatedAt || 0);
+        const updB = Number((b as any)._updatedAt || 0);
+        return updB - updA;
+      });
   }, [realViolations]);
 
-  // 2. Unevaluated Services count
-  const unevaluatedCount = useMemo(() => {
-    const evaluatedIds = new Set(
-      (serviceEvaluations || []).map((ev) => String(ev.serviceId || '')).filter(Boolean)
-    );
-    return realServices.filter((s) => s && s.id && !evaluatedIds.has(s.id)).length;
-  }, [realServices, serviceEvaluations]);
+  const topThreeAttention = useMemo(
+    () => unfinishedViolations.slice(0, 3),
+    [unfinishedViolations]
+  );
 
-  // 3. Perlu Pantau Hari Ini (14-day follow-up checks + due follow-ups)
-  const perluPantauCount = useMemo(() => {
-    const realServiceIds = new Set(realServices.map((s) => s.id));
-    const due14DayCount = (serviceEvaluations || []).filter((ev) => {
-      if (!isEvaluationDueFor14DayFollowUp(ev)) return false;
-      if (ev.serviceId && services.some((s) => s.id === ev.serviceId) && !realServiceIds.has(ev.serviceId)) {
-        return false;
-      }
-      return true;
+  // Hitung layanan minggu ini (Senin s.d. Minggu minggu berjalan)
+  const servicesThisWeekCount = useMemo(() => {
+    const startOfWeek = new Date(now);
+    const dayOfWeek = startOfWeek.getDay(); // 0=Min, 1=Sen ... 6=Sab
+    const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    startOfWeek.setDate(startOfWeek.getDate() + diffToMonday);
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
+
+    const startStr = toLocalYmd(startOfWeek);
+    const endStr = toLocalYmd(endOfWeek);
+
+    return realServices.filter((srv) => {
+      const dStr = String(srv.date || '').slice(0, 10);
+      return dStr >= startStr && dStr <= endStr;
     }).length;
+  }, [realServices, now]);
 
-    const now = new Date();
-    const tzOffset = now.getTimezoneOffset() * 60000;
-    const todayLocalDate = new Date(now.getTime() - tzOffset);
-    const weekAheadDate = new Date(todayLocalDate);
-    weekAheadDate.setDate(weekAheadDate.getDate() + 7);
-    const next7Str = weekAheadDate.toISOString().slice(0, 10);
+  // Hitung agenda hari ini (jurnal harian hari ini + sesi terjadwal hari ini jika ada)
+  const todayStr = useMemo(() => toLocalYmd(now), [now]);
 
-    let completedSet = new Set<string>();
-    let snoozedMap: Record<string, string> = {};
+  const agendaTodayCount = useMemo(() => {
+    return activeJournals.filter((j) => String(j.date || '').slice(0, 10) === todayStr).length;
+  }, [activeJournals, todayStr]);
+
+  // 1. Sapaan Dinamis sesuai jam
+  const greetingText = useMemo(() => {
+    const hour = now.getHours();
+    if (hour >= 5 && hour < 11) return 'Selamat Pagi, semangat hari ini! 🌤️';
+    if (hour >= 11 && hour < 15) return 'Selamat Siang, sudah istirahat belum? ☀️';
+    if (hour >= 15 && hour < 18) return 'Selamat Sore, tinggal sedikit lagi! 🌇';
+    return 'Selamat Malam, rekap hari ini yuk! 🌙';
+  }, [now]);
+
+  // Hari, Tanggal lengkap bahasa Indonesia (misal: Senin, 23 November 2026)
+  const formattedDate = useMemo(() => {
     try {
-      const cRaw = localStorage.getItem('bk_completed_followups');
-      if (cRaw) completedSet = new Set(JSON.parse(cRaw));
-      const sRaw = localStorage.getItem('bk_snoozed_followups');
-      if (sRaw) snoozedMap = JSON.parse(sRaw);
-    } catch {}
+      return new Intl.DateTimeFormat('id-ID', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+      }).format(now);
+    } catch {
+      return todayStr;
+    }
+  }, [now, todayStr]);
 
-    let weeklyCount = 0;
-    realServices.forEach((srv) => {
-      if (!srv || !srv.id || completedSet.has(srv.id)) return;
-      const spec = (srv.specificDetails || {}) as Record<string, any>;
-      const plan = spec.tindakLanjutPlan as
-        | { tindakLanjutApa?: string; tindakLanjutTanggal?: string; statusTindakLanjut?: string }
-        | undefined;
-      if (
-        plan?.statusTindakLanjut === 'Selesai' ||
-        plan?.statusTindakLanjut === 'Sudah Ditindaklanjuti'
-      ) {
-        return;
-      }
+  // 4. Tips BK Harian (rotasi otomatis Senin-Minggu)
+  const todayTip = useMemo(() => {
+    return DAILY_BK_TIPS[now.getDay()] || DAILY_BK_TIPS[1];
+  }, [now]);
 
-      let dueDate = '';
-      if (snoozedMap[srv.id] && /^\d{4}-\d{2}-\d{2}$/.test(snoozedMap[srv.id])) {
-        dueDate = snoozedMap[srv.id];
-      } else if (plan?.tindakLanjutTanggal && /^\d{4}-\d{2}-\d{2}$/.test(plan.tindakLanjutTanggal)) {
-        dueDate = plan.tindakLanjutTanggal;
-      } else if (spec.jadwalEvaluasi && /^\d{4}-\d{2}-\d{2}$/.test(spec.jadwalEvaluasi)) {
-        dueDate = spec.jadwalEvaluasi;
-      } else if (spec.jadwalPantau && /^\d{4}-\d{2}-\d{2}$/.test(spec.jadwalPantau)) {
-        dueDate = spec.jadwalPantau;
-      } else if (spec.homeVisitJadwalPantau && /^\d{4}-\d{2}-\d{2}$/.test(spec.homeVisitJadwalPantau)) {
-        dueDate = spec.homeVisitJadwalPantau;
-      }
-
-      if (!dueDate || dueDate > next7Str) return;
-
-      const followUpText =
-        String(plan?.tindakLanjutApa || '').trim() ||
-        String(srv.followUp || '').trim() ||
-        (Array.isArray(spec.tindakLanjut)
-          ? spec.tindakLanjut.join(', ')
-          : String(spec.tindakLanjut || '').trim());
-
-      if (!followUpText || followUpText === '-' || followUpText.toLowerCase() === 'selesai') {
-        if (!plan?.tindakLanjutTanggal) return;
-      }
-      weeklyCount += 1;
-    });
-
-    return due14DayCount + weeklyCount;
-  }, [realServices, services, serviceEvaluations]);
-
-  // 4. Unrecorded Classes Today count
-  const unrecordedClassesCount = useMemo(() => {
-    const today = new Date();
-    const tzOffset = today.getTimezoneOffset() * 60000;
-    const todayLocal = new Date(today.getTime() - tzOffset).toISOString().slice(0, 10);
-    const todayUtc = today.toISOString().split('T')[0];
-
-    const normalizeCls = (c: string) => String(c || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const normalizeDt = (d: string) => String(d || '').trim().slice(0, 10);
-
-    const relevantAttendance = activeCounselor
-      ? filterAttendanceHistory(attendanceHistory || [], activeCounselor)
-      : attendanceHistory || [];
-    const recordedClassesSet = new Set<string>();
-
-    relevantAttendance.forEach((r: any) => {
-      if (!r) return;
-      const rDate = normalizeDt(r.date);
-      const isToday = rDate === todayLocal || rDate === todayUtc;
-      const hasRecords = Array.isArray(r.records) && r.records.length > 0;
-      if (isToday && hasRecords) {
-        const clsName = r.class || r.className || r.kelas || '';
-        if (clsName) {
-          recordedClassesSet.add(normalizeCls(clsName));
-        }
-      }
-    });
-
-    const availableClasses = Array.from(new Set(students.map((s) => s.class))).filter(Boolean).sort();
-    const allowedFromCounselor = getAllowedClassesList(activeCounselor);
-    const allClasses =
-      availableClasses.length > 0
-        ? availableClasses
-        : allowedFromCounselor.length > 0
-        ? allowedFromCounselor
-        : ['7A', '7B', '7C', '7D', '8A', '8B', '8C', '8D', '9A', '9B', '9C', '9D'];
-
-    return allClasses.filter((c) => !recordedClassesSet.has(normalizeCls(c))).length;
-  }, [students, attendanceHistory, activeCounselor]);
-
-  const totalAlerts = restitutionOverdueCount + unevaluatedCount + perluPantauCount;
-  const schoolConfigured = hasConfiguredSchool(activeCounselor);
+  const handleOpenCaseDetail = (v: ViolationRecord) => {
+    if (onOpenViolationDetail) {
+      onOpenViolationDetail(v);
+      return;
+    }
+    onNavigateToTab('arsip-pelanggaran', v.ticketId || v.studentName);
+  };
 
   return (
-    <div className="space-y-4 animate-in fade-in duration-200 pb-[96px] max-w-5xl mx-auto">
-      {/* 1. HEADER KONSELOR AKTIF */}
-      {activeCounselor && (
-        <section className="bg-white border border-[#bcc9c6]/40 rounded-2xl p-3.5 sm:px-5 sm:py-3.5 shadow-2xs flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-full bg-[#e6f4f1] border border-[#00685f]/25 text-[#00685f] flex items-center justify-center font-extrabold text-xs shrink-0 overflow-hidden">
-              {activeCounselor.avatar ? (
-                <img
-                  referrerPolicy="no-referrer"
-                  src={activeCounselor.avatar}
-                  alt={activeCounselor.name}
-                  className="w-full h-full object-cover"
-                  onError={(e) => {
-                    (e.currentTarget as HTMLElement).style.display = 'none';
-                  }}
-                />
-              ) : (
-                <span>
-                  {activeCounselor.name
-                    ? activeCounselor.name
-                        .split(' ')
-                        .slice(0, 2)
-                        .map((n) => n[0])
-                        .join('')
-                    : 'BK'}
-                </span>
-              )}
-            </div>
-            <div className="min-w-0">
-              <p className="text-sm font-bold text-[#0b1c30] truncate">{activeCounselor.name}</p>
-              <p className="text-[11px] font-medium text-[#3d4947] truncate">
-                {activeCounselor.role} &bull; {activeCounselor.schoolName || schoolCfg.schoolName}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => onNavigateToTab('pengaturan')}
-              className="px-3 py-2 border border-[#bcc9c6]/60 hover:bg-gray-50 text-[#0b1c30] rounded-xl text-xs font-bold transition-all cursor-pointer"
-            >
-              Profil &amp; Pengaturan
-            </button>
-            {onLogout && (
-              <button
-                type="button"
-                onClick={onLogout}
-                className="inline-flex items-center gap-1.5 px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition-all cursor-pointer active:scale-97"
-                title="Keluar dari akun saat ini untuk berganti akun"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Keluar / Ganti Akun</span>
-              </button>
+    <div className="max-w-5xl mx-auto space-y-4 pb-6">
+      {/* 1. HEADER SAPAAN DINAMIS + TANGGAL + STATUS */}
+      <section className="rounded-2xl bg-gradient-to-br from-[#dff4ee] via-[#e5f5f7] to-[#e9f0fd] border border-[#00685f]/15 shadow-[0_2px_10px_rgba(11,28,48,0.04)] p-4 sm:p-5">
+        <div className="space-y-1.5">
+          <h1 className="text-lg sm:text-xl font-extrabold text-[#0b1c30] leading-snug tracking-tight">
+            {greetingText}
+          </h1>
+          <p className="text-[15px] font-semibold text-[#005049]">
+            {formattedDate}
+          </p>
+          <p className="text-[15px] text-[#3d4947] leading-relaxed">
+            {unfinishedViolations.length > 0 ? (
+              <>
+                Ada{' '}
+                <span className="font-bold text-[#0b1c30] tabular-nums">
+                  {unfinishedViolations.length} kasus
+                </span>{' '}
+                yang perlu ditindaklanjuti
+              </>
+            ) : (
+              'Semua kasus sudah tertangani hari ini'
             )}
-          </div>
-        </section>
-      )}
+          </p>
+        </div>
+      </section>
 
-      {!schoolConfigured && (
-        <section className="bg-amber-50 border border-amber-300 rounded-2xl px-4 py-3 shadow-2xs flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
-              <AlertTriangle className="w-4 h-4" />
-            </div>
-            <p className="text-xs sm:text-sm font-bold text-amber-950">
-              Sekolah belum diatur. Atur di Profil &gt; Sekolah, agar data tidak hilang lagi.
+      {/* 2. 4 KARTU STATISTIK BERWARNA & ADA KONTEKS */}
+      <section className="grid grid-cols-2 lg:grid-cols-4 gap-3 tabular-nums">
+        {/* Siswa */}
+        <button
+          type="button"
+          onClick={() => onNavigateToTab('data-siswa')}
+          className="rounded-2xl bg-[#eef5ff] hover:bg-[#e2eeff] border border-blue-200/80 shadow-[0_2px_8px_rgba(11,28,48,0.04)] p-3.5 sm:p-4 text-left transition-all duration-150 active:scale-[0.98] cursor-pointer flex flex-col justify-between min-h-[104px]"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[15px] font-bold text-blue-950">Siswa</span>
+            <span
+              aria-hidden="true"
+              className="w-8 h-8 rounded-xl bg-blue-100/90 flex items-center justify-center text-base shrink-0"
+            >
+              👥
+            </span>
+          </div>
+          <div className="mt-2">
+            <p className="text-2xl sm:text-[26px] font-extrabold text-[#0b1c30] leading-none">
+              {activeStudents.length}
+            </p>
+            <p className="text-[13px] font-medium text-blue-900/80 mt-1.5 truncate">
+              {activeClassCount > 0 ? `${activeClassCount} rombel aktif` : 'Data siswa aktif'}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              try {
-                sessionStorage.setItem('bk_settings_subtab', 'identitas');
-              } catch {}
-              onNavigateToTab('pengaturan');
-            }}
-            className="px-3.5 py-2 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold shadow-xs transition-all cursor-pointer shrink-0"
-          >
-            Atur Sekolah
-          </button>
-        </section>
-      )}
+        </button>
 
-      {/* 2. RINGKASAN HARI INI — 4 KOTAK KECIL SEJAJAR */}
-      <section className="space-y-2">
-        <div className="flex items-center justify-between px-0.5">
-          <h2 className="text-xs font-extrabold uppercase tracking-wider text-[#3d4947]">
-            Ringkasan Hari Ini
-          </h2>
-        </div>
-
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 tabular-nums">
-          <button
-            type="button"
-            onClick={() => onNavigateToTab('peringatan', 'followup')}
-            className={`p-3 rounded-2xl border text-left transition-all cursor-pointer active:scale-98 shadow-2xs flex items-center justify-between gap-2 ${
-              perluPantauCount > 0
-                ? 'bg-teal-50/70 border-teal-200 hover:border-[#00685f]/50'
-                : 'bg-white border-[#bcc9c6]/40 hover:border-[#00685f]/40'
-            }`}
-          >
-            <div className="min-w-0">
-              <p className="text-[11px] font-bold text-[#3d4947] truncate">Hari Ini: Perlu Pantau</p>
-              <p className="text-lg font-extrabold text-[#0b1c30] mt-0.5 leading-tight">
-                {perluPantauCount} <span className="text-xs font-bold text-[#3d4947]">Agenda</span>
-              </p>
-            </div>
-            <div className="w-8 h-8 rounded-xl bg-[#e6f4f1] text-[#00685f] flex items-center justify-center shrink-0">
-              <Clock className="w-4 h-4" />
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onNavigateToTab('peringatan', 'restitusi')}
-            className={`p-3 rounded-2xl border text-left transition-all cursor-pointer active:scale-98 shadow-2xs flex items-center justify-between gap-2 ${
-              restitutionOverdueCount > 0
-                ? 'bg-rose-50/70 border-rose-200 hover:border-rose-400'
-                : 'bg-white border-[#bcc9c6]/40 hover:border-[#00685f]/40'
-            }`}
-          >
-            <div className="min-w-0">
-              <p className="text-[11px] font-bold text-[#3d4947] truncate">Restitusi</p>
-              <p
-                className={`text-lg font-extrabold mt-0.5 leading-tight ${
-                  restitutionOverdueCount > 0 ? 'text-rose-700' : 'text-[#0b1c30]'
-                }`}
-              >
-                {restitutionOverdueCount} <span className="text-xs font-bold">Kasus</span>
-              </p>
-            </div>
-            <div
-              className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                restitutionOverdueCount > 0
-                  ? 'bg-rose-100 text-rose-700'
-                  : 'bg-gray-100 text-gray-500'
-              }`}
-            >
-              <ShieldAlert className="w-4 h-4" />
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onNavigateToTab('peringatan', 'belum-dievaluasi')}
-            className={`p-3 rounded-2xl border text-left transition-all cursor-pointer active:scale-98 shadow-2xs flex items-center justify-between gap-2 ${
-              unevaluatedCount > 0
-                ? 'bg-amber-50/70 border-amber-200 hover:border-amber-400'
-                : 'bg-white border-[#bcc9c6]/40 hover:border-[#00685f]/40'
-            }`}
-          >
-            <div className="min-w-0">
-              <p className="text-[11px] font-bold text-[#3d4947] truncate">Belum Dievaluasi</p>
-              <p
-                className={`text-lg font-extrabold mt-0.5 leading-tight ${
-                  unevaluatedCount > 0 ? 'text-amber-800' : 'text-[#0b1c30]'
-                }`}
-              >
-                {unevaluatedCount} <span className="text-xs font-bold">Layanan</span>
-              </p>
-            </div>
-            <div
-              className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                unevaluatedCount > 0
-                  ? 'bg-amber-100 text-amber-800'
-                  : 'bg-gray-100 text-gray-500'
-              }`}
-            >
-              <ClipboardCheck className="w-4 h-4" />
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onNavigateToTab('absensi')}
-            className={`p-3 rounded-2xl border text-left transition-all cursor-pointer active:scale-98 shadow-2xs flex items-center justify-between gap-2 ${
-              unrecordedClassesCount > 0
-                ? 'bg-amber-50/40 border-amber-200/80 hover:border-amber-400'
-                : 'bg-emerald-50/50 border-emerald-200 hover:border-emerald-400'
-            }`}
-          >
-            <div className="min-w-0">
-              <p className="text-[11px] font-bold text-[#3d4947] truncate">Belum Absen</p>
-              <p
-                className={`text-lg font-extrabold mt-0.5 leading-tight ${
-                  unrecordedClassesCount > 0 ? 'text-[#0b1c30]' : 'text-emerald-700'
-                }`}
-              >
-                {unrecordedClassesCount} <span className="text-xs font-bold">Kelas</span>
-              </p>
-            </div>
-            <div
-              className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                unrecordedClassesCount > 0
-                  ? 'bg-amber-100 text-amber-700'
-                  : 'bg-emerald-100 text-emerald-700'
-              }`}
-            >
-              <UserCheck className="w-4 h-4" />
-            </div>
-          </button>
-        </div>
-      </section>
-
-      {/* 3. AKSI CEPAT — 1 BARIS SAJA */}
-      <section className="space-y-2">
-        <div className="px-0.5">
-          <h2 className="text-xs font-extrabold uppercase tracking-wider text-[#3d4947]">
-            Aksi Cepat
-          </h2>
-        </div>
-
-        <div className="grid grid-cols-3 gap-2 sm:gap-3">
-          <button
-            type="button"
-            onClick={() => onNavigateToTab('absensi')}
-            className="flex flex-col sm:flex-row items-center justify-center sm:justify-start gap-2 sm:gap-3 p-3 sm:p-3.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl shadow-xs transition-all cursor-pointer active:scale-98 text-center sm:text-left"
-          >
-            <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center shrink-0">
-              <CheckCircle2 className="w-4 h-4 text-white" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-xs sm:text-sm font-extrabold leading-tight">Absen Hari Ini</p>
-              <p className="text-[10px] text-teal-100 hidden sm:block truncate">Presensi harian kelas</p>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onNavigateToForm('pelanggaran')}
-            className="flex flex-col sm:flex-row items-center justify-center sm:justify-start gap-2 sm:gap-3 p-3 sm:p-3.5 bg-[#0b1c30] hover:bg-slate-800 text-white rounded-xl shadow-xs transition-all cursor-pointer active:scale-98 text-center sm:text-left"
-          >
-            <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center shrink-0">
-              <AlertTriangle className="w-4 h-4 text-amber-300" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-xs sm:text-sm font-extrabold leading-tight">Catat Kasus Baru</p>
-              <p className="text-[10px] text-slate-300 hidden sm:block truncate">Pelanggaran &amp; poin</p>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onNavigateToForm('tambah-layanan')}
-            className="flex flex-col sm:flex-row items-center justify-center sm:justify-start gap-2 sm:gap-3 p-3 sm:p-3.5 bg-white hover:bg-[#e6f4f1]/60 text-[#00685f] border border-[#00685f]/35 rounded-xl shadow-2xs transition-all cursor-pointer active:scale-98 text-center sm:text-left"
-          >
-            <div className="w-8 h-8 rounded-lg bg-[#e6f4f1] text-[#00685f] flex items-center justify-center shrink-0">
-              <HeartHandshake className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-xs sm:text-sm font-extrabold leading-tight">Catat Layanan BK</p>
-              <p className="text-[10px] text-[#3d4947] hidden sm:block truncate">Konseling &amp; layanan</p>
-            </div>
-          </button>
-        </div>
-      </section>
-
-      {/* 4. 1 KARTU PERINGATAN RINGKAS */}
-      <section>
-        <div
-          className={`rounded-2xl border p-4 shadow-2xs transition-all ${
-            totalAlerts > 0
-              ? 'bg-white border-amber-300/80'
-              : 'bg-emerald-50/50 border-emerald-200'
-          }`}
+        {/* Pelanggaran */}
+        <button
+          type="button"
+          onClick={() => onNavigateToTab('arsip-pelanggaran')}
+          className="rounded-2xl bg-[#fff1f2] hover:bg-[#ffe4e6] border border-rose-200/80 shadow-[0_2px_8px_rgba(11,28,48,0.04)] p-3.5 sm:p-4 text-left transition-all duration-150 active:scale-[0.98] cursor-pointer flex flex-col justify-between min-h-[104px]"
         >
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 min-w-0">
-              <div
-                className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                  totalAlerts > 0
-                    ? 'bg-amber-100 text-amber-800'
-                    : 'bg-emerald-100 text-emerald-700'
-                }`}
-              >
-                {totalAlerts > 0 ? (
-                  <BellRing className="w-4 h-4" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4" />
-                )}
-              </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[15px] font-bold text-rose-950">Pelanggaran</span>
+            <span
+              aria-hidden="true"
+              className="w-8 h-8 rounded-xl bg-rose-100/90 flex items-center justify-center text-base shrink-0"
+            >
+              ⚠️
+            </span>
+          </div>
+          <div className="mt-2">
+            <p className="text-2xl sm:text-[26px] font-extrabold text-[#0b1c30] leading-none">
+              {realViolations.length}
+            </p>
+            <p className="text-[13px] font-medium text-rose-800 mt-1.5 truncate">
+              {unfinishedViolations.length} belum selesai
+            </p>
+          </div>
+        </button>
 
-              <div className="min-w-0">
-                <h3 className="text-sm font-extrabold text-[#0b1c30] truncate tabular-nums">
-                  Perlu Perhatian Hari Ini ({totalAlerts})
-                </h3>
-                {totalAlerts === 0 ? (
-                  <p className="text-xs text-emerald-800 font-medium mt-0.5">
-                    Tidak ada peringatan hari ini. Semua aman.
-                  </p>
-                ) : (
-                  <p className="text-xs text-[#3d4947] font-medium mt-0.5 tabular-nums truncate">
-                    {restitutionOverdueCount} Restitusi &middot; {unevaluatedCount} Belum Dievaluasi &middot; {perluPantauCount} Follow-up
-                  </p>
-                )}
-              </div>
-            </div>
+        {/* Layanan */}
+        <button
+          type="button"
+          onClick={() => onNavigateToTab('layanan-bk')}
+          className="rounded-2xl bg-[#ecfdf5] hover:bg-[#d1fae5]/75 border border-emerald-200/80 shadow-[0_2px_8px_rgba(11,28,48,0.04)] p-3.5 sm:p-4 text-left transition-all duration-150 active:scale-[0.98] cursor-pointer flex flex-col justify-between min-h-[104px]"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[15px] font-bold text-emerald-950">Layanan</span>
+            <span
+              aria-hidden="true"
+              className="w-8 h-8 rounded-xl bg-emerald-100/90 flex items-center justify-center text-base shrink-0"
+            >
+              💬
+            </span>
+          </div>
+          <div className="mt-2">
+            <p className="text-2xl sm:text-[26px] font-extrabold text-[#0b1c30] leading-none">
+              {realServices.length}
+            </p>
+            <p className="text-[13px] font-medium text-emerald-900/85 mt-1.5 truncate">
+              {servicesThisWeekCount} minggu ini
+            </p>
+          </div>
+        </button>
 
+        {/* Agenda */}
+        <button
+          type="button"
+          onClick={() => onNavigateToTab('jurnal-harian')}
+          className="rounded-2xl bg-[#f5f3ff] hover:bg-[#ede9fe] border border-purple-200/80 shadow-[0_2px_8px_rgba(11,28,48,0.04)] p-3.5 sm:p-4 text-left transition-all duration-150 active:scale-[0.98] cursor-pointer flex flex-col justify-between min-h-[104px]"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[15px] font-bold text-purple-950">Agenda</span>
+            <span
+              aria-hidden="true"
+              className="w-8 h-8 rounded-xl bg-purple-100/90 flex items-center justify-center text-base shrink-0"
+            >
+              📅
+            </span>
+          </div>
+          <div className="mt-2">
+            <p className="text-2xl sm:text-[26px] font-extrabold text-[#0b1c30] leading-none">
+              {activeJournals.length}
+            </p>
+            <p className="text-[13px] font-medium text-purple-900/85 mt-1.5 truncate">
+              {agendaTodayCount} hari ini
+            </p>
+          </div>
+        </button>
+      </section>
+
+      {/* 3. 1 KARTU TIPS BK HARIAN */}
+      <section className="rounded-2xl bg-[#fefce8] border border-amber-200/80 shadow-[0_2px_8px_rgba(11,28,48,0.03)] px-4 py-3.5 flex items-start gap-3">
+        <span aria-hidden="true" className="text-lg leading-none mt-0.5 shrink-0">
+          💡
+        </span>
+        <p className="text-[15px] text-[#3d4947] leading-snug">
+          <strong className="font-bold text-[#0b1c30]">Tips BK Hari Ini:</strong>{' '}
+          {todayTip}
+        </p>
+      </section>
+
+      {/* 4. 1 KARTU PERLU PERHATIAN HARI INI (ALA NOTIFIKASI CHAT, MAKS 3 ITEM) */}
+      <section>
+        {topThreeAttention.length === 0 ? (
+          <div className="rounded-2xl bg-emerald-50 border border-emerald-200/90 shadow-[0_2px_10px_rgba(11,28,48,0.04)] p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-[15px] sm:text-base font-semibold text-emerald-950 leading-snug flex-1 min-w-[210px]">
+              🎉 Aman! Tidak ada kasus mendesak hari ini. Semua sudah tertangani.
+            </p>
             <button
               type="button"
-              onClick={() => onNavigateToTab('peringatan')}
-              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-[#f8faf9] hover:bg-[#e6f4f1] text-[#00685f] border border-[#bcc9c6]/60 text-xs font-extrabold transition-colors cursor-pointer shrink-0"
+              onClick={() => onNavigateToTab('arsip-pelanggaran')}
+              className="inline-flex items-center gap-1 px-3.5 py-2 min-h-[40px] rounded-xl bg-white hover:bg-emerald-100/70 text-emerald-800 border border-emerald-300/80 text-sm font-bold whitespace-nowrap shrink-0 transition-colors cursor-pointer"
             >
-              <span>Lihat Semua</span>
-              <ChevronRight className="w-3.5 h-3.5" />
+              <span>Lihat Semua Arsip</span>
+              <ChevronRight className="w-4 h-4" />
             </button>
           </div>
-        </div>
-      </section>
+        ) : (
+          <div className="rounded-2xl bg-white border border-[#bcc9c6]/35 shadow-[0_2px_12px_rgba(11,28,48,0.05)] overflow-hidden">
+            <div className="px-4 py-3.5 border-b border-slate-100 flex items-center justify-between gap-2">
+              <h2 className="text-base font-extrabold text-[#0b1c30]">
+                Perlu Perhatian Hari Ini
+              </h2>
+              <button
+                type="button"
+                onClick={() => onNavigateToTab('arsip-pelanggaran')}
+                className="inline-flex items-center gap-0.5 text-sm font-bold text-[#00685f] hover:text-[#005049] whitespace-nowrap shrink-0 cursor-pointer py-1 px-1.5 rounded-lg hover:bg-[#e6f4f1]/60 transition-colors"
+              >
+                <span>Lihat Arsip</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
 
-      {/* Footer Ringkas */}
-      <footer className="pt-3 border-t border-[#bcc9c6]/20 text-center text-[11px] text-[#3d4947] opacity-75 font-medium">
-        <span>
-          &copy; {new Date().getFullYear()} Administrasi BK &bull;{' '}
-          {activeCounselor?.schoolName || schoolCfg.schoolName}
-        </span>
-      </footer>
+            <div className="divide-y divide-slate-100">
+              {topThreeAttention.map((v) => {
+                const studentName = v.studentName || 'Siswa';
+                const studentClass = v.studentClass || '-';
+                const summaryText =
+                  v.notes && v.notes.trim() && v.notes.trim() !== '-'
+                    ? `${v.category} · ${v.notes.trim()}`
+                    : v.category || 'Perlu tindak lanjut';
+
+                return (
+                  <div
+                    key={v.id}
+                    className="px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-slate-50/70 transition-colors"
+                  >
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <div
+                        className={`w-10 h-10 rounded-full flex items-center justify-center font-extrabold text-sm shrink-0 ${getAvatarTintClass(
+                          studentName
+                        )}`}
+                      >
+                        {getInitials(studentName)}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[15px] sm:text-base font-bold text-[#0b1c30] truncate leading-snug">
+                          {studentName} - {studentClass}
+                        </p>
+                        <p className="text-[14px] sm:text-[15px] text-[#3d4947] truncate mt-0.5 leading-snug">
+                          {summaryText}
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleOpenCaseDetail(v)}
+                      className="inline-flex items-center gap-1 px-3 py-2 min-h-[40px] rounded-xl bg-[#e6f4f1] hover:bg-[#00685f] text-[#00685f] hover:text-white text-sm font-bold whitespace-nowrap shrink-0 transition-colors cursor-pointer active:scale-[0.98]"
+                    >
+                      <span>Tangani</span>
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </section>
     </div>
   );
 }

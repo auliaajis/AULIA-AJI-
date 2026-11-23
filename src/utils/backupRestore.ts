@@ -1533,3 +1533,214 @@ export async function migrateLegacyLocalDataToFirestore(
   }
 }
 
+function resolveViolationOriginLabel(v: any): { originText: string; reportedViaText: string; isLegacy: boolean } {
+  const reportedViaRaw = String(v.reportedVia || '').trim();
+  const sourceRaw = String(v.source || '').trim().toLowerCase();
+  const reportedByRaw = String(v.reportedBy || '').trim();
+  const isPiket =
+    reportedViaRaw.toLowerCase().includes('piket') ||
+    sourceRaw === 'link_piket' ||
+    sourceRaw === 'piket' ||
+    reportedByRaw.toLowerCase().includes('piket');
+
+  if (isPiket) {
+    return {
+      originText: reportedByRaw || 'Guru Piket',
+      reportedViaText: reportedViaRaw || 'Link Piket',
+      isLegacy: false,
+    };
+  }
+  return {
+    originText: reportedByRaw ? `${reportedByRaw} (BK - Data Lama)` : 'BK - Data Lama',
+    reportedViaText: reportedViaRaw || 'Input BK Lama',
+    isLegacy: true,
+  };
+}
+
+export function exportArchiveViolationsAndServicesExcel(
+  activeCounselor?: Counselor | null,
+  liveState?: LiveAppDataInput
+): { fileName: string; violationsCount: number; servicesCount: number } {
+  const schoolId = sanitizeSchoolId(activeCounselor?.schoolId || getActiveSchoolId());
+  const deletedSet = new Set(getDeletedIds());
+  const violationsList = mergeArraySources(
+    'bk_violations',
+    schoolId,
+    deletedSet,
+    getCloudCollectionData<any>('bk_violations', schoolId),
+    liveState?.violations || []
+  );
+  const servicesList = mergeArraySources(
+    'bk_services',
+    schoolId,
+    deletedSet,
+    getCloudCollectionData<any>('bk_services', schoolId),
+    liveState?.services || []
+  );
+
+  const wb = XLSX.utils.book_new();
+  const violRows = violationsList.length > 0
+    ? violationsList.map((v: any, idx: number) => {
+        const origin = resolveViolationOriginLabel(v);
+        return {
+          No: idx + 1,
+          ID: v.id || '',
+          Tiket: v.ticketId || '',
+          Tanggal: v.date || '',
+          Waktu: v.time || '',
+          NamaSiswa: v.studentName || '',
+          Kelas: v.studentClass || '',
+          NIS: v.nis || '',
+          Kategori: v.category || v.violationType || '',
+          Poin: v.pointsAdded ?? v.points ?? 0,
+          StatusRestitusi: v.restitutionStatus || v.status || 'Baru Dicatat',
+          DilaporkanOleh: origin.originText,
+          ReportedVia: origin.reportedViaText,
+          StatusData: origin.isLegacy ? 'Data Lama' : 'Rujukan Piket Baru',
+          MigratedAt: v.migratedAt ?? 'null',
+          Catatan: v.notes || v.description || '',
+          KesepakatanRestitusi: v.restitutionAgreement || v.handlingProgress || '',
+        };
+      })
+    : [{ Keterangan: 'Belum ada data arsip pelanggaran' }];
+
+  const srvRows = servicesList.length > 0
+    ? servicesList.map((s: any, idx: number) => ({
+        No: idx + 1,
+        ID: s.id || '',
+        Tanggal: s.date || '',
+        Jam: `${s.startTime || ''}${s.endTime ? ` - ${s.endTime}` : ''}`,
+        JenisLayanan: s.serviceType || '',
+        PilarBK: s.bkComponent || '',
+        Bidang: s.bidangBimbingan || '',
+        Siswa: Array.isArray(s.students) ? s.students.map((st: any) => `${st.name} (${st.class})`).join('; ') : '',
+        TopikMasalah: s.problem || '',
+        Uraian: s.description || '',
+        TindakLanjut: s.followUp || '',
+        Status: s.status || '',
+        Konselor: s.counselorName || '',
+      }))
+    : [{ Keterangan: 'Belum ada data layanan BK' }];
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(violRows), 'Arsip Pelanggaran');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(srvRows), 'Layanan BK');
+
+  const fileName = `arsip-pembinaan-bk-gridasus-${buildTimestampSlug()}.xlsx`;
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([out], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  triggerBrowserDownload(blob, fileName);
+
+  return {
+    fileName,
+    violationsCount: violationsList.length,
+    servicesCount: servicesList.length,
+  };
+}
+
+export function exportArchiveViolationsAndServicesCSV(
+  activeCounselor?: Counselor | null,
+  liveState?: LiveAppDataInput
+): { fileName: string; totalRows: number; sizeLabel: string } {
+  const schoolId = sanitizeSchoolId(activeCounselor?.schoolId || getActiveSchoolId());
+  const deletedSet = new Set(getDeletedIds());
+  const violationsList = mergeArraySources(
+    'bk_violations',
+    schoolId,
+    deletedSet,
+    getCloudCollectionData<any>('bk_violations', schoolId),
+    liveState?.violations || []
+  );
+  const servicesList = mergeArraySources(
+    'bk_services',
+    schoolId,
+    deletedSet,
+    getCloudCollectionData<any>('bk_services', schoolId),
+    liveState?.services || []
+  );
+
+  const headers = [
+    'Tipe Data',
+    'ID',
+    'Tanggal',
+    'Waktu',
+    'Nama Siswa',
+    'Kelas',
+    'Kategori / Jenis Layanan',
+    'Poin',
+    'Status',
+    'Dilaporkan Oleh / Konselor',
+    'ReportedVia',
+    'Label Data',
+    'Catatan / Uraian',
+    'Tindak Lanjut / Restitusi',
+  ];
+
+  const rows: string[] = [];
+  violationsList.forEach((v: any) => {
+    const origin = resolveViolationOriginLabel(v);
+    rows.push(
+      [
+        'Pelanggaran / Rujukan',
+        v.id || '',
+        v.date || '',
+        v.time || '',
+        v.studentName || '',
+        v.studentClass || '',
+        v.category || v.violationType || '',
+        v.pointsAdded ?? v.points ?? 0,
+        v.restitutionStatus || v.status || 'Baru Dicatat',
+        origin.originText,
+        origin.reportedViaText,
+        origin.isLegacy ? 'Data Lama' : 'Rujukan Piket',
+        v.notes || v.description || '',
+        v.restitutionAgreement || v.handlingProgress || '',
+      ]
+        .map(escapeCsvCell)
+        .join(',')
+    );
+  });
+
+  servicesList.forEach((s: any) => {
+    const peserta = Array.isArray(s.students)
+      ? s.students.map((st: any) => `${st.name} (${st.class})`).join('; ')
+      : '';
+    const kelas = Array.isArray(s.students)
+      ? Array.from(new Set(s.students.map((st: any) => st.class).filter(Boolean))).join('; ')
+      : '';
+    rows.push(
+      [
+        'Layanan BK',
+        s.id || '',
+        s.date || '',
+        `${s.startTime || ''}${s.endTime ? `-${s.endTime}` : ''}`,
+        peserta,
+        kelas,
+        s.serviceType || '',
+        0,
+        s.status || '',
+        s.counselorName || '',
+        'Layanan BK',
+        'Layanan',
+        s.problem || s.description || '',
+        s.followUp || '',
+      ]
+        .map(escapeCsvCell)
+        .join(',')
+    );
+  });
+
+  const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\r\n');
+  const fileName = `arsip-pembinaan-layanan-bk-${buildTimestampSlug()}.csv`;
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+  triggerBrowserDownload(blob, fileName);
+
+  return {
+    fileName,
+    totalRows: violationsList.length + servicesList.length,
+    sizeLabel: formatFileSize(blob.size),
+  };
+}
+
+

@@ -20,6 +20,10 @@ import { getAutoJournalSettings, saveAutoJournalSettings, AutoJournalSettings } 
 import { purgeDummyData } from '../utils/purgeDummyData';
 import { restoreOriginalUserData } from '../utils/multiSchoolMigration';
 import { isAdministrator } from '../utils/accessControl';
+import {
+  exportArchiveViolationsAndServicesExcel,
+  exportArchiveViolationsAndServicesCSV
+} from '../utils/backupRestore';
 import { 
   updateAccountRequestInCloud, 
   listenToAccountRequests, 
@@ -80,7 +84,8 @@ import {
   Building2,
   ArrowRight,
   BookOpen,
-  Gavel
+  Gavel,
+  FileSpreadsheet
 } from 'lucide-react';
 import { generateUserManualPDF } from '../utils/userManualPdfGenerator';
 import PengaturanTataTertibPelanggaran from './PengaturanTataTertibPelanggaran';
@@ -817,7 +822,31 @@ export default function PengaturanView({
       downloadAnchor.click();
       downloadAnchor.remove();
     } catch (error) {
-      alert('Gagal mengekspor database: ' + error);
+      showToast('Gagal mengekspor database: ' + error, 'error');
+    }
+  };
+
+  const handleExportArchiveExcel = () => {
+    try {
+      const result = exportArchiveViolationsAndServicesExcel(activeCounselor);
+      showToast(
+        `Berhasil ekspor arsip Excel: ${result.violationsCount} catatan pelanggaran & ${result.servicesCount} layanan BK.`,
+        'success'
+      );
+    } catch (error) {
+      showToast('Gagal mengekspor arsip Excel: ' + error, 'error');
+    }
+  };
+
+  const handleExportArchiveCSV = () => {
+    try {
+      const result = exportArchiveViolationsAndServicesCSV(activeCounselor);
+      showToast(
+        `Berhasil ekspor arsip CSV (${result.totalRows} baris, ${result.sizeLabel}).`,
+        'success'
+      );
+    } catch (error) {
+      showToast('Gagal mengekspor arsip CSV: ' + error, 'error');
     }
   };
 
@@ -1929,6 +1958,24 @@ export default function PengaturanView({
                   <Download className="w-4 h-4" />
                   <span>Unduh File Cadangan JSON</span>
                 </button>
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleExportArchiveExcel}
+                    className="py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-xl transition-all shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    <span>Ekspor Arsip Excel</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportArchiveCSV}
+                    className="py-2 px-3 bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-300 text-[11px] font-bold rounded-xl transition-all shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Ekspor Arsip CSV</span>
+                  </button>
+                </div>
               </div>
 
               <div className="p-4 bg-slate-50 rounded-2xl border border-gray-200/80 space-y-3">
@@ -3139,6 +3186,24 @@ export default function PengaturanView({
                 <Download className="w-4 h-4" />
                 <span>Unduh File Cadangan (Export JSON)</span>
               </button>
+
+              <button
+                type="button"
+                onClick={handleExportArchiveExcel}
+                className="inline-flex items-center gap-1.5 px-4.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer active:scale-97"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>Ekspor Arsip ke Excel</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleExportArchiveCSV}
+                className="inline-flex items-center gap-1.5 px-4.5 py-2.5 bg-white hover:bg-emerald-50 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer active:scale-97"
+              >
+                <Download className="w-4 h-4" />
+                <span>Ekspor Arsip ke CSV</span>
+              </button>
               
               <label className="inline-flex items-center gap-1.5 px-4.5 py-2.5 border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs active:scale-97">
                 <Upload className="w-4 h-4 text-gray-500" />
@@ -3151,6 +3216,9 @@ export default function PengaturanView({
                 />
               </label>
             </div>
+            <p className="text-[11px] text-[#3d4947]/75">
+              Tombol <strong>Ekspor Arsip ke Excel / CSV</strong> mengekspor seluruh catatan <strong>violations</strong> (riwayat lama &amp; rujukan piket) beserta <strong>services</strong> (layanan BK) untuk arsip sekolah.
+            </p>
           </div>
 
           {/* Persiapan Go Public & Setup Database Sekolah Baru */}

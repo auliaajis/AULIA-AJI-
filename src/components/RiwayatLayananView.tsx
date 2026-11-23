@@ -1,27 +1,22 @@
 import React, { useState, useMemo } from 'react';
-import { 
-  HeartHandshake, 
-  Search, 
-  Filter, 
-  Calendar, 
-  FileText, 
-  Download, 
-  Eye, 
-  Edit2, 
-  Trash2, 
-  X, 
-  CheckCircle2, 
-  Sparkles, 
-  Users, 
-  Clock, 
-  Layers, 
-  Printer, 
-  ArrowLeft,
-  ChevronRight,
+import {
+  HeartHandshake,
+  Search,
+  Calendar,
+  FileText,
+  Download,
+  Eye,
+  Edit2,
+  X,
+  CheckCircle2,
+  Sparkles,
   UserCheck,
-  ExternalLink,
-  AlertCircle,
-  Tag
+  Tag,
+  Plus,
+  ClipboardCheck,
+  Clock,
+  User,
+  Users,
 } from 'lucide-react';
 import {
   BKComponentType,
@@ -46,14 +41,18 @@ import {
   mapJenisMasalahToBidang,
   mapLegacyProblemToStandardJenisMasalah,
 } from '../utils/evaluationHelpers';
-import { buildLocalContextAwareRecommendation } from './ServiceFormSharedBlocks';
-import { 
-  generateServicePDF, 
-  downloadRekapSemuaLayananPDF, 
-  downloadRekapLayananPerSiswaPDF 
+import {
+  downloadRekapSemuaLayananPDF,
+  downloadRekapLayananPerSiswaPDF,
 } from '../utils/pdfGenerator';
+import { exportServicesToIcs } from '../utils/calendarSync';
 import { showToast } from '../utils/toast';
-import { formatCardDateTime, formatCardDate, formatCardTime } from '../utils/dateFormatter';
+import { formatCardDate, formatCardTime } from '../utils/dateFormatter';
+import LayananDetailModal from './LayananDetailModal';
+
+export type ServiceTimeFilter = 'semua' | 'hari-ini' | 'minggu-ini' | 'bulan-ini';
+export type ServiceKindFilter = 'semua' | 'Klasikal' | 'Kelompok' | 'Individu' | 'Konseling';
+export type ServiceTeacherFilter = 'semua' | 'saya';
 
 interface RiwayatLayananViewProps {
   services: CounselingService[];
@@ -64,10 +63,77 @@ interface RiwayatLayananViewProps {
   onNavigateToForm?: (form: string, studentId?: string) => void;
   onEditService?: (service: CounselingService) => void;
   onUpdateService?: (service: CounselingService) => void;
+  onUpdateServiceStatus?: (serviceId: string, status: 'Terjadwal' | 'Selesai' | 'Dibatalkan') => void;
   onSaveServiceEvaluation?: (evaluation: ProgramEvaluation) => void;
-  onDeleteService?: (serviceId: string) => void;
+  onDeleteService?: (serviceId: string, skipConfirm?: boolean) => void;
   onEvaluateService?: (service: CounselingService) => void;
   embeddedMode?: boolean;
+}
+
+function getLocalYmd(dateObj: Date): string {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const d = String(dateObj.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getWeekBoundsYmd(now: Date): { startYmd: string; endYmd: string } {
+  const day = now.getDay(); // 0 = Sun, 1 = Mon...
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + diffToMonday);
+  const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
+  return {
+    startYmd: getLocalYmd(monday),
+    endYmd: getLocalYmd(sunday),
+  };
+}
+
+function matchesKindFilter(srv: CounselingService, filter: ServiceKindFilter): boolean {
+  if (filter === 'semua') return true;
+  const t = String(srv.serviceType || '').toLowerCase();
+  const tgt = String(srv.targetType || '').toLowerCase();
+  if (filter === 'Klasikal') return tgt === 'klasikal' || t.includes('klasikal');
+  if (filter === 'Kelompok') return tgt === 'kelompok' || t.includes('kelompok');
+  if (filter === 'Individu') return tgt === 'individu' || t.includes('individual') || t.includes('perorangan');
+  if (filter === 'Konseling') return t.includes('konseling');
+  return true;
+}
+
+function getServiceCategoryBadge(srv: CounselingService): string {
+  if (srv.targetType) return srv.targetType;
+  const t = String(srv.serviceType || '').toLowerCase();
+  if (t.includes('klasikal')) return 'Klasikal';
+  if (t.includes('kelompok')) return 'Kelompok';
+  if (t.includes('konseling')) return 'Konseling';
+  return 'Layanan BK';
+}
+
+function getDisplayStudentOrClass(srv: CounselingService): string {
+  const klasikalClass = srv.specificDetails?.klasikal?.kelas || srv.specificDetails?.blokC?.klasikal?.kelas;
+  const studentsList = srv.students || [];
+  if (klasikalClass) {
+    return studentsList.length > 0 ? `Kelas ${klasikalClass} (${studentsList.length} siswa)` : `Kelas ${klasikalClass}`;
+  }
+  if (studentsList.length === 0) {
+    return 'Sasaran Klasikal / Umum';
+  }
+  if (studentsList.length === 1) {
+    const st = studentsList[0];
+    return `${st.name}${st.class ? ` (Kelas ${st.class})` : ''}`;
+  }
+  const uniqueClasses = Array.from(new Set(studentsList.map((s) => s.class).filter(Boolean)));
+  if (studentsList.length > 3 && uniqueClasses.length === 1) {
+    return `Kelas ${uniqueClasses[0]} (${studentsList.length} siswa)`;
+  }
+  const previewNames = studentsList.slice(0, 2).map((s) => `${s.name} (${s.class || '-'})`).join(', ');
+  return studentsList.length > 2 ? `${previewNames} +${studentsList.length - 2} lainnya` : previewNames;
+}
+
+function getSortScore(srv: CounselingService): string {
+  const d = String(srv.date || '0000-00-00');
+  const t = String(srv.startTime || '00:00');
+  const u = String((srv as any).updatedAt || (srv as any).createdAt || '');
+  return `${d}T${t}|${u}`;
 }
 
 export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
@@ -79,18 +145,19 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
   onNavigateToForm,
   onEditService,
   onUpdateService,
+  onUpdateServiceStatus,
   onSaveServiceEvaluation,
   onDeleteService,
   onEvaluateService,
   embeddedMode = false,
 }) => {
-  // Filter States
+  // Search & 3 Quick Filters
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedServiceType, setSelectedServiceType] = useState<string>('semua');
-  const [selectedClass, setSelectedClass] = useState<string>('semua');
-  const [selectedDate, setSelectedDate] = useState<string>('');
+  const [timeFilter, setTimeFilter] = useState<ServiceTimeFilter>('semua');
+  const [kindFilter, setKindFilter] = useState<ServiceKindFilter>('semua');
+  const [teacherFilter, setTeacherFilter] = useState<ServiceTeacherFilter>('semua');
 
-  // Modals
+  // Detail Modal & PDF Modals
   const [detailService, setDetailService] = useState<CounselingService | null>(null);
   const [showStudentPdfModal, setShowStudentPdfModal] = useState(false);
   const [selectedStudentForPdf, setSelectedStudentForPdf] = useState<Student | null>(null);
@@ -98,7 +165,7 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
   const [aiStudentSummary, setAiStudentSummary] = useState('');
   const [isGeneratingAiSummary, setIsGeneratingAiSummary] = useState(false);
 
-  // Perbaiki Klasifikasi Modal State (data lama tidak dihapus)
+  // Perbaiki Klasifikasi Modal State
   const [fixClassifyTarget, setFixClassifyTarget] = useState<CounselingService | null>(null);
   const [fixJenisMasalah, setFixJenisMasalah] = useState<EvaluationJenisMasalah>('Terlambat');
   const [fixAlasanLainnya, setFixAlasanLainnya] = useState('');
@@ -107,6 +174,15 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
   const [fixKeparahan, setFixKeparahan] = useState(3);
   const [fixFrekuensi, setFixFrekuensi] = useState(3);
   const [fixMotivasiAwal, setFixMotivasiAwal] = useState(3);
+
+  // Map evaluated serviceId -> ProgramEvaluation
+  const evalByServiceId = useMemo(() => {
+    const map = new Map<string, ProgramEvaluation>();
+    (serviceEvaluations || []).forEach((ev) => {
+      if (ev && ev.serviceId) map.set(ev.serviceId, ev);
+    });
+    return map;
+  }, [serviceEvaluations]);
 
   const isLegacyServiceRecord = (srv: CounselingService, linkedEval?: ProgramEvaluation): boolean => {
     const blokB = srv.specificDetails?.blokB;
@@ -219,128 +295,88 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
     setFixClassifyTarget(null);
   };
 
-  const getDetailContextualAiText = (srv: CounselingService): string => {
-    if (srv.specificDetails?.aiContextualRecommendation) {
-      return srv.specificDetails.aiContextualRecommendation;
-    }
-    const lowerType = String(srv.serviceType || '').toLowerCase();
-    const formKind: 'kelompok' | 'mediasi' | 'klasikal' | 'observasi-wawancara-referal' | null =
-      lowerType.includes('kelompok')
-        ? 'kelompok'
-        : lowerType.includes('mediasi')
-          ? 'mediasi'
-          : lowerType.includes('klasikal')
-            ? 'klasikal'
-            : lowerType.includes('observasi') ||
-                lowerType.includes('wawancara') ||
-                lowerType.includes('alih tangan') ||
-                lowerType.includes('referral')
-              ? 'observasi-wawancara-referal'
-              : null;
-
-    if (formKind) {
-      return buildLocalContextAwareRecommendation({
-        formKind,
-        blokB: srv.specificDetails?.blokB || {
-          jenisMasalah: inferJenisMasalahFromService(srv),
-          tujuanLayanan: inferTujuanFromService(srv),
-          teknik: inferTeknikFromService(srv),
-          baseline: { keparahan: 3, frekuensi: 3, motivasiAwal: 3, baselineDariIngatan: true },
-        },
-        blokC: {
-          kelompokParticipants: srv.specificDetails?.blokC?.kelompokParticipants,
-          mediasi: srv.specificDetails?.blokC?.mediasi || srv.specificDetails?.mediasi,
-          klasikal: srv.specificDetails?.blokC?.klasikal || srv.specificDetails?.klasikal,
-          observasiWawancaraReferal:
-            srv.specificDetails?.blokC?.observasiWawancaraReferal ||
-            srv.specificDetails?.observasiWawancaraReferal,
-        },
-        blokD: {
-          apa: srv.specificDetails?.tindakLanjutPlan?.tindakLanjutApa || srv.followUp,
-          tanggal: srv.specificDetails?.tindakLanjutPlan?.tindakLanjutTanggal,
-          penanggungJawab: srv.specificDetails?.tindakLanjutPlan?.penanggungJawab || srv.counselorName,
-        },
-        sasaranLabel: (srv.students || []).map((st) => st.name).join(', ') || 'Siswa',
-      });
-    }
-
-    return `Layanan ${srv.serviceType} topik "${srv.problem}" (${srv.status || 'Selesai'}): Fokuskan tindak lanjut pada "${srv.followUp || 'monitoring perkembangan bersama wali kelas'}" dan cek perubahan perilaku secara terukur pada sesi evaluasi berikutnya.`;
-  };
-
-  // Available Classes
-  const availableClasses = useMemo(() => {
-    const set = new Set<string>();
-    students.forEach((s) => {
-      if (s.class) set.add(s.class.trim().toUpperCase());
-    });
-    return Array.from(set).sort();
-  }, [students]);
-
-  // Map evaluated serviceId -> ProgramEvaluation (locked badge check)
-  const evalByServiceId = useMemo(() => {
-    const map = new Map<string, ProgramEvaluation>();
-    (serviceEvaluations || []).forEach((ev) => {
-      if (ev && ev.serviceId) map.set(ev.serviceId, ev);
-    });
-    return map;
-  }, [serviceEvaluations]);
-
-  // Available Service Types
-  const availableServiceTypes = useMemo(() => {
-    const set = new Set<string>();
-    services.forEach((s) => {
-      if (s.serviceType) set.add(s.serviceType.trim());
-    });
-    return Array.from(set).sort();
+  // Date & Week calculations for filtering and summary
+  const { todayYmd, weekStartYmd, weekEndYmd, monthPrefix, thisWeekCount } = useMemo(() => {
+    const now = new Date();
+    const today = getLocalYmd(now);
+    const { startYmd, endYmd } = getWeekBoundsYmd(now);
+    const mPrefix = today.slice(0, 7); // YYYY-MM
+    const countWeek = services.filter((srv) => {
+      const d = String(srv.date || '').slice(0, 10);
+      return d >= startYmd && d <= endYmd;
+    }).length;
+    return {
+      todayYmd: today,
+      weekStartYmd: startYmd,
+      weekEndYmd: endYmd,
+      monthPrefix: mPrefix,
+      thisWeekCount: countWeek,
+    };
   }, [services]);
 
   // Filtered Services List (Sorted Newest First)
   const filteredServices = useMemo(() => {
-    if (embeddedMode) {
-      return [...services].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    }
     return [...services]
       .filter((srv) => {
-        // 1. Search term (student name, problem, topic, description)
+        // 1. Search by student name, class, service type, or topic
         if (searchTerm.trim()) {
           const q = searchTerm.toLowerCase();
           const matchStudent = (srv.students || []).some(
-            (st) => st.name.toLowerCase().includes(q) || st.class.toLowerCase().includes(q)
+            (st) =>
+              String(st.name || '').toLowerCase().includes(q) ||
+              String(st.class || '').toLowerCase().includes(q) ||
+              String(st.nis || '').toLowerCase().includes(q)
           );
-          const matchProblem = (srv.problem || '').toLowerCase().includes(q);
-          const matchType = (srv.serviceType || '').toLowerCase().includes(q);
-          const matchDesc = (srv.description || '').toLowerCase().includes(q);
-          if (!matchStudent && !matchProblem && !matchType && !matchDesc) {
+          const klasikalClass = String(
+            srv.specificDetails?.klasikal?.kelas || srv.specificDetails?.blokC?.klasikal?.kelas || ''
+          ).toLowerCase();
+          const matchClass = klasikalClass.includes(q);
+          const matchType = String(srv.serviceType || '').toLowerCase().includes(q);
+          const matchProblem = String(srv.problem || '').toLowerCase().includes(q);
+          const matchCounselor = String(srv.counselorName || '').toLowerCase().includes(q);
+          if (!matchStudent && !matchClass && !matchType && !matchProblem && !matchCounselor) {
             return false;
           }
         }
 
-        // 2. Service type
-        if (selectedServiceType !== 'semua') {
-          if (srv.serviceType !== selectedServiceType) {
-            return false;
-          }
+        // 2. Time Filter
+        if (timeFilter !== 'semua') {
+          const d = String(srv.date || '').slice(0, 10);
+          if (timeFilter === 'hari-ini' && d !== todayYmd) return false;
+          if (timeFilter === 'minggu-ini' && (d < weekStartYmd || d > weekEndYmd)) return false;
+          if (timeFilter === 'bulan-ini' && !d.startsWith(monthPrefix)) return false;
         }
 
-        // 3. Class filter
-        if (selectedClass !== 'semua') {
-          const matchClass = (srv.students || []).some(
-            (st) => (st.class || '').trim().toUpperCase() === selectedClass
-          );
-          if (!matchClass) return false;
+        // 3. Kind Filter
+        if (!matchesKindFilter(srv, kindFilter)) {
+          return false;
         }
 
-        // 4. Date filter
-        if (selectedDate) {
-          if (srv.date !== selectedDate) {
-            return false;
-          }
+        // 4. Counselor Filter
+        if (teacherFilter === 'saya' && activeCounselor) {
+          const myId = String(activeCounselor.id || '').trim().toLowerCase();
+          const myName = String(activeCounselor.name || '').trim().toLowerCase();
+          const sId = String(srv.counselorId || '').trim().toLowerCase();
+          const sName = String(srv.counselorName || '').trim().toLowerCase();
+          const isMatch = (myId && sId === myId) || (myName && sName === myName);
+          if (!isMatch) return false;
         }
 
         return true;
       })
-      .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  }, [services, searchTerm, selectedServiceType, selectedClass, selectedDate, embeddedMode]);
+      .sort((a, b) => getSortScore(b).localeCompare(getSortScore(a)));
+  }, [
+    services,
+    searchTerm,
+    timeFilter,
+    kindFilter,
+    teacherFilter,
+    activeCounselor,
+    todayYmd,
+    weekStartYmd,
+    weekEndYmd,
+    monthPrefix,
+  ]);
 
   // Helper for Meta AI Student Summary
   const handleGenerateStudentAiSummary = (st: Student) => {
@@ -351,23 +387,23 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
 
     const total = stServices.length;
     const latestService = stServices[0];
-    const topProblems = Array.from(new Set(stServices.map((s) => s.problem).filter(Boolean))).slice(0, 3).join(', ');
+    const topProblems = Array.from(new Set(stServices.map((s) => s.problem).filter(Boolean)))
+      .slice(0, 3)
+      .join(', ');
 
     setTimeout(() => {
       let summary = '';
       if (total === 0) {
-        summary = `Peserta didik ${st.name} (Kelas ${st.class}) memiliki rekam jejak bimbingan yang bersih tanpa catatan kasus maupun masalah perilaku yang memerlukan penanganan khusus. Kondisi belajar dan adaptasi sosial di sekolah berjalan sangat kondusif.`;
+        summary = `Peserta didik ${st.name} (Kelas ${st.class}) memiliki rekam jejak bimbingan yang bersih tanpa catatan kasus maupun masalah perilaku yang memerlukan penanganan khusus.`;
       } else {
         const monthName = new Date().toLocaleString('id-ID', { month: 'long', year: 'numeric' });
-        summary = `Berdasarkan rekam jejak bimbingan per ${monthName}, ${st.name} (Kelas ${st.class}) telah menerima ${total} kali layanan bimbingan dan konseling, terutama berfokus pada topik "${topProblems || 'pengembangan disiplin & belajar'}". Siswa menunjukkan respon reflektif yang positif terhadap sesi konseling dan menunjukkan komitmen peningkatan perilaku (${latestService?.followUp || 'pemantauan berkala'}). Disarankan kolaborasi rutin antara Guru BK, Wali Kelas, dan Orang Tua untuk mempertahankan kemajuan siswa.`;
+        summary = `Berdasarkan rekam jejak bimbingan per ${monthName}, ${st.name} (Kelas ${st.class}) telah menerima ${total} kali layanan bimbingan dan konseling, terutama berfokus pada topik "${topProblems || 'pengembangan disiplin & belajar'}". Siswa menunjukkan respon reflektif positif (${latestService?.followUp || 'pemantauan berkala'}).`;
       }
       setAiStudentSummary(summary);
       setIsGeneratingAiSummary(false);
-      showToast('✨ Ringkasan perkembangan siswa berhasil dirumuskan oleh Meta AI!', 'success');
-    }, 400);
+    }, 300);
   };
 
-  // Filtered Students for PDF Selector Modal
   const filteredStudentsForPdf = useMemo(() => {
     const q = studentSearchForPdf.trim().toLowerCase();
     if (!q) return students.slice(0, 10);
@@ -376,311 +412,386 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
       .slice(0, 10);
   }, [students, studentSearchForPdf]);
 
+  const hasActiveFilters =
+    Boolean(searchTerm.trim()) ||
+    timeFilter !== 'semua' ||
+    kindFilter !== 'semua' ||
+    teacherFilter !== 'semua';
+
+  const counselorLabel = activeCounselor?.name
+    ? activeCounselor.name.split(',')[0].trim()
+    : 'Guru Saya';
+
   return (
-    <div className={embeddedMode ? 'space-y-4' : 'space-y-6 max-w-7xl mx-auto pb-16 animate-in fade-in duration-200'}>
-      {embeddedMode ? (
-        <div className="flex items-center justify-between gap-2">
-          <h3 className="text-sm font-extrabold text-[#0b1c30]">
-            Daftar Riwayat Layanan BK
-          </h3>
-          <button
-            type="button"
-            onClick={() => {
-              setShowStudentPdfModal(true);
-              if (!selectedStudentForPdf && students.length > 0) {
-                setSelectedStudentForPdf(students[0]);
-                handleGenerateStudentAiSummary(students[0]);
-              }
-            }}
-            className="px-3 py-1.5 bg-[#f8faf9] hover:bg-[#e6f4f1] text-[#00685f] border border-[#bcc9c6]/50 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-          >
-            <UserCheck className="w-3.5 h-3.5" />
-            <span>PDF Per Siswa</span>
-          </button>
-        </div>
-      ) : (
-      /* ========================================================================= */
-      /* HEADER UTAMA & TOMBOL EXPORT PDF                                           */
-      /* ========================================================================= */
-      <div className="bg-white p-5 sm:p-6 rounded-3xl border border-[#bcc9c6]/40 shadow-xs space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-black uppercase tracking-wider text-[#00685f] bg-[#00685f]/10 px-2.5 py-0.5 rounded-md border border-[#00685f]/15">
-                Dokumentasi & Arsip Layanan BK
+    <div className={embeddedMode ? 'space-y-4' : 'space-y-5 max-w-6xl mx-auto pb-24 animate-in fade-in duration-200'}>
+      {/* ========================================================================= */}
+      {/* HEADER LAYANAN BK + TOMBOL UTAMA (+ INPUT LAYANAN & EVALUASI PROGRAM)     */}
+      {/* ========================================================================= */}
+      {!embeddedMode && (
+        <div className="bg-white p-4 sm:p-6 rounded-2xl border border-[#bcc9c6]/40 shadow-2xs space-y-4">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div>
+              <span className="text-[10px] font-black uppercase tracking-wider text-[#00685f] bg-[#e6f4f1] px-2.5 py-0.5 rounded-md border border-[#00685f]/15">
+                Layanan Bimbingan &amp; Konseling
               </span>
-              <span className="text-[10px] font-bold text-gray-500">
-                {filteredServices.length} dari {services.length} sesi
-              </span>
+              <h1 className="text-xl sm:text-2xl font-black text-[#0b1c30] tracking-tight mt-1">
+                Daftar Layanan BK
+              </h1>
+              <p className="text-xs sm:text-sm text-[#3d4947] font-medium mt-0.5">
+                Semua sesi bimbingan klasikal, kelompok, konseling individu, dan dokumentasi BK tersimpan real-time di Cloud.
+              </p>
             </div>
-            <h1 className="text-xl sm:text-2xl font-black text-[#0b1c30] tracking-tight mt-1">
-              Riwayat Layanan Bimbingan & Konseling
-            </h1>
-            <p className="text-xs sm:text-sm text-gray-500 font-medium mt-0.5">
-              Pantau seluruh rekam jejak bimbingan, cari riwayat siswa, edit catatan, dan ekspor laporan PDF resmi.
-            </p>
+
+            {/* Action Buttons */}
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {onNavigateToForm && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateToForm('tambah-layanan')}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs sm:text-sm font-black shadow-sm transition-all cursor-pointer active:scale-97 whitespace-nowrap"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ Input Layanan</span>
+                </button>
+              )}
+
+              {onNavigateToTab && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateToTab('evaluasi-program')}
+                  className="inline-flex items-center gap-2 px-3.5 py-2.5 bg-[#e6f4f1] hover:bg-[#d5ece7] text-[#00685f] border border-[#00685f]/30 rounded-xl text-xs sm:text-sm font-extrabold transition-all cursor-pointer active:scale-97 whitespace-nowrap"
+                >
+                  <ClipboardCheck className="w-4 h-4" />
+                  <span>Evaluasi Layanan &amp; Program BK</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (filteredServices.length === 0) {
+                    showToast('⚠️ Tidak ada data layanan untuk diekspor ke PDF.', 'warning');
+                    return;
+                  }
+                  downloadRekapSemuaLayananPDF({
+                    services: filteredServices,
+                    filterInfo: 'Daftar Layanan BK',
+                    counselorOverride: activeCounselor,
+                  });
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-2.5 bg-white hover:bg-gray-50 text-[#0b1c30] border border-[#bcc9c6]/60 rounded-xl text-xs font-extrabold transition-all cursor-pointer whitespace-nowrap"
+                title="Unduh rekap semua layanan ke PDF"
+              >
+                <Download className="w-3.5 h-3.5 text-[#00685f]" />
+                <span>PDF Semua</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowStudentPdfModal(true);
+                  if (!selectedStudentForPdf && students.length > 0) {
+                    setSelectedStudentForPdf(students[0]);
+                    handleGenerateStudentAiSummary(students[0]);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-2.5 bg-white hover:bg-gray-50 text-[#0b1c30] border border-[#bcc9c6]/60 rounded-xl text-xs font-extrabold transition-all cursor-pointer whitespace-nowrap"
+                title="Unduh PDF rekap layanan per siswa"
+              >
+                <UserCheck className="w-3.5 h-3.5 text-blue-600" />
+                <span>PDF Siswa</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  exportServicesToIcs(
+                    filteredServices,
+                    `Jadwal-Layanan-BK-${new Date().toISOString().slice(0, 10)}.ics`,
+                    'Jadwal Layanan BK'
+                  )
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-2.5 bg-white hover:bg-gray-50 text-[#3d4947] border border-[#bcc9c6]/60 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap"
+                title="Ekspor jadwal ke Kalender (.ics)"
+              >
+                <Calendar className="w-3.5 h-3.5 text-[#00685f]" />
+                <span>.ics</span>
+              </button>
+            </div>
           </div>
 
-          {/* 2 TOMBOL BESAR EXPORT PDF SESUAI INSTRUKSI */}
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            {/* 1. Download PDF Semua */}
-            <button
-              type="button"
-              onClick={() => {
-                if (filteredServices.length === 0) {
-                  showToast('⚠️ Tidak ada data layanan untuk diekspor ke PDF.', 'warning');
-                  return;
-                }
-                const filterDesc = [
-                  selectedClass !== 'semua' ? `Kelas ${selectedClass}` : '',
-                  selectedServiceType !== 'semua' ? selectedServiceType : '',
-                  selectedDate ? `Tanggal ${selectedDate}` : '',
-                  searchTerm ? `Pencarian "${searchTerm}"` : ''
-                ].filter(Boolean).join(' • ');
+          {/* Search Bar */}
+          <div className="relative">
+            <Search className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Cari berdasarkan nama siswa, kelas, jenis layanan, atau topik..."
+              className="w-full pl-10 pr-9 py-2.5 bg-[#f8faf9] border border-[#bcc9c6]/50 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f]/20 focus:border-[#00685f] focus:bg-white"
+            />
+            {searchTerm && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 text-xs font-bold cursor-pointer"
+                aria-label="Hapus pencarian"
+              >
+                ✕
+              </button>
+            )}
+          </div>
 
-                downloadRekapSemuaLayananPDF({
-                  services: filteredServices,
-                  filterInfo: filterDesc || 'Semua Data Layanan',
-                  counselorOverride: activeCounselor
-                });
-              }}
-              className="px-4 py-2.5 bg-gradient-to-r from-teal-700 to-[#00685f] hover:from-teal-800 hover:to-[#005049] text-white rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 shadow-md hover:shadow-lg transition-all cursor-pointer active:scale-97"
-              title="Unduh seluruh daftar layanan yang saat ini tersaring dalam bentuk tabel laporan resmi"
-            >
-              <Download className="w-4 h-4 text-white" />
-              <span>Download PDF Semua ({filteredServices.length})</span>
-            </button>
+          {/* 3 Filter Cepat: Waktu, Jenis, Guru */}
+          <div className="space-y-2.5 pt-1">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Filter Waktu */}
+              <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl overflow-x-auto max-w-full">
+                {(
+                  [
+                    { id: 'semua', label: 'Semua Waktu' },
+                    { id: 'hari-ini', label: 'Hari Ini' },
+                    { id: 'minggu-ini', label: 'Minggu Ini' },
+                    { id: 'bulan-ini', label: 'Bulan Ini' },
+                  ] as const
+                ).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setTimeFilter(item.id)}
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                      timeFilter === item.id
+                        ? 'bg-[#00685f] text-white shadow-2xs'
+                        : 'text-[#3d4947] hover:text-[#0b1c30]'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
 
-            {/* 2. Download PDF Per Siswa */}
-            <button
-              type="button"
-              onClick={() => {
-                setShowStudentPdfModal(true);
-                if (!selectedStudentForPdf && students.length > 0) {
-                  setSelectedStudentForPdf(students[0]);
-                  handleGenerateStudentAiSummary(students[0]);
-                }
-              }}
-              className="px-4 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 shadow-md hover:shadow-lg transition-all cursor-pointer active:scale-97"
-              title="Pilih satu siswa untuk mengunduh rekam jejak lengkap konseling siswa tersebut dari yang terbaru"
-            >
-              <UserCheck className="w-4 h-4 text-white" />
-              <span>Download PDF Per Siswa</span>
-            </button>
+              {/* Filter Jenis */}
+              <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl overflow-x-auto max-w-full">
+                {(['semua', 'Klasikal', 'Kelompok', 'Individu', 'Konseling'] as const).map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setKindFilter(k)}
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                      kindFilter === k
+                        ? 'bg-[#00685f] text-white shadow-2xs'
+                        : 'text-[#3d4947] hover:text-[#0b1c30]'
+                    }`}
+                  >
+                    {k === 'semua' ? 'Semua Jenis' : k}
+                  </button>
+                ))}
+              </div>
 
-            {/* Tombol Input Layanan Baru */}
+              {/* Filter Guru */}
+              <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setTeacherFilter('semua')}
+                  className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                    teacherFilter === 'semua'
+                      ? 'bg-[#00685f] text-white shadow-2xs'
+                      : 'text-[#3d4947] hover:text-[#0b1c30]'
+                  }`}
+                >
+                  Semua Guru
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTeacherFilter('saya')}
+                  className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                    teacherFilter === 'saya'
+                      ? 'bg-[#00685f] text-white shadow-2xs'
+                      : 'text-[#3d4947] hover:text-[#0b1c30]'
+                  }`}
+                >
+                  {counselorLabel}
+                </button>
+              </div>
+            </div>
+
+            {/* Ringkasan Angka di Bawah Filter */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-gray-100 text-xs">
+              <div className="font-extrabold text-[#0b1c30] tabular-nums flex items-center gap-2">
+                <span>
+                  Total: <span className="text-[#00685f]">{filteredServices.length}</span> layanan
+                </span>
+                <span className="text-gray-300">&bull;</span>
+                <span>
+                  Minggu ini: <span className="text-[#00685f]">{thisWeekCount}</span>
+                </span>
+              </div>
+
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchTerm('');
+                    setTimeFilter('semua');
+                    setKindFilter('semua');
+                    setTeacherFilter('semua');
+                  }}
+                  className="text-[11px] font-extrabold text-[#00685f] hover:underline cursor-pointer"
+                >
+                  Reset Filter
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* DAFTAR KARTU LAYANAN (TERBARU DI ATAS)                                    */}
+      {/* ========================================================================= */}
+      {filteredServices.length === 0 ? (
+        <div className="bg-white rounded-2xl p-10 text-center border border-[#bcc9c6]/40 shadow-2xs space-y-3">
+          <div className="w-14 h-14 rounded-full bg-[#e6f4f1] text-[#00685f] flex items-center justify-center mx-auto">
+            <HeartHandshake className="w-7 h-7" />
+          </div>
+          <h3 className="text-base font-black text-[#0b1c30]">
+            {services.length === 0 ? 'Belum Ada Layanan Tercatat' : 'Tidak Ada Layanan Sesuai Filter'}
+          </h3>
+          <p className="text-xs text-[#3d4947] max-w-md mx-auto">
+            {services.length === 0
+              ? 'Klik "+ Input Layanan" di atas untuk mulai mencatat bimbingan klasikal, kelompok, atau konseling.'
+              : 'Coba ubah kata kunci pencarian atau pilih "Semua Waktu / Semua Jenis / Semua Guru".'}
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+            {hasActiveFilters && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchTerm('');
+                  setTimeFilter('semua');
+                  setKindFilter('semua');
+                  setTeacherFilter('semua');
+                }}
+                className="px-4 py-2 bg-[#e6f4f1] hover:bg-[#d5ece7] text-[#00685f] text-xs font-black rounded-xl cursor-pointer"
+              >
+                Reset Semua Filter
+              </button>
+            )}
             {onNavigateToForm && (
               <button
                 type="button"
                 onClick={() => onNavigateToForm('tambah-layanan')}
-                className="px-3.5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl text-xs font-black flex items-center gap-1.5 transition-all cursor-pointer active:scale-97"
+                className="px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white text-xs font-black rounded-xl cursor-pointer"
               >
-                <span>+ Catat Baru</span>
+                + Input Layanan Baru
               </button>
             )}
           </div>
         </div>
-
-        {/* ===================================================================== */}
-        {/* BARIS FILTER: CARI SISWA, PILIH LAYANAN, PILIH TANGGAL, PILIH KELAS    */}
-        {/* ===================================================================== */}
-        <div className="pt-3 border-t border-gray-100 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          
-          {/* 1. Cari Nama Siswa / Topik */}
-          <div>
-            <label className="text-[10px] font-black uppercase tracking-wider text-gray-500 block mb-1">
-              Cari Siswa / Topik:
-            </label>
-            <div className="relative">
-              <Search className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Ketik nama siswa, topik..."
-                className="w-full pl-10 pr-7 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:bg-white"
-              />
-              {searchTerm && (
-                <button
-                  type="button"
-                  onClick={() => setSearchTerm('')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs font-bold"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* 2. Pilih Layanan */}
-          <div>
-            <label className="text-[10px] font-black uppercase tracking-wider text-gray-500 block mb-1">
-              Pilih Layanan:
-            </label>
-            <select
-              value={selectedServiceType}
-              onChange={(e) => setSelectedServiceType(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:bg-white"
-            >
-              <option value="semua">Semua Layanan BK</option>
-              {availableServiceTypes.map((type) => (
-                <option key={type} value={type}>
-                  {type}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* 3. Pilih Kelas */}
-          <div>
-            <label className="text-[10px] font-black uppercase tracking-wider text-gray-500 block mb-1">
-              Pilih Kelas:
-            </label>
-            <select
-              value={selectedClass}
-              onChange={(e) => setSelectedClass(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:bg-white"
-            >
-              <option value="semua">Semua Kelas</option>
-              {availableClasses.map((cls) => (
-                <option key={cls} value={cls}>
-                  Kelas {cls}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* 4. Pilih Tanggal */}
-          <div>
-            <label className="text-[10px] font-black uppercase tracking-wider text-gray-500 block mb-1">
-              Pilih Tanggal:
-            </label>
-            <div className="flex items-center gap-1.5">
-              <input
-                type="date"
-                value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
-                className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:bg-white"
-              />
-              {selectedDate && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedDate('')}
-                  className="px-2 py-2 bg-gray-100 hover:bg-gray-200 rounded-xl text-xs font-bold text-gray-600 cursor-pointer"
-                  title="Reset Tanggal"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-          </div>
-
-        </div>
-      </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* DAFTAR KARTU RIWAYAT LAYANAN                                              */}
-      {/* ========================================================================= */}
-      {filteredServices.length === 0 ? (
-        <div className="bg-white rounded-3xl p-12 text-center border border-[#bcc9c6]/40 shadow-xs space-y-3">
-          <div className="w-16 h-16 rounded-full bg-teal-50 text-[#00685f] flex items-center justify-center mx-auto">
-            <HeartHandshake className="w-8 h-8 opacity-75" />
-          </div>
-          <h3 className="text-base font-black text-[#0b1c30]">Belum Ada Layanan Sesuai Kriteria</h3>
-          <p className="text-xs text-gray-500 max-w-md mx-auto">
-            Tidak ditemukan catatan layanan dengan filter yang dipilih. Coba reset kata kunci pencarian, pilih "Semua Kelas", atau catat layanan baru.
-          </p>
-          {(searchTerm || selectedServiceType !== 'semua' || selectedClass !== 'semua' || selectedDate) && (
-            <button
-              type="button"
-              onClick={() => {
-                setSearchTerm('');
-                setSelectedServiceType('semua');
-                setSelectedClass('semua');
-                setSelectedDate('');
-              }}
-              className="px-4 py-2 bg-teal-50 hover:bg-teal-100 text-[#00685f] text-xs font-black rounded-xl cursor-pointer"
-            >
-              Reset Semua Filter
-            </button>
-          )}
-        </div>
       ) : (
-        <div className="space-y-3.5">
+        <div className="space-y-3">
           {filteredServices.map((srv) => {
-            const studentText = (srv.students || [])
-              .map((st) => `${st.name} (${st.class || '-'})`)
-              .join(', ') || 'Siswa';
-            const isCompleted = srv.status === 'Selesai';
+            const targetDisplay = getDisplayStudentOrClass(srv);
+            const categoryLabel = getServiceCategoryBadge(srv);
+            const counselorNameDisplay = srv.counselorName || activeCounselor?.name || 'Guru BK';
+            const statusLabel =
+              srv.status === 'Terjadwal'
+                ? 'Dijadwalkan'
+                : srv.status === 'Dibatalkan'
+                ? 'Dibatalkan'
+                : 'Selesai';
+            const statusBadgeClass =
+              statusLabel === 'Selesai'
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                : statusLabel === 'Dibatalkan'
+                ? 'bg-rose-50 text-rose-800 border-rose-200'
+                : 'bg-amber-50 text-amber-800 border-amber-200';
             const linkedEval = evalByServiceId.get(srv.id);
 
             return (
               <div
                 key={srv.id}
-                className="bg-white rounded-2xl border border-[#bcc9c6]/40 hover:border-[#00685f]/50 p-4 sm:p-5 shadow-xs hover:shadow-md transition-all space-y-3 group"
+                onClick={() => setDetailService(srv)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setDetailService(srv);
+                  }
+                }}
+                className="bg-white rounded-2xl border border-[#bcc9c6]/40 hover:border-[#00685f]/60 p-4 sm:p-5 shadow-2xs hover:shadow-sm transition-all cursor-pointer group space-y-3"
               >
-                {/* Header Kartu: Layanan - Nama Siswa (Kelas) - Tanggal - Topik - Status */}
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
-                  <div
-                    onClick={() => setDetailService(srv)}
-                    className="cursor-pointer space-y-1 flex-1 min-w-0"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-xs font-black text-[#00685f] bg-[#00685f]/10 px-2.5 py-0.5 rounded-lg border border-[#00685f]/15">
-                        {srv.serviceType}
+                {/* Baris Atas: Tanggal + Status */}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="inline-flex items-center gap-1.5 font-extrabold text-[#00685f] bg-[#e6f4f1] px-2.5 py-1 rounded-lg">
+                      <Calendar className="w-3.5 h-3.5" />
+                      <span>{formatCardDate(srv.date)}</span>
+                    </span>
+                    {srv.startTime && (
+                      <span className="inline-flex items-center gap-1 text-[#3d4947] font-semibold">
+                        <Clock className="w-3.5 h-3.5 text-gray-400" />
+                        <span>{formatCardTime(srv.startTime)}</span>
                       </span>
-                      {!linkedEval ? (
-                        <span
-                          className="text-[10px] font-black text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-md"
-                          title="Badge terkunci sampai Evaluasi Layanan diisi"
-                        >
-                          Belum Dievaluasi
-                        </span>
-                      ) : (
-                        <span className="text-[10px] font-black text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md tabular-nums">
-                          Sudah Dievaluasi &middot; {getEffectiveServiceEvalScore(linkedEval).toFixed(1)}/5
-                        </span>
-                      )}
-                      <span className="text-sm font-black text-[#0b1c30] group-hover:text-[#00685f] transition-colors truncate">
-                        {studentText}
-                      </span>
-                      <span className="text-xs font-bold text-gray-500">
-                        • {formatCardDateTime(srv.date, srv.startTime)}
-                      </span>
-                      {((srv as any).isLegacyUnmigrated || !srv.schoolId) && (
-                        <span className="text-[10px] font-black text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-md shadow-2xs">
-                          Data Lama - Perlu Migrasi
-                        </span>
-                      )}
-                    </div>
-
-                    <p className="text-xs font-bold text-gray-700">
-                      Topik: <span className="text-[#0b1c30]">{srv.problem || '-'}</span>
-                    </p>
+                    )}
+                    <span className="px-2 py-0.5 rounded-md bg-gray-100 text-[#3d4947] text-[10px] font-extrabold">
+                      {categoryLabel}
+                    </span>
                   </div>
 
-                  {/* Status Badge & Tombol Aksi */}
-                  <div className="flex items-center flex-wrap gap-2 shrink-0 self-end md:self-center">
-                    <span
-                      className={`text-[10px] font-black px-2.5 py-1 rounded-full border ${
-                        isCompleted
-                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                          : 'bg-amber-50 text-amber-800 border-amber-200'
-                      }`}
-                    >
-                      {srv.status || 'Selesai'}
+                  <div className="flex items-center gap-1.5">
+                    {linkedEval ? (
+                      <span className="text-[10px] font-black text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md tabular-nums">
+                        Skor {getEffectiveServiceEvalScore(linkedEval).toFixed(1)}/5
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-md">
+                        Belum Dievaluasi
+                      </span>
+                    )}
+                    <span className={`text-[11px] font-extrabold px-2.5 py-0.5 rounded-full border ${statusBadgeClass}`}>
+                      {statusLabel}
                     </span>
+                  </div>
+                </div>
 
+                {/* Baris Tengah: Jenis Layanan, Nama Siswa/Kelas, Topik */}
+                <div className="space-y-1">
+                  <h3 className="text-sm sm:text-base font-black text-[#0b1c30] group-hover:text-[#00685f] transition-colors">
+                    {srv.serviceType}
+                  </h3>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#3d4947]">
+                    <span className="inline-flex items-center gap-1.5 font-bold text-[#0b1c30]">
+                      <Users className="w-3.5 h-3.5 text-[#00685f]" />
+                      <span>{targetDisplay}</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 font-semibold text-[#3d4947]">
+                      <User className="w-3.5 h-3.5 text-gray-400" />
+                      <span>{counselorNameDisplay}</span>
+                    </span>
+                  </div>
+                  {srv.problem && (
+                    <p className="text-xs text-[#3d4947] line-clamp-1 pt-0.5">
+                      <span className="font-bold text-[#0b1c30]">Topik:</span> {srv.problem}
+                    </p>
+                  )}
+                </div>
+
+                {/* Baris Bawah: Tombol Cepat & [Lihat Detail] */}
+                <div
+                  className="pt-2.5 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex flex-wrap items-center gap-1.5">
                     {!linkedEval && onEvaluateService && (
                       <button
                         type="button"
                         onClick={() => onEvaluateService(srv)}
-                        className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
-                        title="Isi Form Evaluasi Layanan sekarang"
+                        className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-xl text-[11px] font-extrabold flex items-center gap-1 cursor-pointer"
                       >
-                        <Sparkles className="w-3.5 h-3.5" />
-                        <span>Nilai Layanan</span>
+                        <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Nilai</span>
                       </button>
                     )}
 
@@ -688,84 +799,34 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                       <button
                         type="button"
                         onClick={() => openFixClassifyModal(srv)}
-                        className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
-                        title="Perbaiki klasifikasi masalah lama ke format standar tanpa menghapus data"
+                        className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-xl text-[11px] font-extrabold flex items-center gap-1 cursor-pointer"
                       >
-                        <Tag className="w-3.5 h-3.5" />
-                        <span>Perbaiki Klasifikasi</span>
+                        <Tag className="w-3 h-3" />
+                        <span>Klasifikasi</span>
                       </button>
                     )}
 
-                    {/* Tombol [Lihat] */}
-                    <button
-                      type="button"
-                      onClick={() => setDetailService(srv)}
-                      className="px-2.5 py-1.5 bg-gray-50 hover:bg-teal-50 text-[#00685f] border border-gray-200 hover:border-teal-300 rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
-                      title="Lihat rincian lengkap sesi ini"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      <span>Lihat</span>
-                    </button>
-
-                    {/* Tombol [Edit] */}
                     {onEditService && (
                       <button
                         type="button"
                         onClick={() => onEditService(srv)}
-                        className="px-2.5 py-1.5 bg-gray-50 hover:bg-amber-50 text-amber-800 border border-gray-200 hover:border-amber-300 rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
-                        title="Edit sesi layanan ini"
+                        className="px-2.5 py-1.5 bg-gray-50 hover:bg-gray-100 text-[#0b1c30] border border-gray-200 rounded-xl text-[11px] font-bold flex items-center gap-1 cursor-pointer"
                       >
-                        <Edit2 className="w-3.5 h-3.5" />
+                        <Edit2 className="w-3 h-3 text-[#00685f]" />
                         <span>Edit</span>
                       </button>
                     )}
-
-                    {/* Tombol Lihat PDF di Drive jika ada */}
-                    {srv.pdfUrl && (
-                      <a
-                        href={srv.pdfUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
-                        title="Buka dokumen PDF di Google Drive"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                        <span className="hidden sm:inline">Drive</span>
-                      </a>
-                    )}
-
-                    {/* Tombol [PDF] / [Download Ulang] */}
-                    <button
-                      type="button"
-                      onClick={() => generateServicePDF(srv)}
-                      className="px-2.5 py-1.5 bg-[#e6f4f1] hover:bg-[#d0ebe6] text-[#00685f] hover:text-[#005049] border border-[#00685f]/30 rounded-xl text-xs font-black flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
-                      title={srv.pdfUrl ? "Download ulang PDF bukti layanan ini" : "Cetak lembar bukti laporan sesi ini ke format PDF resmi"}
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      <span>{srv.pdfUrl ? 'Download Ulang' : 'PDF'}</span>
-                    </button>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setDetailService(srv)}
+                    className="px-3.5 py-1.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Lihat Detail</span>
+                  </button>
                 </div>
-
-
-                {/* Deskripsi & Cerita Singkat */}
-                <div
-                  onClick={() => setDetailService(srv)}
-                  className="cursor-pointer bg-gray-50/70 p-3 rounded-xl border border-gray-100 text-xs text-[#3d4947] line-clamp-2 leading-relaxed"
-                >
-                  <span className="font-bold text-[#0b1c30]">Rincian Kegiatan: </span>
-                  {srv.description || srv.output || 'Tidak ada deskripsi tambahan.'}
-                </div>
-
-                {/* Footer Kartu: Tindak Lanjut */}
-                {srv.followUp && (
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Tindak Lanjut:</span>
-                    <span className="text-xs font-bold text-indigo-900 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">
-                      {srv.followUp}
-                    </span>
-                  </div>
-                )}
               </div>
             );
           })}
@@ -773,153 +834,41 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL DETAIL LAYANAN LENGKAP                                              */}
+      {/* MODAL DETAIL LAYANAN LENGKAP (Tanggal, Tujuan, Materi, Hasil, RTL, Aksi)  */}
       {/* ========================================================================= */}
-      {detailService && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-7 border border-[#bcc9c6]/40 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
-            {/* Modal Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 bg-teal-50 text-[#00685f] rounded-2xl">
-                  <HeartHandshake className="w-6 h-6" />
-                </div>
-                <div>
-                  <span className="text-[10px] font-black uppercase text-[#00685f]">Detail Rekam Layanan</span>
-                  <h3 className="text-lg font-black text-[#0b1c30]">{detailService.serviceType}</h3>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setDetailService(null)}
-                className="p-2 text-gray-400 hover:text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-full cursor-pointer transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Content Details */}
-            <div className="space-y-4 text-xs sm:text-sm">
-              {/* Siswa Terlibat */}
-              <div className="p-3.5 bg-gray-50 rounded-2xl border border-gray-200 space-y-1.5">
-                <span className="text-[10px] uppercase font-black text-gray-500">Peserta Didik:</span>
-                <div className="flex flex-wrap gap-2">
-                  {(detailService.students || []).map((st) => (
-                    <span
-                      key={st.id}
-                      className="px-2.5 py-1 bg-white border border-gray-200 text-[#0b1c30] rounded-xl font-bold shadow-2xs text-xs"
-                    >
-                      👤 {st.name} (Kelas {st.class || '-'})
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              {/* Tanggal & Waktu & Status */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
-                  <span className="text-[10px] uppercase font-bold text-gray-500 block">Tanggal:</span>
-                  <span className="font-black text-[#0b1c30]">{formatCardDate(detailService.date)}</span>
-                </div>
-                <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
-                  <span className="text-[10px] uppercase font-bold text-gray-500 block">Waktu Sesi:</span>
-                  <span className="font-black text-[#0b1c30]">{formatCardTime(detailService.startTime)}</span>
-                </div>
-                <div className="p-3 bg-gray-50 rounded-xl border border-gray-200 col-span-2 sm:col-span-1">
-                  <span className="text-[10px] uppercase font-bold text-gray-500 block">Status:</span>
-                  <span className="font-black text-[#00685f]">{detailService.status || 'Selesai'}</span>
-                </div>
-              </div>
-
-              {/* Topik / Masalah */}
-              <div className="p-3.5 bg-gray-50 rounded-2xl border border-gray-200 space-y-1">
-                <span className="text-[10px] uppercase font-black text-gray-500">Topik / Permasalahan:</span>
-                <p className="font-black text-sm text-[#0b1c30]">{detailService.problem || '-'}</p>
-              </div>
-
-              {/* Cerita / Rincian Layanan */}
-              <div className="p-3.5 bg-gray-50 rounded-2xl border border-gray-200 space-y-1">
-                <span className="text-[10px] uppercase font-black text-gray-500">Cerita / Deskripsi Pelaksanaan:</span>
-                <p className="text-gray-800 leading-relaxed whitespace-pre-line font-medium">
-                  {detailService.description || detailService.output || 'Tidak ada deskripsi rinci.'}
-                </p>
-              </div>
-
-              {/* Tindak Lanjut */}
-              <div className="p-3.5 bg-indigo-50/70 rounded-2xl border border-indigo-200 space-y-1">
-                <span className="text-[10px] uppercase font-black text-indigo-900">Rencana Tindak Lanjut:</span>
-                <p className="text-indigo-950 font-bold leading-relaxed">
-                  {detailService.followUp || 'Pemantauan berkala oleh Guru BK.'}
-                </p>
-              </div>
-
-              {/* Rekomendasi Cerdas Meta AI (Kontekstual Blok B + Blok C) */}
-              <div className="p-3.5 bg-gradient-to-br from-indigo-50 via-purple-50 to-teal-50 rounded-2xl border border-indigo-200 space-y-1.5">
-                <div className="flex items-center gap-1.5 text-indigo-950">
-                  <Sparkles className="w-4 h-4 text-indigo-600" />
-                  <span className="text-xs font-black">Rekomendasi Cerdas Meta AI ✨</span>
-                </div>
-                <p className="text-xs text-indigo-900 font-semibold leading-relaxed">
-                  {getDetailContextualAiText(detailService)}
-                </p>
-              </div>
-            </div>
-
-            {/* Modal Actions */}
-            <div className="flex items-center justify-between pt-3 border-t border-gray-100 gap-3 flex-wrap">
-              <div className="flex items-center gap-2 flex-wrap">
-                {detailService.pdfUrl && (
-                  <a
-                    href={detailService.pdfUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-4 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer shadow-sm"
-                    title="Buka dokumen PDF di Google Drive"
-                  >
-                    <ExternalLink className="w-4 h-4 text-emerald-700" />
-                    <span>Lihat PDF di Drive</span>
-                  </a>
-                )}
-
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const res = await generateServicePDF(detailService);
-                    if (res?.success && res.pdfUrl) {
-                      setDetailService(prev => prev ? { ...prev, pdfUrl: res.pdfUrl } : null);
-                    }
-                  }}
-                  className="px-4 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer shadow-md active:scale-97"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>{detailService.pdfUrl ? 'Download Ulang' : 'Generate Layanan'}</span>
-                </button>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setDetailService(null)}
-                className="px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold cursor-pointer"
-              >
-                Tutup
-              </button>
-            </div>
-
-          </div>
-        </div>
-      )}
+      <LayananDetailModal
+        service={detailService}
+        isOpen={Boolean(detailService)}
+        onClose={() => setDetailService(null)}
+        onEdit={(srv) => {
+          if (onEditService) onEditService(srv);
+        }}
+        onDelete={(id) => {
+          if (onDeleteService) {
+            onDeleteService(id, true);
+          }
+          setDetailService(null);
+        }}
+        onUpdateStatus={
+          onUpdateServiceStatus
+            ? (serviceId, nextStatus) => {
+                onUpdateServiceStatus(serviceId, nextStatus);
+                setDetailService((prev) => (prev ? { ...prev, status: nextStatus } : null));
+              }
+            : undefined
+        }
+      />
 
       {/* ========================================================================= */}
       {/* MODAL DOWNLOAD PDF PER SISWA                                              */}
       {/* ========================================================================= */}
       {showStudentPdfModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-7 border border-[#bcc9c6]/40 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
-            {/* Modal Header */}
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 border border-[#bcc9c6]/40 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-gray-100">
               <div className="flex items-center gap-3">
-                <div className="p-2.5 bg-blue-50 text-blue-700 rounded-2xl">
-                  <UserCheck className="w-6 h-6" />
+                <div className="p-2.5 bg-blue-50 text-blue-700 rounded-xl">
+                  <UserCheck className="w-5 h-5" />
                 </div>
                 <div>
                   <span className="text-[10px] font-black uppercase text-blue-700">Export Laporan Terpadu</span>
@@ -935,24 +884,20 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
               </button>
             </div>
 
-            {/* Pilih Siswa */}
             <div className="space-y-3">
               <div>
-                <label className="text-xs font-bold text-gray-700 block mb-1">
-                  1. Pilih Nama Siswa:
-                </label>
+                <label className="text-xs font-bold text-gray-700 block mb-1">1. Pilih Nama Siswa:</label>
                 <div className="relative">
                   <Search className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
                     type="text"
                     value={studentSearchForPdf}
                     onChange={(e) => setStudentSearchForPdf(e.target.value)}
-                    placeholder="Ketik nama siswa (misal: Ahmad Nur Wahid)..."
+                    placeholder="Ketik nama siswa..."
                     className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-[#0b1c30] focus:outline-none focus:ring-2 focus:ring-[#00685f] focus:bg-white"
                   />
                 </div>
 
-                {/* List Pilihan Siswa */}
                 <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto p-1">
                   {filteredStudentsForPdf.map((st) => {
                     const isSelected = selectedStudentForPdf?.id === st.id;
@@ -980,9 +925,11 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                             Kelas {st.class} • {stServicesCount} Sesi Layanan
                           </p>
                         </div>
-                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-md shrink-0 ${
-                          isSelected ? 'bg-blue-600 text-white' : 'bg-white border text-gray-600'
-                        }`}>
+                        <span
+                          className={`text-[10px] font-black px-2 py-0.5 rounded-md shrink-0 ${
+                            isSelected ? 'bg-blue-600 text-white' : 'bg-white border text-gray-600'
+                          }`}
+                        >
                           {isSelected ? '✓ Terpilih' : 'Pilih'}
                         </span>
                       </button>
@@ -991,48 +938,20 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                 </div>
               </div>
 
-              {/* Profil Siswa Terpilih */}
-              {selectedStudentForPdf && (
-                <div className="p-4 bg-teal-50/70 rounded-2xl border border-teal-200 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-bold text-teal-800 uppercase tracking-wider">Siswa Terpilih:</p>
-                      <h4 className="text-base font-black text-teal-950">{selectedStudentForPdf.name}</h4>
-                      <p className="text-xs text-teal-800">
-                        Kelas {selectedStudentForPdf.class} • NIS: {selectedStudentForPdf.nis || '-'}
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-[10px] uppercase font-bold text-teal-800 block">Riwayat Layanan:</span>
-                      <span className="text-sm font-black text-[#00685f]">
-                        {
-                          services.filter((srv) =>
-                            (srv.students || []).some(
-                              (s) => s.id === selectedStudentForPdf.id || s.name.toLowerCase() === selectedStudentForPdf.name.toLowerCase()
-                            )
-                          ).length
-                        } Sesi Terdata
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 2. Ringkasan dengan Meta AI */}
               {selectedStudentForPdf && (
                 <div className="space-y-2 pt-2 border-t border-gray-100">
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-black text-[#0b1c30] flex items-center gap-1.5">
                       <Sparkles className="w-4 h-4 text-indigo-600" />
-                      <span>Ringkasan Perkembangan (Meta AI ✨):</span>
+                      <span>Ringkasan Perkembangan:</span>
                     </label>
                     <button
                       type="button"
                       onClick={() => handleGenerateStudentAiSummary(selectedStudentForPdf)}
                       disabled={isGeneratingAiSummary}
-                      className="px-3 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold cursor-pointer transition-colors"
+                      className="px-3 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold cursor-pointer"
                     >
-                      {isGeneratingAiSummary ? 'Memproses...' : '✨ Buatkan Ringkasan'}
+                      {isGeneratingAiSummary ? 'Memproses...' : 'Perbarui Ringkasan'}
                     </button>
                   </div>
 
@@ -1040,17 +959,13 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                     rows={3}
                     value={aiStudentSummary}
                     onChange={(e) => setAiStudentSummary(e.target.value)}
-                    placeholder="Klik tombol Buatkan Ringkasan untuk membuat paragraf evaluasi otomatis oleh Meta AI..."
-                    className="w-full p-3 bg-gray-50 border border-gray-200 focus:border-indigo-500 rounded-xl text-xs font-medium text-[#0b1c30] focus:bg-white focus:outline-none leading-relaxed"
+                    placeholder="Ringkasan perkembangan siswa..."
+                    className="w-full p-3 bg-gray-50 border border-gray-200 focus:border-[#00685f] rounded-xl text-xs font-medium text-[#0b1c30] focus:bg-white focus:outline-none leading-relaxed"
                   />
-                  <p className="text-[10px] text-gray-400">
-                    *Ringkasan ini akan otomatis dicetak pada kotak pengantar laporan resmi PDF siswa.
-                  </p>
                 </div>
               )}
             </div>
 
-            {/* Modal Bottom Buttons */}
             <div className="flex items-center justify-between pt-3 border-t border-gray-100 gap-3">
               <button
                 type="button"
@@ -1077,11 +992,11 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
                     student: selectedStudentForPdf,
                     services: stServices,
                     aiSummary: aiStudentSummary,
-                    counselorOverride: activeCounselor
+                    counselorOverride: activeCounselor,
                   });
                   setShowStudentPdfModal(false);
                 }}
-                className="px-6 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 cursor-pointer shadow-md"
+                className="px-5 py-2.5 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 cursor-pointer shadow-sm"
               >
                 <Download className="w-4 h-4 text-white" />
                 <span>Unduh PDF Siswa Ini</span>
@@ -1096,18 +1011,14 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
       {/* ========================================================================= */}
       {fixClassifyTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-6 border border-[#bcc9c6]/40 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-5 sm:p-6 border border-[#bcc9c6]/40 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-gray-100">
               <div>
                 <span className="text-[10px] font-black uppercase tracking-wider text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md">
                   Migrasi Klasifikasi Terstandar
                 </span>
-                <h3 className="text-base sm:text-lg font-black text-[#0b1c30] mt-1">
-                  Perbaiki Klasifikasi Layanan
-                </h3>
-                <p className="text-xs text-gray-500">
-                  {fixClassifyTarget.serviceType} · Data lama tetap tersimpan utuh.
-                </p>
+                <h3 className="text-base sm:text-lg font-black text-[#0b1c30] mt-1">Perbaiki Klasifikasi Layanan</h3>
+                <p className="text-xs text-gray-500">{fixClassifyTarget.serviceType} · Data lama tetap tersimpan utuh.</p>
               </div>
               <button
                 type="button"
@@ -1247,7 +1158,6 @@ export const RiwayatLayananView: React.FC<RiwayatLayananViewProps> = ({
           </div>
         </div>
       )}
-
     </div>
   );
 };

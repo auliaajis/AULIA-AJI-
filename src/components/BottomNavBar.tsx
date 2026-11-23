@@ -7,7 +7,6 @@ import {
   FileBarChart, 
   Grid, 
   CheckCircle2, 
-  AlertTriangle, 
   HeartHandshake, 
   MapPin, 
   Users2, 
@@ -28,10 +27,7 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
 }) => {
   const [showQuickModal, setShowQuickModal] = useState(false);
 
-  // 3 Quick Actions as strictly requested:
-  // 1. Absen Kelas: "Presensi harian: Hadir, Sakit, Izin, Alpa"
-  // 2. Catat Kasus: "Masalah disiplin & tata tertib"
-  // 3. Input Layanan: "Semua layanan BK: Konseling, Bimbingan, Home Visit, Rapat Kasus, dll"
+  // Quick Actions Guru BK (tombol Catat Kasus disembunyikan)
   const quickActions = [
     {
       id: 'absensi',
@@ -40,14 +36,6 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
       icon: <CheckCircle2 className="w-5 h-5 text-teal-600" />,
       bg: 'bg-teal-50 border-teal-200 hover:bg-teal-100 text-teal-950',
       badge: 'Harian'
-    },
-    {
-      id: 'pelanggaran',
-      title: 'Catat Kasus',
-      subtitle: 'Masalah disiplin & tata tertib',
-      icon: <AlertTriangle className="w-5 h-5 text-rose-600" />,
-      bg: 'bg-rose-50 border-rose-200 hover:bg-rose-100 text-rose-950',
-      badge: 'Kasus'
     },
     {
       id: 'tambah-layanan',
@@ -67,11 +55,38 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
   const isNavActive = (key: string) => {
     if (key === 'dashboard') return currentView === 'dashboard';
     if (key === 'data-siswa') return currentView === 'data-siswa';
-    if (key === 'laporan') {
-      return ['laporan-rekap', 'laporan', 'jurnal-harian', 'jurnal', 'studio-pdf'].includes(currentView);
+    if (key === 'layanan') {
+      return [
+        'layanan-bk',
+        'layanan',
+        'riwayat-layanan',
+        'riwayat',
+        'riwayat-konseling',
+        'evaluasi-program',
+        'evaluasi',
+      ].includes(currentView);
     }
     if (key === 'lainnya') {
-      return ['lainnya', 'pengaturan', 'google-sync', 'pilar-bk', 'asesmen-bk', 'rpl', 'prota', 'apresiasi'].includes(currentView);
+      return [
+        'lainnya',
+        'menu-lainnya',
+        'pengaturan',
+        'google-sync',
+        'backup-restore',
+        'laporan-rekap',
+        'laporan',
+        'jurnal-harian',
+        'jurnal',
+        'studio-pdf',
+        'pilar-bk',
+        'asesmen-bk',
+        'rpl',
+        'prota',
+        'apresiasi',
+        'si-becik',
+        'panggilan-ortu',
+        'surat-panggilan',
+      ].includes(currentView);
     }
     return false;
   };
@@ -234,19 +249,19 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
             </span>
           </div>
 
-          {/* 4. [Laporan] */}
+          {/* 4. [Layanan] */}
           <button
             type="button"
-            onClick={() => onNavigate('laporan-rekap')}
+            onClick={() => onNavigate('layanan-bk')}
             className={`flex flex-col items-center justify-center flex-1 py-1.5 transition-all cursor-pointer select-none active:scale-95 ${
-              isNavActive('laporan') ? 'text-[#00685f]' : 'text-gray-500 hover:text-gray-800'
+              isNavActive('layanan') ? 'text-[#00685f]' : 'text-gray-500 hover:text-gray-800'
             }`}
           >
-            <div className={`p-1.5 rounded-xl transition-colors ${isNavActive('laporan') ? 'bg-[#00685f]/10 text-[#00685f]' : ''}`}>
-              <FileBarChart className={`w-5 h-5 sm:w-6 sm:h-6 ${isNavActive('laporan') ? 'stroke-[2.5]' : ''}`} />
+            <div className={`p-1.5 rounded-xl transition-colors ${isNavActive('layanan') ? 'bg-[#00685f]/10 text-[#00685f]' : ''}`}>
+              <HeartHandshake className={`w-5 h-5 sm:w-6 sm:h-6 ${isNavActive('layanan') ? 'stroke-[2.5]' : ''}`} />
             </div>
-            <span className={`text-[11px] sm:text-xs mt-0.5 ${isNavActive('laporan') ? 'font-extrabold text-[#00685f]' : 'font-semibold'}`}>
-              Laporan
+            <span className={`text-[11px] sm:text-xs mt-0.5 ${isNavActive('layanan') ? 'font-extrabold text-[#00685f]' : 'font-semibold'}`}>
+              Layanan
             </span>
           </button>
 

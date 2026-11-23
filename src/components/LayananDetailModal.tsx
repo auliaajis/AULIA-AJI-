@@ -302,20 +302,33 @@ export default function LayananDetailModal({
                 </div>
               </div>
 
-              {/* Pokok Bahasan / Isu Utama */}
-              <div>
-                <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0b1c30] mb-1">
-                  Topik / Pokok Bahasan Layanan
-                </label>
-                <div className="p-3.5 bg-white border border-[#bcc9c6]/40 rounded-xl text-xs sm:text-sm font-semibold text-[#0b1c30] shadow-2xs">
-                  {service.problem || '-'}
+              {/* Tujuan & Materi/Topik Layanan */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                <div className="bg-[#f8faf9] border border-[#bcc9c6]/40 rounded-xl p-3.5">
+                  <label className="block text-[11px] font-extrabold uppercase tracking-wider text-[#00685f] mb-1">
+                    Tujuan Layanan
+                  </label>
+                  <p className="text-xs sm:text-sm font-bold text-[#0b1c30] leading-relaxed">
+                    {service.specificDetails?.blokB?.tujuanLayanan ||
+                      service.focusIssue ||
+                      'Pemahaman, pengentasan masalah & pengembangan diri peserta didik'}
+                  </p>
+                </div>
+
+                <div className="bg-[#f8faf9] border border-[#bcc9c6]/40 rounded-xl p-3.5">
+                  <label className="block text-[11px] font-extrabold uppercase tracking-wider text-[#0b1c30] mb-1">
+                    Materi / Topik / Pokok Bahasan
+                  </label>
+                  <p className="text-xs sm:text-sm font-bold text-[#0b1c30] leading-relaxed">
+                    {service.specificDetails?.klasikal?.topikKlasikal || service.problem || '-'}
+                  </p>
                 </div>
               </div>
 
               {/* Uraian Proses & Dinamika */}
               <div>
                 <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0b1c30] mb-1">
-                  Uraian Proses & Dinamika Pelaksanaan
+                  Uraian Proses &amp; Dinamika Pelaksanaan
                 </label>
                 <div className="p-3.5 bg-white border border-[#bcc9c6]/40 rounded-xl text-xs sm:text-sm text-[#3d4947] whitespace-pre-wrap leading-relaxed shadow-2xs">
                   {service.description || '-'}
@@ -599,13 +612,14 @@ export default function LayananDetailModal({
             )}
 
             <button
+              type="button"
               onClick={() => {
                 onClose();
                 onEdit(service);
               }}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-[#0b1c30] hover:bg-gray-100 border border-[#bcc9c6]/50 transition"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-[#0b1c30] hover:bg-gray-100 border border-[#bcc9c6]/50 transition cursor-pointer"
             >
-              <Edit className="w-3.5 h-3.5 text-[#00685f]" /> Edit Sesi
+              <Edit className="w-3.5 h-3.5 text-[#00685f]" /> Edit
             </button>
           </div>
 
@@ -657,8 +671,8 @@ export default function LayananDetailModal({
                 disabled={isExporting}
                 className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#00685f] text-white hover:bg-[#005049] rounded-xl text-xs font-bold transition shadow-2xs cursor-pointer active:scale-97"
               >
-                <FileText className="w-3.5 h-3.5" />
-                <span>{isExporting ? 'Memproses...' : 'Generate Layanan'}</span>
+                <Printer className="w-3.5 h-3.5" />
+                <span>{isExporting ? 'Memproses...' : 'Cetak / Export PDF'}</span>
               </button>
             )}
 

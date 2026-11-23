@@ -78,6 +78,13 @@ export interface ViolationRecord {
   schoolId?: string;
   schoolName?: string;
   counselorId?: string;
+  nis?: string;
+  reportedVia?: string;
+  source?: string;
+  reporterRole?: string;
+  migratedAt?: string | null;
+  createdAt?: string | number;
+  updatedAt?: string | number;
   isLegacyUnmigrated?: boolean;
   isDeleted?: boolean;
   deletedAt?: string;

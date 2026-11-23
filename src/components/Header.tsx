@@ -534,8 +534,8 @@ export default function Header({
                             </span>
                           </div>
 
-                          {/* 3 Quick Action Buttons: Profil, Catat Kasus, Konseling */}
-                          <div className="grid grid-cols-3 gap-1.5 pt-1 border-t border-gray-200/60">
+                          {/* 2 Quick Action Buttons: Profil, Konseling (Catat Kasus disembunyikan) */}
+                          <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-gray-200/60">
                             <button
                               type="button"
                               onClick={() => {
@@ -545,20 +545,6 @@ export default function Header({
                               className="py-1 px-1.5 bg-white hover:bg-teal-50 text-[#00685f] text-[10px] font-bold rounded-lg border border-teal-200 text-center cursor-pointer transition-colors shadow-2xs"
                             >
                               👤 Profil
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setIsSearchOpen(false);
-                                if (onNavigateToForm) {
-                                  onNavigateToForm('pelanggaran', st.id);
-                                } else if (onNavigateToTab) {
-                                  onNavigateToTab('pelanggaran', st.id);
-                                }
-                              }}
-                              className="py-1 px-1.5 bg-white hover:bg-rose-50 text-rose-700 text-[10px] font-bold rounded-lg border border-rose-200 text-center cursor-pointer transition-colors shadow-2xs"
-                            >
-                              🚨 Catat Kasus
                             </button>
                             <button
                               type="button"
@@ -858,27 +844,6 @@ export default function Header({
                         <span className="text-[9px] text-teal-700 font-bold bg-teal-50 px-1.5 py-0.5 rounded">Harian</span>
                       </div>
                       <p className="text-[10px] text-gray-500 leading-tight mt-0.5">Presensi harian: Hadir, Sakit, Izin, Alpa</p>
-                    </div>
-                  </button>
-
-                  {/* 2. Catat Kasus */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowQuickActionMenu(false);
-                      if (onNavigateToTab) onNavigateToTab('pelanggaran');
-                    }}
-                    className="w-full p-2.5 rounded-xl text-left transition-all hover:bg-rose-50/80 border border-transparent hover:border-rose-200/80 group flex items-start gap-3 cursor-pointer"
-                  >
-                    <div className="p-2 bg-rose-100 text-rose-700 rounded-lg shrink-0 group-hover:scale-105 transition-transform">
-                      <AlertTriangle className="w-4 h-4" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-extrabold text-[#0b1c30] group-hover:text-rose-900">Catat Kasus</span>
-                        <span className="text-[9px] text-rose-700 font-bold bg-rose-50 px-1.5 py-0.5 rounded">Kasus</span>
-                      </div>
-                      <p className="text-[10px] text-gray-500 leading-tight mt-0.5">Masalah disiplin & tata tertib</p>
                     </div>
                   </button>
 
