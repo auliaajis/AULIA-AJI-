@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { StickyNote, Counselor } from '../types';
-import { saveBulkToFirestore, loadSchoolData, saveSchoolData, softDeleteFromFirestore } from '../utils/firestoreSync';
+import { getCloudCollectionData, setCloudCollectionData, subscribeCloudCollection, saveToFirestore, softDeleteFromFirestore } from '../utils/firestoreSync';
 import { getActiveSchoolId } from '../utils/schoolConfig';
 import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
 import { showToast } from '../utils/toast';
@@ -52,52 +52,33 @@ interface StickyNotesWidgetProps {
 
 export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCounselor }) => {
   const counselorId = activeCounselor?.id || 'default';
-  const schoolId = getActiveSchoolId();
-  const storageKey = `bk_sticky_notes_${counselorId}`;
+  const schoolId = activeCounselor?.schoolId || getActiveSchoolId();
 
-  const isInitialMountRef = useRef(true);
-
-  const loadNotes = (): StickyNote[] => {
+  const filterNotes = (raw: any[]): StickyNote[] => {
     const deletedSet = new Set(getDeletedIds());
-    const raw = loadSchoolData<StickyNote[]>(storageKey, [], schoolId);
-    if (Array.isArray(raw) && raw.length > 0) {
-      return raw.filter(
-        (n: any) =>
-          n &&
-          isValidDeleteId(n.id) &&
-          n.id !== 'note-1' &&
-          n.id !== 'note-2' &&
-          n.isDeleted !== true &&
-          !deletedSet.has(String(n.id))
-      );
-    }
-    // Fallback check for default/legacy notes
-    const legacy = localStorage.getItem('bk_sticky_notes');
-    if (legacy && (counselorId === 'default' || counselorId === 'c1' || counselorId === 'admin')) {
-      try {
-        const parsed = JSON.parse(legacy);
-        if (Array.isArray(parsed)) {
-          return parsed.filter(
-            (n: any) =>
-              n &&
-              isValidDeleteId(n.id) &&
-              n.id !== 'note-1' &&
-              n.id !== 'note-2' &&
-              n.isDeleted !== true &&
-              !deletedSet.has(String(n.id))
-          );
-        }
-      } catch (e) {}
-    }
-    return [];
+    return (Array.isArray(raw) ? raw : []).filter(
+      (n: any) =>
+        n &&
+        isValidDeleteId(n.id) &&
+        n.id !== 'note-1' &&
+        n.id !== 'note-2' &&
+        n.isDeleted !== true &&
+        !deletedSet.has(String(n.id)) &&
+        (!n.counselorId || n.counselorId === counselorId || counselorId === 'default' || counselorId === 'c1' || counselorId === 'admin')
+    );
   };
 
-  const [notes, setNotes] = useState<StickyNote[]>(() => loadNotes());
+  const [notes, setNotes] = useState<StickyNote[]>(() =>
+    filterNotes(getCloudCollectionData<StickyNote>('bk_sticky_notes', schoolId))
+  );
   const [pendingDeleteNote, setPendingDeleteNote] = useState<StickyNote | null>(null);
 
-  // Reload notes when counselor changes
   useEffect(() => {
-    setNotes(loadNotes());
+    setNotes(filterNotes(getCloudCollectionData<StickyNote>('bk_sticky_notes', schoolId)));
+    const unsub = subscribeCloudCollection<StickyNote>('bk_sticky_notes', (list) => {
+      setNotes(filterNotes(list));
+    }, schoolId);
+    return () => unsub();
   }, [counselorId, schoolId]);
 
   const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
@@ -112,36 +93,6 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
   const [contentInput, setContentInput] = useState('');
   const [colorInput, setColorInput] = useState<StickyNote['color']>('teal');
   const [isPinnedInput, setIsPinnedInput] = useState(false);
-
-  useEffect(() => {
-    saveSchoolData(storageKey, notes, schoolId);
-    if (isInitialMountRef.current) {
-      isInitialMountRef.current = false;
-      return;
-    }
-    if (notes.length > 0) {
-      saveBulkToFirestore(storageKey, notes, schoolId);
-    }
-  }, [notes, storageKey, schoolId]);
-
-  useEffect(() => {
-    const handleSync = (e: any) => {
-      const key = e.detail?.key;
-      if (!key || key === storageKey || key === 'bk_sticky_notes' || key === 'all') {
-        const updated = loadNotes();
-        setNotes(updated);
-      }
-    };
-
-    window.addEventListener('bk_realtime_sync', handleSync);
-    window.addEventListener('storage', handleSync);
-    window.addEventListener('bk_school_changed', handleSync);
-    return () => {
-      window.removeEventListener('bk_realtime_sync', handleSync);
-      window.removeEventListener('storage', handleSync);
-      window.removeEventListener('bk_school_changed', handleSync);
-    };
-  }, [storageKey, counselorId, schoolId]);
 
   useEffect(() => {
     localStorage.setItem('bk_sticky_notes_collapsed', String(isCollapsed));
@@ -166,36 +117,47 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
     setIsAdding(true);
   };
 
+  const syncAllNotesCache = (updatedItem: StickyNote, isNew = false) => {
+    const all = getCloudCollectionData<StickyNote>('bk_sticky_notes', schoolId);
+    const nextAll = isNew
+      ? [updatedItem, ...all.filter((n) => n.id !== updatedItem.id)]
+      : all.map((n) => (n.id === updatedItem.id ? updatedItem : n));
+    setCloudCollectionData('bk_sticky_notes', nextAll, schoolId);
+  };
+
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     if (!contentInput.trim()) return;
 
     if (editingNoteId) {
-      setNotes((prev) =>
-        prev.map((n) =>
-          n.id === editingNoteId
-            ? {
-                ...n,
-                title: titleInput.trim() || undefined,
-                content: contentInput.trim(),
-                color: colorInput,
-                isPinned: isPinnedInput,
-                updatedAt: new Date().toISOString(),
-              }
-            : n
-        )
-      );
+      const existing = notes.find((n) => n.id === editingNoteId);
+      if (existing) {
+        const updated: StickyNote = {
+          ...existing,
+          title: titleInput.trim() || undefined,
+          content: contentInput.trim(),
+          color: colorInput,
+          isPinned: isPinnedInput,
+          updatedAt: new Date().toISOString(),
+        };
+        setNotes((prev) => prev.map((n) => (n.id === editingNoteId ? updated : n)));
+        syncAllNotesCache(updated, false);
+        void saveToFirestore('bk_sticky_notes', updated, schoolId);
+      }
     } else {
-      const newNote: StickyNote = {
+      const newNote: StickyNote & { counselorId?: string } = {
         id: generateUniqueId('note'),
         title: titleInput.trim() || undefined,
         content: contentInput.trim(),
         color: colorInput,
         isPinned: isPinnedInput,
         isCompleted: false,
+        counselorId,
         createdAt: new Date().toISOString(),
       };
       setNotes((prev) => [newNote, ...prev]);
+      syncAllNotesCache(newNote, true);
+      void saveToFirestore('bk_sticky_notes', newNote, schoolId);
     }
 
     setIsAdding(false);
@@ -203,15 +165,21 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
   };
 
   const handleTogglePin = (id: string) => {
-    setNotes((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, isPinned: !n.isPinned } : n))
-    );
+    const target = notes.find((n) => n.id === id);
+    if (!target) return;
+    const updated = { ...target, isPinned: !target.isPinned, updatedAt: new Date().toISOString() };
+    setNotes((prev) => prev.map((n) => (n.id === id ? updated : n)));
+    syncAllNotesCache(updated, false);
+    void saveToFirestore('bk_sticky_notes', updated, schoolId);
   };
 
   const handleToggleComplete = (id: string) => {
-    setNotes((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, isCompleted: !n.isCompleted } : n))
-    );
+    const target = notes.find((n) => n.id === id);
+    if (!target) return;
+    const updated = { ...target, isCompleted: !target.isCompleted, updatedAt: new Date().toISOString() };
+    setNotes((prev) => prev.map((n) => (n.id === id ? updated : n)));
+    syncAllNotesCache(updated, false);
+    void saveToFirestore('bk_sticky_notes', updated, schoolId);
   };
 
   const handleDelete = (note: StickyNote) => {
@@ -230,12 +198,11 @@ export const StickyNotesWidget: React.FC<StickyNotesWidgetProps> = ({ activeCoun
     }
     const res = safeFilterSingleDelete(notes, note.id);
     if (!res.ok) return;
-    setNotes((prev) => {
-      const next = safeFilterSingleDelete(prev, note.id);
-      return next.ok ? next.next : prev;
-    });
+    setNotes(res.next);
+    const all = getCloudCollectionData<StickyNote>('bk_sticky_notes', schoolId);
+    setCloudCollectionData('bk_sticky_notes', all.filter((n) => n.id !== note.id), schoolId);
     registerDeletedId(note.id);
-    await softDeleteFromFirestore(storageKey, note, {
+    await softDeleteFromFirestore('bk_sticky_notes', note, {
       deletedBy: activeCounselor?.name || 'Guru BK',
       deletedReason: 'Dihapus dari Catatan Cepat BK',
       entityType: 'Catatan Cepat',

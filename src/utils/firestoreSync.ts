@@ -13,7 +13,8 @@ import {
   where,
   orderBy,
   updateDoc,
-  serverTimestamp
+  serverTimestamp,
+  getDocsFromServer
 } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
@@ -82,13 +83,13 @@ export function getCurrentUserSchoolIdSync(): string {
   return sanitizeSchoolId(getActiveSchoolId() || 'sch_20320123');
 }
 
-// Mapping between LocalStorage keys and Firestore Collection names
+// Mapping between internal cache keys and EXISTING Firestore Collection names (never create siswa/pelanggaran/layanan/agenda)
 export const SYNC_MAP: Record<string, string> = {
   'bk_students': 'students',
   'bk_violations': 'violations',
-  'bk_cases': 'cases',
+  'bk_cases': 'violations',
   'bk_services': 'services',
-  'bk_counseling': 'counseling',
+  'bk_counseling': 'services',
   'bk_daily_journals': 'daily_journals',
   'bk_home_visits': 'home_visits',
   'bk_parent_summons': 'parent_summons',
@@ -101,7 +102,7 @@ export const SYNC_MAP: Record<string, string> = {
   'bk_komitmen_rtl_list': 'komitmen_rtl_list',
   'bk_logs': 'activity_logs',
   'bk_counselors': 'counselors',
-  'bk_users': 'users',
+  'bk_users': 'counselors',
   'bk_teaching_schedule': 'teaching_schedule',
   'bk_class_teaching_progress': 'class_teaching_progress',
   'bk_sticky_notes': 'sticky_notes',
@@ -114,31 +115,29 @@ export const SYNC_MAP: Record<string, string> = {
 };
 
 /**
- * Maps internal/subcollection names to canonical Firestore root collections requested:
- * siswa, pelanggaran, restitusi, layanan, agenda, pengaturan
+ * Always resolves strictly to EXISTING Firestore root collections:
+ * students, violations, services, counselors, daily_journals, etc.
+ * Never creates or writes new collections (siswa, pelanggaran, restitusi, layanan, agenda).
  */
 export function getCanonicalRootCollections(colName: string): string[] {
   switch (colName) {
     case 'students':
     case 'siswa':
-      return ['students', 'siswa'];
+      return ['students'];
     case 'violations':
     case 'cases':
     case 'pelanggaran':
     case 'restitusi':
-      return ['violations', 'cases', 'pelanggaran', 'restitusi'];
+      return ['violations'];
     case 'services':
     case 'counseling':
     case 'layanan':
-      return ['services', 'counseling', 'layanan'];
-    case 'daily_journals':
-    case 'teaching_schedule':
-    case 'sticky_notes':
-    case 'agenda':
-      return [colName === 'agenda' ? 'daily_journals' : colName, 'agenda'];
+      return ['services'];
     case 'counselors':
     case 'users':
-      return ['counselors', 'users'];
+      return ['counselors'];
+    case 'agenda':
+      return ['daily_journals'];
     default:
       return [colName];
   }
@@ -364,6 +363,70 @@ let isSyncingActive = false;
 export let isQuotaExceeded = false;
 const unsubscribes: (() => void)[] = [];
 const lastSavedRemoteMap: Record<string, string> = {};
+// Pure in-memory cloud snapshot store (NEVER populated from localStorage or mockData)
+const cloudCollectionCache: Record<string, any[]> = {};
+const loggedSnapshotCounts: Record<string, number> = {};
+
+export function getCloudCollectionData<T = any>(localKey: string, schoolId?: string): T[] {
+  const sid = sanitizeSchoolId(schoolId || getActiveSchoolId());
+  const data = cloudCollectionCache[`${sid}_${localKey}`];
+  return Array.isArray(data) ? (data as T[]) : [];
+}
+
+export function setCloudCollectionData(localKey: string, data: any[], schoolId?: string): void {
+  const sid = sanitizeSchoolId(schoolId || getActiveSchoolId());
+  const clean = Array.isArray(data) ? data : [];
+  cloudCollectionCache[`${sid}_${localKey}`] = clean;
+  if (localKey === 'bk_violations') cloudCollectionCache[`${sid}_bk_cases`] = clean;
+  if (localKey === 'bk_cases') cloudCollectionCache[`${sid}_bk_violations`] = clean;
+  if (localKey === 'bk_services') cloudCollectionCache[`${sid}_bk_counseling`] = clean;
+  if (localKey === 'bk_counseling') cloudCollectionCache[`${sid}_bk_services`] = clean;
+  if (localKey === 'bk_achievements') cloudCollectionCache[`${sid}_bk_student_achievements`] = clean;
+  if (localKey === 'bk_student_achievements') cloudCollectionCache[`${sid}_bk_achievements`] = clean;
+}
+
+export function subscribeCloudCollection<T = any>(
+  localKey: string,
+  callback: (data: T[]) => void,
+  schoolId?: string
+): () => void {
+  const getSid = () => sanitizeSchoolId(schoolId || getActiveSchoolId());
+  callback(getCloudCollectionData<T>(localKey, getSid()));
+
+  const handleSync = (e: any) => {
+    const sid = getSid();
+    const detailKey = e?.detail?.key;
+    const detailSid = e?.detail?.schoolId ? sanitizeSchoolId(e.detail.schoolId) : sid;
+    if (detailSid !== sid && localKey !== 'bk_counselors') return;
+
+    const matchesKey =
+      detailKey === localKey ||
+      (localKey === 'bk_violations' && detailKey === 'bk_cases') ||
+      (localKey === 'bk_cases' && detailKey === 'bk_violations') ||
+      (localKey === 'bk_services' && detailKey === 'bk_counseling') ||
+      (localKey === 'bk_counseling' && detailKey === 'bk_services') ||
+      (localKey === 'bk_achievements' && detailKey === 'bk_student_achievements') ||
+      (localKey === 'bk_student_achievements' && detailKey === 'bk_achievements');
+
+    if (matchesKey) {
+      if (Array.isArray(e?.detail?.data)) {
+        setCloudCollectionData(localKey, e.detail.data, sid);
+        callback(e.detail.data);
+      } else {
+        callback(getCloudCollectionData<T>(localKey, sid));
+      }
+    }
+  };
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('bk_realtime_sync', handleSync);
+  }
+  return () => {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('bk_realtime_sync', handleSync);
+    }
+  };
+}
 
 // Unique session identifier for each open browser tab to detect cross-tab updates
 export const CLIENT_TAB_ID: string = typeof window !== 'undefined'
@@ -602,17 +665,16 @@ export interface SaveResult {
 export function updateLocalDocWithRemote(localKey: string, remoteDoc: any, schoolId: string): void {
   if (!remoteDoc || !remoteDoc.id) return;
   try {
-    const currentList = loadSchoolData<any[]>(localKey, [], schoolId);
-    if (Array.isArray(currentList)) {
-      const targetId = String(remoteDoc.id);
-      const exists = currentList.some((it: any) => String(it?.id) === targetId);
-      const nextList = exists
-        ? currentList.map((it: any) => String(it?.id) === targetId ? { ...it, ...remoteDoc } : it)
-        : [remoteDoc, ...currentList];
-      saveSchoolData(localKey, nextList, schoolId);
-    }
+    const sid = sanitizeSchoolId(schoolId || getActiveSchoolId());
+    const currentList = getCloudCollectionData<any>(localKey, sid);
+    const targetId = String(remoteDoc.id);
+    const exists = currentList.some((it: any) => String(it?.id) === targetId);
+    const nextList = exists
+      ? currentList.map((it: any) => String(it?.id) === targetId ? { ...it, ...remoteDoc } : it)
+      : [remoteDoc, ...currentList];
+    setCloudCollectionData(localKey, nextList, sid);
   } catch (e) {
-    console.warn(`Failed updating local cache for [${localKey}]:`, e);
+    console.warn(`Failed updating cloud memory store for [${localKey}]:`, e);
   }
 }
 
@@ -650,7 +712,7 @@ try {
       if (msg.type === 'sync' && msg.key) {
         if (msg.schoolId && msg.schoolId !== activeSchoolId && msg.key !== 'bk_counselors') return;
         if (Array.isArray(msg.data)) {
-          saveSchoolData(msg.key, msg.data, msg.schoolId || activeSchoolId);
+          setCloudCollectionData(msg.key, msg.data, msg.schoolId || activeSchoolId);
         }
         window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
           detail: {
@@ -664,7 +726,7 @@ try {
       } else if (msg.type === 'doc_saved' && msg.key && msg.doc) {
         if (msg.schoolId && msg.schoolId !== activeSchoolId && msg.key !== 'bk_counselors') return;
         updateLocalDocWithRemote(msg.key, msg.doc, msg.schoolId || activeSchoolId);
-        const updatedList = loadSchoolData(msg.key, [], msg.schoolId || activeSchoolId);
+        const updatedList = getCloudCollectionData(msg.key, msg.schoolId || activeSchoolId);
         window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
           detail: {
             key: msg.key,
@@ -677,12 +739,12 @@ try {
       } else if (msg.type === 'doc_deleted' && msg.key && isValidDeleteId(msg.itemId)) {
         if (msg.schoolId && msg.schoolId !== activeSchoolId && msg.key !== 'bk_counselors') return;
         const targetSchool = msg.schoolId || activeSchoolId;
-        const currentList = loadSchoolData<any[]>(msg.key, [], targetSchool);
+        const currentList = getCloudCollectionData<any>(msg.key, targetSchool);
         if (Array.isArray(currentList)) {
           const cleanTarget = String(msg.itemId).trim();
           const filtered = currentList.filter(item => !item || !isValidDeleteId(item.id) || String(item.id).trim() !== cleanTarget);
           if (currentList.length - filtered.length <= 5) {
-            saveSchoolData(msg.key, filtered, targetSchool);
+            setCloudCollectionData(msg.key, filtered, targetSchool);
             window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
               detail: {
                 type: 'doc_deleted',
@@ -719,23 +781,27 @@ export function broadcastRealtimeChange(payload: {
   // 1. Dispatch locally in the current window immediately
   if (typeof window !== 'undefined') {
     if (payload.type === 'sync' && Array.isArray(payload.data)) {
+      setCloudCollectionData(payload.key, payload.data, activeSchoolId);
       window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
         detail: { type: 'sync', key: payload.key, data: payload.data, schoolId: activeSchoolId }
       }));
     } else if (payload.type === 'doc_saved' && payload.doc) {
-      const updatedList = loadSchoolData(payload.key, [], activeSchoolId);
+      updateLocalDocWithRemote(payload.key, payload.doc, activeSchoolId);
+      const updatedList = getCloudCollectionData(payload.key, activeSchoolId);
       window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
         detail: { type: 'doc_saved', key: payload.key, data: updatedList, doc: payload.doc, schoolId: activeSchoolId }
       }));
     } else if (payload.type === 'doc_deleted' && isValidDeleteId(payload.itemId)) {
+      const targetId = String(payload.itemId).trim();
       const updatedList = Array.isArray(payload.data)
         ? payload.data
-        : loadSchoolData(payload.key, [], activeSchoolId);
+        : getCloudCollectionData(payload.key, activeSchoolId).filter((it: any) => String(it?.id || '').trim() !== targetId);
+      setCloudCollectionData(payload.key, updatedList, activeSchoolId);
       window.dispatchEvent(new CustomEvent('bk_realtime_sync', {
         detail: {
           type: 'doc_deleted',
           key: payload.key,
-          itemId: String(payload.itemId).trim(),
+          itemId: targetId,
           data: updatedList,
           schoolId: activeSchoolId
         }
@@ -894,13 +960,11 @@ export async function flushPendingCloudQueue(): Promise<number> {
     try {
       const colName = SYNC_MAP[entry.localKey] || entry.localKey;
       const docId = String(entry.id);
-      const isAgendaCol = colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes';
       const payload = {
         ...(entry.item || {}),
         id: docId,
         createdAt: entry.item?.createdAt || nowIso,
         updatedAt: entry.item?.updatedAt || nowIso,
-        ...(isAgendaCol ? { _agendaType: colName } : {})
       };
       const writes: Promise<any>[] = [
         setDoc(getSchoolDocRef(colName, docId, entry.schoolId), payload, { merge: true })
@@ -1124,7 +1188,6 @@ export async function saveToFirestore(
     _version: optimisticVersion,
     _updatedAt: optimisticNow,
     _lastModifiedByTab: CLIENT_TAB_ID,
-    ...(colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes' ? { _agendaType: colName } : {}),
     ...(options.counselorId ? { _lastModifiedByCounselorId: options.counselorId } : {}),
     ...(options.counselorName ? { _lastModifiedByCounselorName: options.counselorName } : {})
   };
@@ -1240,28 +1303,17 @@ export async function saveToFirestore(
           _version: nextVersion,
           _updatedAt: now,
           _lastModifiedByTab: CLIENT_TAB_ID,
-          ...(colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes' ? { _agendaType: colName } : {}),
           ...(options.counselorId ? { _lastModifiedByCounselorId: options.counselorId } : {}),
           ...(options.counselorName ? { _lastModifiedByCounselorName: options.counselorName } : {})
         };
 
         transaction.set(docRef, stampedItem, { merge: true });
 
-        // Mirror to school subcollections + canonical root collections (siswa, pelanggaran, restitusi, layanan, agenda)
+        // Mirror strictly to existing root collections (students, violations, services, counselors, etc.)
         const canonicalRoots = getCanonicalRootCollections(colName);
         canonicalRoots.forEach((rootCol) => {
           transaction.set(doc(db, rootCol, itemId), stampedItem, { merge: true });
         });
-        if (colName === 'violations' || colName === 'cases') {
-          transaction.set(getSchoolDocRef('cases', itemId, schoolId), stampedItem, { merge: true });
-          transaction.set(getSchoolDocRef('violations', itemId, schoolId), stampedItem, { merge: true });
-        } else if (colName === 'services' || colName === 'counseling') {
-          transaction.set(getSchoolDocRef('counseling', itemId, schoolId), stampedItem, { merge: true });
-          transaction.set(getSchoolDocRef('services', itemId, schoolId), stampedItem, { merge: true });
-        } else if (colName === 'counselors' || colName === 'users') {
-          transaction.set(getSchoolDocRef('users', itemId, schoolId), stampedItem, { merge: true });
-          transaction.set(getSchoolDocRef('counselors', itemId, schoolId), stampedItem, { merge: true });
-        }
 
         // Update in-memory item
         item.updatedAt = nowIso;
@@ -1305,7 +1357,6 @@ export async function saveToFirestore(
         _version: nextVersion,
         _updatedAt: now,
         _lastModifiedByTab: CLIENT_TAB_ID,
-        ...(colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes' ? { _agendaType: colName } : {}),
         ...(options.counselorId ? { _lastModifiedByCounselorId: options.counselorId } : {}),
         ...(options.counselorName ? { _lastModifiedByCounselorName: options.counselorName } : {})
       };
@@ -1322,13 +1373,6 @@ export async function saveToFirestore(
         getCanonicalRootCollections(colName).forEach((rootCol) => {
           writePromises.push(setDoc(doc(db, rootCol, itemId), stampedItem, { merge: true }));
         });
-        if (colName === 'violations' || colName === 'cases') {
-          writePromises.push(setDoc(getSchoolDocRef('cases', itemId, schoolId), stampedItem, { merge: true }));
-        } else if (colName === 'services' || colName === 'counseling') {
-          writePromises.push(setDoc(getSchoolDocRef('counseling', itemId, schoolId), stampedItem, { merge: true }));
-        } else if (colName === 'counselors' || colName === 'users') {
-          writePromises.push(setDoc(getSchoolDocRef('users', itemId, schoolId), stampedItem, { merge: true }));
-        }
         await Promise.all(writePromises);
         removePendingCloudWrite(itemId);
         updateLocalDocWithRemote(localKey, stampedItem, schoolId);
@@ -1417,22 +1461,6 @@ function getMirrorCollectionRefs(colName: string, itemId: string, schoolId: stri
     getSchoolDocRef(colName, itemId, schoolId),
     ...getCanonicalRootCollections(colName).map((rootCol) => doc(db, rootCol, itemId))
   ];
-  if (colName === 'violations' || colName === 'cases' || colName === 'pelanggaran' || colName === 'restitusi') {
-    refs.push(
-      getSchoolDocRef('cases', itemId, schoolId),
-      getSchoolDocRef('violations', itemId, schoolId)
-    );
-  } else if (colName === 'services' || colName === 'counseling' || colName === 'layanan') {
-    refs.push(
-      getSchoolDocRef('counseling', itemId, schoolId),
-      getSchoolDocRef('services', itemId, schoolId)
-    );
-  } else if (colName === 'counselors' || colName === 'users') {
-    refs.push(
-      getSchoolDocRef('users', itemId, schoolId),
-      getSchoolDocRef('counselors', itemId, schoolId)
-    );
-  }
   // Deduplicate by Firestore path
   const seen = new Set<string>();
   return refs.filter(r => {
@@ -1573,10 +1601,10 @@ export async function softDeleteFromFirestore(
   const colName = SYNC_MAP[localKey] || localKey;
   const cacheKey = `${schoolId}_${localKey}`;
 
-  // 2. Capture full object snapshot & enforce anti-mass-delete guard (> 5 items) BEFORE mutating anything
-  const currentList = loadSchoolData<any[]>(localKey, [], schoolId);
+  // Capture current snapshot from in-memory Firestore cache & enforce anti-mass-delete guard
+  const currentList = getCloudCollectionData<any>(localKey, schoolId);
   let nextActiveList: any[] | null = null;
-  if (Array.isArray(currentList)) {
+  if (Array.isArray(currentList) && currentList.length > 0) {
     const filtered = currentList.filter((it: any) => !it || !isValidDeleteId(it.id) || String(it.id).trim() !== cleanId);
     const dropped = currentList.length - filtered.length;
     if (dropped > 5) {
@@ -1586,16 +1614,16 @@ export async function softDeleteFromFirestore(
     nextActiveList = filtered;
   }
 
-  // 1. Register ID locally so sync/listeners immediately block resurrection
+  // Register ID locally so sync/listeners immediately block resurrection
   registerDeletedId(cleanId);
   removePendingCloudWrite(cleanId);
 
-  const foundInLocal = Array.isArray(currentList)
+  const foundInCloud = Array.isArray(currentList)
     ? currentList.find((it: any) => String(it?.id || '').trim() === cleanId)
     : undefined;
   const snapshotObj = typeof itemOrId === 'object' && itemOrId !== null
-    ? { ...(foundInLocal || {}), ...itemOrId }
-    : (foundInLocal || { id: cleanId });
+    ? { ...(foundInCloud || {}), ...itemOrId }
+    : (foundInCloud || { id: cleanId });
 
   const deletedAt = formatDeletedAtIndonesian(new Date());
   const deletedAtMs = Date.now();
@@ -1640,9 +1668,9 @@ export async function softDeleteFromFirestore(
     _lastModifiedByTab: CLIENT_TAB_ID
   };
 
-  // 3. Remove ONLY this 1 item from active local storage & broadcast
+  // Remove ONLY this 1 item from in-memory cloud state & broadcast immediately (Optimistic UI)
   if (Array.isArray(nextActiveList)) {
-    saveSchoolData(localKey, nextActiveList, schoolId);
+    setCloudCollectionData(localKey, nextActiveList, schoolId);
     broadcastRealtimeChange({
       type: 'doc_deleted',
       key: localKey,
@@ -1660,24 +1688,20 @@ export async function softDeleteFromFirestore(
   }
   delete lastSavedRemoteMap[cacheKey];
 
-  // Also update paired local keys (e.g. bk_cases <-> bk_violations, bk_counseling <-> bk_services)
+  // Also update paired in-memory keys (e.g. bk_cases <-> bk_violations, bk_counseling <-> bk_services)
   if (localKey === 'bk_violations' || localKey === 'bk_cases') {
     const pairedKey = localKey === 'bk_violations' ? 'bk_cases' : 'bk_violations';
-    const pList = loadSchoolData<any[]>(pairedKey, [], schoolId);
+    const pList = getCloudCollectionData<any>(pairedKey, schoolId);
     if (Array.isArray(pList)) {
       const pFiltered = pList.filter((it: any) => !it || !isValidDeleteId(it.id) || String(it.id).trim() !== cleanId);
-      if (pList.length - pFiltered.length <= 5) {
-        saveSchoolData(pairedKey, pFiltered, schoolId);
-      }
+      setCloudCollectionData(pairedKey, pFiltered, schoolId);
     }
   } else if (localKey === 'bk_services' || localKey === 'bk_counseling') {
     const pairedKey = localKey === 'bk_services' ? 'bk_counseling' : 'bk_services';
-    const pList = loadSchoolData<any[]>(pairedKey, [], schoolId);
+    const pList = getCloudCollectionData<any>(pairedKey, schoolId);
     if (Array.isArray(pList)) {
       const pFiltered = pList.filter((it: any) => !it || !isValidDeleteId(it.id) || String(it.id).trim() !== cleanId);
-      if (pList.length - pFiltered.length <= 5) {
-        saveSchoolData(pairedKey, pFiltered, schoolId);
-      }
+      setCloudCollectionData(pairedKey, pFiltered, schoolId);
     }
   }
 
@@ -2224,7 +2248,6 @@ export async function pushCollectionToFirestore(
             _version: nextVersion,
             _updatedAt: currentTimestamp,
             _lastModifiedByTab: CLIENT_TAB_ID,
-            ...(colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes' ? { _agendaType: colName } : {})
           };
           batch.set(ref, payload, { merge: true });
           chunkOps++;
@@ -2260,7 +2283,6 @@ export async function pushCollectionToFirestore(
         ? 'SMP N 2 Susukan'
         : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan');
       const fallbackIso = new Date().toISOString();
-      const isAgendaCol = colName === 'daily_journals' || colName === 'teaching_schedule' || colName === 'sticky_notes';
       for (const item of sortedItems) {
         if (item && item.id) {
           const hasAssignedId = extractRecordSchoolId(item) !== '' && !item.isLegacyUnmigrated;
@@ -2281,7 +2303,6 @@ export async function pushCollectionToFirestore(
               _version: getItemVersion(item) || 1,
               _updatedAt: getItemTimestamp(item) || Date.now(),
               _lastModifiedByTab: CLIENT_TAB_ID,
-              ...(isAgendaCol ? { _agendaType: colName } : {})
             };
             setDoc(getSchoolDocRef(colName, itemId, schoolId), payload, { merge: true }).catch(() => {});
             getCanonicalRootCollections(colName).forEach((rootCol) => {
@@ -2345,7 +2366,7 @@ export async function fetchCloudCounselors(schoolId?: string): Promise<any[]> {
  */
 export async function fetchCloudAttendance(schoolId?: string): Promise<any[]> {
   const targetSchoolId = schoolId ? sanitizeSchoolId(schoolId) : getActiveSchoolId();
-  if (isQuotaExceeded) return loadSchoolData('bk_attendance_history', [], targetSchoolId);
+  if (isQuotaExceeded) return getCloudCollectionData('bk_attendance_history', targetSchoolId);
   try {
     await ensureFirebaseAuth();
     const deletedSet = new Set(getDeletedIds());
@@ -2379,23 +2400,22 @@ export async function fetchCloudAttendance(schoolId?: string): Promise<any[]> {
     if (subSnap.status === 'fulfilled' && !subSnap.value.empty) collectSnap(subSnap.value);
 
     const cloudAttendance: any[] = Array.from(attendanceMap.values());
-
-    if (cloudAttendance.length > 0) {
-      const sorted = sortCollectionData('bk_attendance_history', cloudAttendance);
-      saveSchoolData('bk_attendance_history', sorted, targetSchoolId);
-      window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: sorted }));
-      window.dispatchEvent(new CustomEvent('bk_realtime_sync', { 
-        detail: { key: 'bk_attendance_history', data: sorted, schoolId: targetSchoolId } 
-      }));
-      window.dispatchEvent(new Event('storage'));
-      return sorted;
-    }
+    const sorted = sortCollectionData('bk_attendance_history', cloudAttendance, targetSchoolId);
+    setCloudCollectionData('bk_attendance_history', sorted, targetSchoolId);
+    window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: sorted }));
+    window.dispatchEvent(new CustomEvent('bk_realtime_sync', { 
+      detail: { key: 'bk_attendance_history', data: sorted, schoolId: targetSchoolId } 
+    }));
+    return sorted;
   } catch (err) {
     if (!checkAndHandleQuotaError(err)) {
-      console.warn('Could not fetch cloud attendance:', err);
+      const msg = handleFirestoreError(err, 'list', `schools/${targetSchoolId}/attendance_history`);
+      if (!isOfflineFirestoreError(err)) {
+        notifyCloudStatusChange('error', false, msg);
+      }
     }
   }
-  return loadSchoolData('bk_attendance_history', [], targetSchoolId);
+  return getCloudCollectionData('bk_attendance_history', targetSchoolId);
 }
 
 /**
@@ -2942,8 +2962,16 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
   const currentSchoolId = getActiveSchoolId();
   notifyCloudStatusChange('connected');
 
-  // Push school profile to cloud registry
-  syncSchoolMetadataToCloud().catch(() => {});
+  // Test connection on sync init so connection errors immediately surface the red top banner
+  testConnection().then((res) => {
+    if (!res.ok) {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        notifyCloudStatusChange('offline', false);
+      } else if (res.error) {
+        notifyCloudStatusChange('error', false, res.error);
+      }
+    }
+  }).catch(() => {});
 
   // Group SYNC_MAP by unique Firestore collection to eliminate duplicate onSnapshot listeners
   const uniqueCollectionMap = new Map<string, string[]>();
@@ -2982,73 +3010,63 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
         if (!deletedSet.has(k) && !snapshotDeletedIds.has(k)) mergedRemoteMap.set(k, val);
       });
       const rawDocs = Array.from(mergedRemoteMap.values());
-      const pendingIds = new Set(getPendingCloudQueue().map((q) => String(q.id).trim()));
+      const pendingQueue = getPendingCloudQueue();
 
       localKeys.forEach((localKey) => {
         const cacheKey = `${currentSchoolId}_${localKey}`;
-        const currentLocalList = loadSchoolData<any[]>(localKey, [], currentSchoolId);
-        const localMap = new Map<string, any>();
-        if (Array.isArray(currentLocalList)) {
-          currentLocalList.forEach((it: any) => {
-            if (it && isValidDeleteId(it.id)) {
-              localMap.set(String(it.id).trim(), it);
-            }
-          });
-        }
-
         const mergedDocsMap = new Map<string, any>();
 
-        // 1. Pertahankan data lokal aktif (termasuk data lama tanpa schoolId) kecuali sudah dihapus di server (soft atau hard delete)
-        if (Array.isArray(currentLocalList)) {
-          currentLocalList.forEach((localItem: any) => {
-            if (!localItem || !isValidDeleteId(localItem.id)) return;
-            const lid = String(localItem.id).trim();
-            if (localItem.isDeleted === true || deletedSet.has(lid) || snapshotDeletedIds.has(lid)) return;
-            if (hardRemovedFromServer.has(lid) && !mergedRemoteMap.has(lid) && !pendingIds.has(lid)) return;
-            if (isDummyRecord(localItem, localKey)) return;
-            if (!matchesSchoolOrLegacy(localItem, currentSchoolId)) return;
-            mergedDocsMap.set(lid, localItem);
-          });
-        }
-
-        // 2. Gabungkan data remote yang aktif (isDeleted !== true)
+        // 1. PURE FIRESTORE SOURCE OF TRUTH: Masukkan HANYA dokumen aktif dari onSnapshot Firestore
         rawDocs.forEach((item) => {
           const rid = String(item.id).trim();
           if (deletedSet.has(rid) || snapshotDeletedIds.has(rid)) return;
-          const localItem = localMap.get(rid);
-          if (localItem) {
-            const remoteVersion = getItemVersion(item);
-            const localVersion = getItemVersion(localItem);
-            const remoteTime = getItemTimestamp(item);
-            const localTime = getItemTimestamp(localItem);
-
-            if (localItem._lastModifiedByTab === CLIENT_TAB_ID &&
-                (localVersion > remoteVersion || (localVersion === remoteVersion && localTime > remoteTime))) {
-              mergedDocsMap.set(rid, localItem);
-              return;
-            }
-          }
+          if (hardRemovedFromServer.has(rid)) return;
           mergedDocsMap.set(rid, item);
         });
 
-        const docsData = Array.from(mergedDocsMap.values());
+        // 2. Hanya pertahankan item yang benar-benar masih menunggu flush offline ke Firestore
+        pendingQueue.forEach((q) => {
+          if (q.localKey === localKey && sanitizeSchoolId(q.schoolId) === currentSchoolId && q.item && isValidDeleteId(q.id)) {
+            const qid = String(q.id).trim();
+            if (!mergedDocsMap.has(qid) && !deletedSet.has(qid) && !snapshotDeletedIds.has(qid)) {
+              mergedDocsMap.set(qid, q.item);
+            }
+          }
+        });
 
+        const docsData = Array.from(mergedDocsMap.values());
         let sortedDocs = sortCollectionData(localKey, docsData, currentSchoolId);
         if (localKey === 'bk_logs' && sortedDocs.length > 80) {
           sortedDocs = sortedDocs.slice(0, 80);
         }
 
-        const isExplicitClear = typeof localStorage !== 'undefined' &&
-          (localStorage.getItem(`bk_cleared_${currentSchoolId}`) === 'true' || localStorage.getItem(`bk_students_cleared_${currentSchoolId}`) === 'true');
-        if (Array.isArray(currentLocalList) && currentLocalList.length > 5 && sortedDocs.length === 0 && !isExplicitClear) {
-          console.warn(`[FirestoreSync] Anti-mass-wipe: aborted empty snapshot overwrite for ${localKey} (${currentLocalList.length} -> 0)`);
-          return;
+        // Console log wajib dengan nama koleksi Firestore asli (students, violations, services, daily_journals)
+        const logLabel =
+          localKey === 'bk_students'
+            ? 'students'
+            : localKey === 'bk_violations'
+            ? 'violations'
+            : localKey === 'bk_services'
+            ? 'services'
+            : localKey === 'bk_daily_journals'
+            ? 'daily_journals'
+            : localKey === 'bk_home_visits'
+            ? 'home_visits'
+            : localKey === 'bk_attendance_history'
+            ? 'attendance_history'
+            : null;
+        if (logLabel && loggedSnapshotCounts[cacheKey] !== sortedDocs.length) {
+          loggedSnapshotCounts[cacheKey] = sortedDocs.length;
+          console.log(`onSnapshot ${logLabel} jalan, jumlah:`, sortedDocs.length);
         }
 
         const remoteStr = JSON.stringify(sortedDocs);
         if (lastSavedRemoteMap[cacheKey] !== remoteStr) {
           lastSavedRemoteMap[cacheKey] = remoteStr;
-          saveSchoolData(localKey, sortedDocs, currentSchoolId);
+          setCloudCollectionData(localKey, sortedDocs, currentSchoolId);
+          if (localKey === 'bk_attendance_history' && typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: sortedDocs }));
+          }
           broadcastRealtimeChange({
             type: 'sync',
             key: localKey,
@@ -3086,12 +3104,6 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
         const item = { id: d.id, ...d.data() } as any;
         if (item && isValidDeleteId(item.id)) {
           const itemId = String(item.id).trim();
-
-          // Filter agenda canonical collection so each type goes strictly to its matching sub-collection
-          if (aliasName === 'agenda') {
-            const agendaType = item._agendaType || 'daily_journals';
-            if (agendaType !== colName) return;
-          }
 
           if (item.isDeleted === true) {
             registerDeletedId(itemId);
@@ -3180,15 +3192,16 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
         window.dispatchEvent(new Event('bk_school_config_updated'));
       }
       if (Array.isArray(data.walikelasConfig) && data.walikelasConfig.length > 0) {
-        saveSchoolData('bk_walikelas_config', data.walikelasConfig, currentSchoolId);
+        setCloudCollectionData('bk_walikelas_config', data.walikelasConfig, currentSchoolId);
         broadcastRealtimeChange({ type: 'sync', key: 'bk_walikelas_config', data: data.walikelasConfig, schoolId: currentSchoolId });
       }
       if (Array.isArray(data.violationRules) && data.violationRules.length > 0) {
-        saveSchoolData('bk_violation_rules', data.violationRules, currentSchoolId);
+        setCloudCollectionData('bk_violation_rules', data.violationRules, currentSchoolId);
         window.dispatchEvent(new CustomEvent('bk_violation_rules_changed', { detail: { schoolId: currentSchoolId, categories: data.violationRules } }));
       }
       if (Array.isArray(data.parentSummonTemplates)) {
-        saveSchoolData('bk_parent_summon_templates', data.parentSummonTemplates, currentSchoolId);
+        setCloudCollectionData('bk_parent_summon_templates', data.parentSummonTemplates, currentSchoolId);
+        broadcastRealtimeChange({ type: 'sync', key: 'bk_parent_summon_templates', data: data.parentSummonTemplates, schoolId: currentSchoolId });
       }
       notifyCloudStatusChange('connected');
     }, (error) => {
@@ -3353,17 +3366,18 @@ export async function forceFullCloudSync(): Promise<void> {
           if (typeof window !== 'undefined') window.dispatchEvent(new Event('bk_school_config_updated'));
         }
         if (Array.isArray(data?.walikelasConfig) && data.walikelasConfig.length > 0) {
-          saveSchoolData('bk_walikelas_config', data.walikelasConfig, currentSchoolId);
+          setCloudCollectionData('bk_walikelas_config', data.walikelasConfig, currentSchoolId);
           broadcastRealtimeChange({ type: 'sync', key: 'bk_walikelas_config', data: data.walikelasConfig, schoolId: currentSchoolId });
         }
         if (Array.isArray(data?.violationRules) && data.violationRules.length > 0) {
-          saveSchoolData('bk_violation_rules', data.violationRules, currentSchoolId);
+          setCloudCollectionData('bk_violation_rules', data.violationRules, currentSchoolId);
           if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('bk_violation_rules_changed', { detail: { schoolId: currentSchoolId, categories: data.violationRules } }));
           }
         }
         if (Array.isArray(data?.parentSummonTemplates)) {
-          saveSchoolData('bk_parent_summon_templates', data.parentSummonTemplates, currentSchoolId);
+          setCloudCollectionData('bk_parent_summon_templates', data.parentSummonTemplates, currentSchoolId);
+          broadcastRealtimeChange({ type: 'sync', key: 'bk_parent_summon_templates', data: data.parentSummonTemplates, schoolId: currentSchoolId });
         }
       }
     } catch (e) {
@@ -3387,14 +3401,10 @@ export async function forceFullCloudSync(): Promise<void> {
       const deletedSet = new Set(getDeletedIds());
       const docMap = new Map<string, any>();
 
-      const ingestSnapshot = (snap: any, rootColName?: string) => {
+      const ingestSnapshot = (snap: any) => {
         snap.forEach((d: any) => {
           const item = { id: d.id, ...d.data() } as any;
           if (item && item.id) {
-            if (rootColName === 'agenda') {
-              const agendaType = item._agendaType || 'daily_journals';
-              if (agendaType !== colName) return;
-            }
             const rid = String(item.id);
             if (item.isDeleted === true) {
               registerDeletedId(rid);
@@ -3418,7 +3428,7 @@ export async function forceFullCloudSync(): Promise<void> {
 
       rootResults.forEach((res, idx) => {
         if (res.status === 'fulfilled') {
-          if (!res.value.empty) ingestSnapshot(res.value, rootAliases[idx]);
+          if (!res.value.empty) ingestSnapshot(res.value);
         } else {
           if (isOfflineFirestoreError(res.reason)) hasOfflineErr = true;
           else if (!checkAndHandleQuotaError(res.reason)) {
@@ -3441,53 +3451,24 @@ export async function forceFullCloudSync(): Promise<void> {
       const docsData = Array.from(docMap.values());
 
       for (const localKey of localKeys) {
-        const localList = loadSchoolData<any[]>(localKey, [], currentSchoolId);
-        const hadDeletedInLocal = Array.isArray(localList) && localList.some(
-          item => item && (item.isDeleted === true || deletedSet.has(String(item.id)))
-        );
-        const isExplicitClear = typeof localStorage !== 'undefined' &&
-          (localStorage.getItem(`bk_cleared_${currentSchoolId}`) === 'true' || localStorage.getItem(`bk_students_cleared_${currentSchoolId}`) === 'true');
-        const activeLocalItems = Array.isArray(localList)
-          ? localList.filter(item => item && item.id && item.isDeleted !== true && !deletedSet.has(String(item.id)) && !isDummyRecord(item, localKey))
-          : [];
-
-        if (docsData.length > 0 || hadDeletedInLocal) {
-          // Kasus 1: Firestore memiliki data (atau ada jejak penghapusan) -> gabungkan aman tanpa menghapus data lama
-          const mergedMap = new Map<string, any>();
-          activeLocalItems.forEach(item => {
-            mergedMap.set(String(item.id), item);
-          });
-          docsData.forEach(remoteItem => {
-            const rid = String(remoteItem.id);
-            if (deletedSet.has(rid) || remoteItem.isDeleted === true) return;
-            const localItem = mergedMap.get(rid);
-            if (!localItem || !isStaleUpdate(remoteItem, localItem)) {
-              mergedMap.set(rid, remoteItem);
-            }
-          });
-
-          const sortedDocs = sortCollectionData(localKey, Array.from(mergedMap.values()), currentSchoolId);
-          if (Array.isArray(localList) && localList.length > 5 && sortedDocs.length === 0 && !isExplicitClear) {
-            console.warn(`[FirestoreSync] Anti-mass-wipe in forceFullCloudSync for ${localKey}`);
-            continue;
-          }
-          saveSchoolData(localKey, sortedDocs, currentSchoolId);
-          if (localKey === 'bk_attendance_history' && typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: sortedDocs }));
-          }
-          broadcastRealtimeChange({
-            type: 'sync',
-            key: localKey,
-            data: sortedDocs,
-            schoolId: currentSchoolId
-          });
-        } else if (docsData.length === 0 && activeLocalItems.length > 0 && !isExplicitClear) {
-          // Kasus 2: Firestore kosong, tetapi lokal memiliki data aktif -> upload data lokal ke Firestore (mode merge, jangan timpa kosong)
-          await pushCollectionToFirestore(localKey, activeLocalItems, currentSchoolId, false, {
-            stampMissingSchoolId: true,
-            bypassCache: true
-          }).catch(() => {});
+        let sortedDocs = sortCollectionData(localKey, docsData, currentSchoolId);
+        if (localKey === 'bk_logs' && sortedDocs.length > 80) {
+          sortedDocs = sortedDocs.slice(0, 80);
         }
+
+        const cacheKey = `${currentSchoolId}_${localKey}`;
+        lastSavedRemoteMap[cacheKey] = JSON.stringify(sortedDocs);
+        setCloudCollectionData(localKey, sortedDocs, currentSchoolId);
+
+        if (localKey === 'bk_attendance_history' && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: sortedDocs }));
+        }
+        broadcastRealtimeChange({
+          type: 'sync',
+          key: localKey,
+          data: sortedDocs,
+          schoolId: currentSchoolId
+        });
       }
     } catch (e: any) {
       if (isOfflineFirestoreError(e)) {
@@ -3505,6 +3486,172 @@ export async function forceFullCloudSync(): Promise<void> {
     notifyCloudStatusChange('error', false, firstError);
   } else {
     notifyCloudStatusChange('connected', true);
+  }
+}
+
+/**
+ * HAPUS CACHE LOKAL & AMBIL ULANG DARI CLOUD:
+ * Menghapus semua cache data koleksi di localStorage, memutus listener lama,
+ * menarik data fresh langsung dari server Firestore (getDocsFromServer, tanpa cache),
+ * dan memulai ulang onSnapshot sehingga tampilan 100% sama dengan Firebase Console.
+ */
+export async function clearLocalCacheAndReloadFromCloud(): Promise<{
+  success: boolean;
+  counts: {
+    students: number;
+    violations: number;
+    services: number;
+    homeVisits: number;
+    journals: number;
+    attendance: number;
+    total: number;
+  };
+  error?: string;
+}> {
+  const currentSchoolId = getActiveSchoolId();
+  notifyCloudStatusChange('syncing');
+
+  // 1. Hapus SEMUA key data koleksi dari localStorage (sisakan sesi login & preferensi tema)
+  if (typeof localStorage !== 'undefined') {
+    const dataKeyPrefixes = [
+      'bk_students', 'bk_violations', 'bk_cases', 'bk_services', 'bk_counseling',
+      'bk_home_visits', 'bk_parent_summons', 'bk_daily_journals', 'bk_attendance_history',
+      'bk_achievements', 'bk_student_achievements', 'bk_logs',
+      'bk_teaching_schedule', 'bk_class_teaching_progress', 'bk_sticky_notes',
+      'bk_program_evaluations', 'bk_service_evaluations',
+      'bk_surat_perjanjian_list', 'bk_kontrak_perilaku_list',
+      'bk_jurnal_pembinaan_disiplin_list', 'bk_komitmen_rtl_list',
+      'bk_walikelas_config', 'bk_violation_rules', 'bk_parent_summon_templates',
+      'bk_akpd_class_sessions', 'bk_initial_seeded', 'bk_seeded_',
+      'bk_hv_seeded_', 'bk_att_seeded_', 'bk_pending_cloud_queue',
+      'bk_deleted_ids', 'bk_trash_', 'bk_hapus_log_',
+      'bk_cleared_', 'bk_students_cleared_', 'bk_summons_', 'bk_dummy_students_purged'
+    ];
+    try {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && dataKeyPrefixes.some((p) => k.startsWith(p))) {
+          keysToRemove.push(k);
+        }
+      }
+      keysToRemove.forEach((k) => {
+        try {
+          localStorage.removeItem(k);
+        } catch {}
+      });
+    } catch {}
+  }
+
+  // 2. Bersihkan cache memori & hentikan listener sementara
+  Object.keys(lastSavedRemoteMap).forEach((k) => delete lastSavedRemoteMap[k]);
+  Object.keys(cloudCollectionCache).forEach((k) => delete cloudCollectionCache[k]);
+  Object.keys(loggedSnapshotCounts).forEach((k) => delete loggedSnapshotCounts[k]);
+  stopRealtimeFirestoreSync();
+
+  const counts = {
+    students: 0,
+    violations: 0,
+    services: 0,
+    homeVisits: 0,
+    journals: 0,
+    attendance: 0,
+    total: 0
+  };
+
+  try {
+    await ensureFirebaseAuth();
+    const conn = await testConnection();
+    if (!conn.ok) {
+      const msg = conn.error || 'Tidak dapat terhubung ke server Firebase Firestore';
+      notifyCloudStatusChange(msg.toLowerCase().includes('offline') ? 'offline' : 'error', false, msg);
+      await initRealtimeFirestoreSync();
+      return { success: false, counts, error: msg };
+    }
+
+    const uniqueColMap = new Map<string, string[]>();
+    Object.entries(SYNC_MAP).forEach(([localKey, colName]) => {
+      if (!uniqueColMap.has(colName)) uniqueColMap.set(colName, []);
+      uniqueColMap.get(colName)!.push(localKey);
+    });
+
+    await Promise.all(
+      Array.from(uniqueColMap.entries()).map(async ([colName, localKeys]) => {
+        const docMap = new Map<string, any>();
+        const ingestServerSnap = (snap: any) => {
+          snap.forEach((d: any) => {
+            const item = { id: d.id, ...d.data() } as any;
+            if (!item || !item.id || item.isDeleted === true) return;
+            if (!isDummyRecord(item, localKeys[0]) && matchesSchoolOrLegacy(item, currentSchoolId)) {
+              const isLegacy = isLegacyUnassignedRecord(item);
+              docMap.set(String(item.id), isLegacy ? { ...item, isLegacyUnmigrated: true } : item);
+            }
+          });
+        };
+
+        const rootAliases = Array.from(new Set([colName, ...getCanonicalRootCollections(colName)]));
+        const [subRes, ...rootResults] = await Promise.allSettled([
+          getDocsFromServer(getSchoolColRef(colName, currentSchoolId)),
+          ...rootAliases.map((rc) => getDocsFromServer(collection(db, rc)))
+        ]);
+
+        rootResults.forEach((res) => {
+          if (res.status === 'fulfilled' && !res.value.empty) {
+            ingestServerSnap(res.value);
+          }
+        });
+        if (subRes.status === 'fulfilled' && !subRes.value.empty) {
+          ingestServerSnap(subRes.value);
+        }
+
+        const docsData = Array.from(docMap.values());
+        localKeys.forEach((localKey) => {
+          let sortedDocs = sortCollectionData(localKey, docsData, currentSchoolId);
+          if (localKey === 'bk_logs' && sortedDocs.length > 80) {
+            sortedDocs = sortedDocs.slice(0, 80);
+          }
+
+          lastSavedRemoteMap[`${currentSchoolId}_${localKey}`] = JSON.stringify(sortedDocs);
+          setCloudCollectionData(localKey, sortedDocs, currentSchoolId);
+
+          if (localKey === 'bk_students') counts.students = sortedDocs.length;
+          else if (localKey === 'bk_violations') counts.violations = sortedDocs.length;
+          else if (localKey === 'bk_services') counts.services = sortedDocs.length;
+          else if (localKey === 'bk_home_visits') counts.homeVisits = sortedDocs.length;
+          else if (localKey === 'bk_daily_journals') counts.journals = sortedDocs.length;
+          else if (localKey === 'bk_attendance_history') {
+            counts.attendance = sortedDocs.length;
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: sortedDocs }));
+            }
+          }
+
+          broadcastRealtimeChange({
+            type: 'sync',
+            key: localKey,
+            data: sortedDocs,
+            schoolId: currentSchoolId
+          });
+        });
+      })
+    );
+
+    counts.total =
+      counts.students +
+      counts.violations +
+      counts.services +
+      counts.homeVisits +
+      counts.journals +
+      counts.attendance;
+
+    await initRealtimeFirestoreSync();
+    notifyCloudStatusChange('connected', true);
+    return { success: true, counts };
+  } catch (err: any) {
+    const errMsg = handleFirestoreError(err, 'list', 'clearLocalCacheAndReloadFromCloud');
+    notifyCloudStatusChange('error', false, errMsg);
+    await initRealtimeFirestoreSync().catch(() => {});
+    return { success: false, counts, error: errMsg };
   }
 }
 
@@ -3745,7 +3892,7 @@ export function listenToPendingUsersQuery(
       await ensureFirebaseAuth();
       if (isCancelled) return;
 
-      const usersCol = collection(db, 'users');
+      const usersCol = collection(db, 'counselors');
 
       // Primary query as requested
       try {
@@ -3842,7 +3989,7 @@ export function listenToSchoolUsers(
       await ensureFirebaseAuth();
       if (isCancelled) return;
 
-      const usersCol = collection(db, 'users');
+      const usersCol = collection(db, 'counselors');
       const q = query(usersCol, where('schoolId', '==', currentSchoolId));
 
       unsub = onSnapshot(
@@ -3931,9 +4078,9 @@ export async function approveUserViaCloudFunction(
     console.warn('approveUser Cloud Function call (will guarantee direct Firestore update):', cfErr?.message || cfErr);
   }
 
-  // 2. Pastikan status dokumen users/{uidToApprove} terupdate di Firestore
+  // 2. Pastikan status dokumen counselors/{uidToApprove} terupdate di Firestore
   try {
-    const userRef = doc(db, 'users', uidToApprove);
+    const userRef = doc(db, 'counselors', uidToApprove);
     await updateDoc(userRef, {
       status: 'active',
       approvalStatus: 'approved',
@@ -3944,7 +4091,7 @@ export async function approveUserViaCloudFunction(
   } catch (updErr) {
     // If updateDoc fails because document doesn't exist yet, set with merge
     try {
-      const userRef = doc(db, 'users', uidToApprove);
+      const userRef = doc(db, 'counselors', uidToApprove);
       await setDoc(
         userRef,
         {
@@ -4003,7 +4150,7 @@ export async function rejectUserInFirestore(
   const rejectionReason = reason?.trim() || 'Ditolak oleh Koordinator / Administrator BK';
 
   try {
-    const userRef = doc(db, 'users', uidToReject);
+    const userRef = doc(db, 'counselors', uidToReject);
     await setDoc(
       userRef,
       {
@@ -4259,7 +4406,7 @@ export async function createUserRegistrationInFirestore(userData: {
 
   try {
     await ensureFirebaseAuth();
-    const userDocRef = doc(db, 'users', userData.uid);
+    const userDocRef = doc(db, 'counselors', userData.uid);
     await setDoc(userDocRef, userDocData, { merge: true });
 
     // Mirror to account_requests

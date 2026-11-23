@@ -10,8 +10,6 @@ import {
   generateSchoolIdFromConfig,
   markManualSchoolIdentitySaved,
   getKopSuratSchoolName,
-  loadSchoolData,
-  saveSchoolData,
   SchoolConfig,
   PRESET_LOGOS
 } from '../utils/schoolConfig';
@@ -34,6 +32,9 @@ import {
   formatTanggalPengajuan,
   syncSettingsToPengaturan,
   broadcastRealtimeChange,
+  getCloudCollectionData,
+  setCloudCollectionData,
+  subscribeCloudCollection,
   UserAccountDoc
 } from '../utils/firestoreSync';
 import { 
@@ -1022,36 +1023,22 @@ export default function PengaturanView({
 
   const [waliKelasList, setWaliKelasList] = useState<WaliKelasConfig[]>(() => {
     const activeSid = activeCounselor?.schoolId || getActiveSchoolId();
-    const scoped = loadSchoolData<WaliKelasConfig[]>('bk_walikelas_config', [], activeSid);
-    if (Array.isArray(scoped) && scoped.length > 0) {
-      return scoped;
-    }
-    const saved = localStorage.getItem('bk_walikelas_config');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      } catch {}
-    }
-    return defaultWaliKelasList;
+    const cloudList = getCloudCollectionData<WaliKelasConfig>('bk_walikelas_config', activeSid);
+    return Array.isArray(cloudList) && cloudList.length > 0 ? cloudList : defaultWaliKelasList;
   });
 
   useEffect(() => {
-    const handleSyncWaliKelas = (e: any) => {
-      if (e?.detail?.key === 'bk_walikelas_config') {
-        const activeSid = activeCounselor?.schoolId || getActiveSchoolId();
-        const incoming = Array.isArray(e.detail.data)
-          ? e.detail.data
-          : loadSchoolData<WaliKelasConfig[]>('bk_walikelas_config', [], activeSid);
-        if (Array.isArray(incoming) && incoming.length > 0) {
-          setWaliKelasList(incoming);
-        }
+    const activeSid = activeCounselor?.schoolId || getActiveSchoolId();
+    const initialCloud = getCloudCollectionData<WaliKelasConfig>('bk_walikelas_config', activeSid);
+    if (Array.isArray(initialCloud) && initialCloud.length > 0) {
+      setWaliKelasList(initialCloud);
+    }
+    const unsub = subscribeCloudCollection<WaliKelasConfig>('bk_walikelas_config', (incoming) => {
+      if (Array.isArray(incoming) && incoming.length > 0) {
+        setWaliKelasList(incoming);
       }
-    };
-    window.addEventListener('bk_realtime_sync', handleSyncWaliKelas);
-    return () => {
-      window.removeEventListener('bk_realtime_sync', handleSyncWaliKelas);
-    };
+    }, activeSid);
+    return () => unsub();
   }, [activeCounselor?.schoolId]);
 
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -1076,10 +1063,7 @@ export default function PengaturanView({
   const handleSaveWaliKelasList = (newList: WaliKelasConfig[]) => {
     const activeSid = activeCounselor?.schoolId || getActiveSchoolId();
     setWaliKelasList(newList);
-    saveSchoolData('bk_walikelas_config', newList, activeSid);
-    try {
-      localStorage.setItem('bk_walikelas_config', JSON.stringify(newList));
-    } catch {}
+    setCloudCollectionData('bk_walikelas_config', newList, activeSid);
     broadcastRealtimeChange({
       type: 'sync',
       key: 'bk_walikelas_config',

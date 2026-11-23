@@ -71,6 +71,8 @@ import {
 import { showToast } from '../utils/toast';
 import { generateServicePDF, downloadHomeVisitPDF } from '../utils/pdfGenerator';
 import { formatCardDateTime, formatCardDate, formatCardTime, formatTanggalIndonesia } from '../utils/dateFormatter';
+import { getCloudCollectionData, setCloudCollectionData, saveToFirestore, broadcastRealtimeChange } from '../utils/firestoreSync';
+import { getActiveSchoolId } from '../utils/schoolConfig';
 import {
   StandardBlokAIdentitas,
   StandardBlokBKonteks,
@@ -596,28 +598,23 @@ export default function TambahLayananForm({
   });
   const [status, setStatus] = useState<'Selesai' | 'Terjadwal'>('Selesai');
 
-  // Counselor resolution from localStorage or default
+  // Counselor resolution from cloud collection cache or default
   const activeCounselorInfo = useMemo(() => {
     try {
-      const raw = localStorage.getItem('bk_counselors');
+      const list = getCloudCollectionData<any>('bk_counselors', getActiveSchoolId());
       const activeId = localStorage.getItem('bk_active_counselor_id');
-      if (raw) {
-        const list = JSON.parse(raw);
-        if (Array.isArray(list)) {
-          const found = list.find((c: any) => c.id === activeId);
-          if (found) {
-            return {
-              name: found.name || 'Aulia Aji Sasongko, S.Pd.',
-              nip: found.nip || '19931231 202221 1 002',
-            };
-          }
-          if (list[0]) {
-            return {
-              name: list[0].name || 'Aulia Aji Sasongko, S.Pd.',
-              nip: list[0].nip || '19931231 202221 1 002',
-            };
-          }
+      if (Array.isArray(list) && list.length > 0) {
+        const found = list.find((c: any) => c.id === activeId);
+        if (found) {
+          return {
+            name: found.name || 'Aulia Aji Sasongko, S.Pd.',
+            nip: found.nip || '19931231 202221 1 002',
+          };
         }
+        return {
+          name: list[0].name || 'Aulia Aji Sasongko, S.Pd.',
+          nip: list[0].nip || '19931231 202221 1 002',
+        };
       }
     } catch (e) {
       // ignore
@@ -1853,13 +1850,12 @@ export default function TambahLayananForm({
     const { serviceRecord, hvRecord } = buildHomeVisitRecord();
     onSaveService(serviceRecord);
     setSavedSuccessService(serviceRecord);
-    try {
-      const raw = localStorage.getItem('bk_home_visits');
-      const list = raw ? JSON.parse(raw) : [];
-      localStorage.setItem('bk_home_visits', JSON.stringify([hvRecord, ...(Array.isArray(list) ? list : [])]));
-    } catch (e) {
-      // ignore
-    }
+    const activeSid = getActiveSchoolId();
+    const prevVisits = getCloudCollectionData<HomeVisitRecord>('bk_home_visits', activeSid);
+    const nextVisits = [hvRecord, ...prevVisits.filter((v) => v.id !== hvRecord.id)];
+    setCloudCollectionData('bk_home_visits', nextVisits, activeSid);
+    void saveToFirestore('bk_home_visits', hvRecord, activeSid);
+    broadcastRealtimeChange({ type: 'sync', key: 'bk_home_visits', data: nextVisits, schoolId: activeSid });
     try {
       downloadHomeVisitPDF(hvRecord);
     } catch (err) {
@@ -2141,13 +2137,12 @@ export default function TambahLayananForm({
       const { serviceRecord, hvRecord } = buildHomeVisitRecord();
       onSaveService(serviceRecord);
       setSavedSuccessService(serviceRecord);
-      try {
-        const raw = localStorage.getItem('bk_home_visits');
-        const list = raw ? JSON.parse(raw) : [];
-        localStorage.setItem('bk_home_visits', JSON.stringify([hvRecord, ...(Array.isArray(list) ? list : [])]));
-      } catch (e) {
-        // ignore
-      }
+      const activeSid = getActiveSchoolId();
+      const prevVisits = getCloudCollectionData<HomeVisitRecord>('bk_home_visits', activeSid);
+      const nextVisits = [hvRecord, ...prevVisits.filter((v) => v.id !== hvRecord.id)];
+      setCloudCollectionData('bk_home_visits', nextVisits, activeSid);
+      void saveToFirestore('bk_home_visits', hvRecord, activeSid);
+      broadcastRealtimeChange({ type: 'sync', key: 'bk_home_visits', data: nextVisits, schoolId: activeSid });
       showToast(`✅ Laporan Home Visit (Kunjungan Rumah) berhasil disimpan!`, 'success');
       return;
     }

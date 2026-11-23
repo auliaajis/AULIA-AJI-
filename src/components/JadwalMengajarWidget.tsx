@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { TeachingScheduleItem, ClassTeachingProgress, Counselor } from '../types';
-import { saveBulkToFirestore, loadSchoolData, saveSchoolData } from '../utils/firestoreSync';
+import { getCloudCollectionData, setCloudCollectionData, subscribeCloudCollection, saveToFirestore, softDeleteFromFirestore } from '../utils/firestoreSync';
 import { getActiveSchoolId } from '../utils/schoolConfig';
 import {
   Calendar,
@@ -49,9 +49,7 @@ export const JadwalMengajarWidget: React.FC<JadwalMengajarWidgetProps> = ({
   activeCounselor,
 }) => {
   const counselorId = activeCounselor?.id || 'default';
-  const schoolId = getActiveSchoolId();
-  const scheduleStorageKey = `bk_teaching_schedule_${counselorId}`;
-  const progressStorageKey = `bk_class_teaching_progress_${counselorId}`;
+  const schoolId = activeCounselor?.schoolId || getActiveSchoolId();
 
   // Get current day in Indonesian name
   const getCurrentDayName = (): (typeof DAYS)[number] => {
@@ -70,46 +68,33 @@ export const JadwalMengajarWidget: React.FC<JadwalMengajarWidgetProps> = ({
 
   const [selectedDay, setSelectedDay] = useState<(typeof DAYS)[number]>(getCurrentDayName());
 
-  const loadSchedule = (): TeachingScheduleItem[] => {
-    const raw = loadSchoolData<TeachingScheduleItem[]>(scheduleStorageKey, [], schoolId);
-    if (Array.isArray(raw) && raw.length > 0) {
-      return raw.filter((s: any) => !String(s.id).startsWith('sch-'));
-    }
-    const legacy = localStorage.getItem('bk_teaching_schedule');
-    if (legacy && (counselorId === 'default' || counselorId === 'c1' || counselorId === 'admin')) {
-      try {
-        const parsed = JSON.parse(legacy);
-        if (Array.isArray(parsed)) return parsed.filter((s: any) => !String(s.id).startsWith('sch-'));
-      } catch (e) {}
-    }
-    return [];
+  const normalizeScheduleList = (raw: any): TeachingScheduleItem[] => {
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((s: any) => s && s.isDeleted !== true);
   };
 
-  const loadProgress = (): Record<string, ClassTeachingProgress> => {
-    const raw = loadSchoolData<Record<string, ClassTeachingProgress>>(progressStorageKey, {}, schoolId);
-    if (raw && typeof raw === 'object' && Object.keys(raw).length > 0) {
-      return raw;
+  const normalizeProgressMap = (raw: any): Record<string, ClassTeachingProgress> => {
+    if (!raw) return {};
+    if (Array.isArray(raw)) {
+      const map: Record<string, ClassTeachingProgress> = {};
+      raw.forEach((p: any) => {
+        if (p && p.className && p.isDeleted !== true) map[p.className] = p;
+      });
+      return map;
     }
-    const legacy = localStorage.getItem('bk_class_teaching_progress');
-    if (legacy && (counselorId === 'default' || counselorId === 'c1' || counselorId === 'admin')) {
-      try {
-        return JSON.parse(legacy);
-      } catch (e) {}
-    }
+    if (typeof raw === 'object') return raw as Record<string, ClassTeachingProgress>;
     return {};
   };
 
-  // Schedule state
-  const [schedule, setSchedule] = useState<TeachingScheduleItem[]>(() => loadSchedule());
+  // Schedule state (from Firestore live cache)
+  const [schedule, setSchedule] = useState<TeachingScheduleItem[]>(() =>
+    normalizeScheduleList(getCloudCollectionData('bk_teaching_schedule', schoolId))
+  );
 
-  // Class Progress state
-  const [progressMap, setProgressMap] = useState<Record<string, ClassTeachingProgress>>(() => loadProgress());
-
-  // Reload when counselor or school changes
-  useEffect(() => {
-    setSchedule(loadSchedule());
-    setProgressMap(loadProgress());
-  }, [counselorId, schoolId]);
+  // Class Progress state (from Firestore live cache)
+  const [progressMap, setProgressMap] = useState<Record<string, ClassTeachingProgress>>(() =>
+    normalizeProgressMap(getCloudCollectionData('bk_class_teaching_progress', schoolId))
+  );
 
   // Modal States
   const [isManagingSchedule, setIsManagingSchedule] = useState(false);
@@ -126,41 +111,23 @@ export const JadwalMengajarWidget: React.FC<JadwalMengajarWidgetProps> = ({
   const [schClass, setSchClass] = useState('Kelas 7A');
   const [schSubject, setSchSubject] = useState('Bimbingan Klasikal / KBM');
 
-  useEffect(() => {
-    saveSchoolData(scheduleStorageKey, schedule, schoolId);
-    saveBulkToFirestore(scheduleStorageKey, schedule, schoolId);
-  }, [schedule, scheduleStorageKey, schoolId]);
-
-  useEffect(() => {
-    saveSchoolData(progressStorageKey, progressMap, schoolId);
-    const progressList = Object.values(progressMap).map((p: ClassTeachingProgress) => ({
-      ...p,
-      id: p.className || `prog-${Math.random()}`
-    }));
-    saveBulkToFirestore(progressStorageKey, progressList, schoolId);
-  }, [progressMap, progressStorageKey, schoolId]);
-
   // Realtime Cloud Firestore Listener across devices
   useEffect(() => {
-    const handleSync = (e: any) => {
-      const key = e.detail?.key;
-      if (!key || key === scheduleStorageKey || key === 'bk_teaching_schedule' || key === 'all') {
-        setSchedule(loadSchedule());
-      }
-      if (!key || key === progressStorageKey || key === 'bk_class_teaching_progress' || key === 'all') {
-        setProgressMap(loadProgress());
-      }
-    };
+    setSchedule(normalizeScheduleList(getCloudCollectionData('bk_teaching_schedule', schoolId)));
+    setProgressMap(normalizeProgressMap(getCloudCollectionData('bk_class_teaching_progress', schoolId)));
 
-    window.addEventListener('bk_realtime_sync', handleSync);
-    window.addEventListener('storage', handleSync);
-    window.addEventListener('bk_school_changed', handleSync);
+    const unsubSchedule = subscribeCloudCollection('bk_teaching_schedule', (data) => {
+      setSchedule(normalizeScheduleList(data));
+    }, schoolId);
+    const unsubProgress = subscribeCloudCollection('bk_class_teaching_progress', (data) => {
+      setProgressMap(normalizeProgressMap(data));
+    }, schoolId);
+
     return () => {
-      window.removeEventListener('bk_realtime_sync', handleSync);
-      window.removeEventListener('storage', handleSync);
-      window.removeEventListener('bk_school_changed', handleSync);
+      unsubSchedule();
+      unsubProgress();
     };
-  }, [scheduleStorageKey, progressStorageKey, counselorId, schoolId]);
+  }, [counselorId, schoolId]);
 
   // Scheduled items for selected day
   const currentDaySchedule = schedule.filter((s) => s.day === selectedDay);
@@ -185,10 +152,11 @@ export const JadwalMengajarWidget: React.FC<JadwalMengajarWidgetProps> = ({
       updatedAt: new Date().toISOString(),
     };
 
-    setProgressMap((prev) => ({
-      ...prev,
-      [isUpdatingProgress]: updatedObj,
-    }));
+    const nextMap = { ...progressMap, [isUpdatingProgress]: updatedObj };
+    setProgressMap(nextMap);
+    const listToStore = Object.values(nextMap).map((p) => ({ ...p, id: p.className }));
+    setCloudCollectionData('bk_class_teaching_progress', listToStore, schoolId);
+    void saveToFirestore('bk_class_teaching_progress', { ...updatedObj, id: updatedObj.className }, schoolId);
 
     setIsUpdatingProgress(null);
   };
@@ -196,18 +164,29 @@ export const JadwalMengajarWidget: React.FC<JadwalMengajarWidgetProps> = ({
   const handleAddScheduleItem = (e: React.FormEvent) => {
     e.preventDefault();
     const newItem: TeachingScheduleItem = {
-      id: `sch-${Date.now()}`,
+      id: `tsched-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       day: schDay,
       period: schPeriod,
       timeRange: schTime,
       className: schClass,
       subject: schSubject,
     };
-    setSchedule((prev) => [...prev, newItem]);
+    const nextSchedule = [...schedule, newItem];
+    setSchedule(nextSchedule);
+    setCloudCollectionData('bk_teaching_schedule', nextSchedule, schoolId);
+    void saveToFirestore('bk_teaching_schedule', newItem, schoolId);
   };
 
   const handleDeleteScheduleItem = (id: string) => {
-    setSchedule((prev) => prev.filter((s) => s.id !== id));
+    const target = schedule.find((s) => s.id === id);
+    const nextSchedule = schedule.filter((s) => s.id !== id);
+    setSchedule(nextSchedule);
+    setCloudCollectionData('bk_teaching_schedule', nextSchedule, schoolId);
+    void softDeleteFromFirestore('bk_teaching_schedule', target || id, {
+      customSchoolId: schoolId,
+      deletedBy: activeCounselor?.name || 'Guru BK',
+      entityType: 'Jadwal Mengajar BK',
+    });
   };
 
   return (

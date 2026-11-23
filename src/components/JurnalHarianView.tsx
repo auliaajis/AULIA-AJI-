@@ -36,7 +36,13 @@ import { downloadJournalPDF, downloadJournalRangePDF, formatIndonesianDate } fro
 import { formatCardDate, formatCardTime, formatCardDateTime } from '../utils/dateFormatter';
 import { triggerBackgroundAutoSync } from '../utils/googleSync';
 import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, softDeleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import {
+  getCloudCollectionData,
+  setCloudCollectionData,
+  subscribeCloudCollection,
+  softDeleteFromFirestore,
+  saveToFirestore,
+} from '../utils/firestoreSync';
 import { getValidatedSchoolIdentity, buildSchoolStamp } from '../utils/schoolConfig';
 import { showToast } from '../utils/toast';
 import { isValidDeleteId, safeFilterSingleDelete, generateUniqueId } from '../utils/safeDelete';
@@ -118,22 +124,13 @@ export default function JurnalHarianView({
     return localDate.toISOString().split('T')[0];
   });
 
-  const readScopedOrLegacyArray = (primaryKey: string, altKey?: string): any[] => {
+  const readCloudArray = (primaryKey: string, altKey?: string): any[] => {
     const sId = activeCounselor?.schoolId;
-    const primaryScoped = loadSchoolData<any[]>(primaryKey, [], sId);
-    if (Array.isArray(primaryScoped) && primaryScoped.length > 0) return primaryScoped;
+    const primaryCloud = getCloudCollectionData<any>(primaryKey, sId);
+    if (Array.isArray(primaryCloud) && primaryCloud.length > 0) return primaryCloud;
     if (altKey) {
-      const altScoped = loadSchoolData<any[]>(altKey, [], sId);
-      if (Array.isArray(altScoped) && altScoped.length > 0) return altScoped;
-    }
-    if (typeof localStorage !== 'undefined') {
-      try {
-        const raw = localStorage.getItem(primaryKey) || (altKey ? localStorage.getItem(altKey) : null);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) return parsed;
-        }
-      } catch {}
+      const altCloud = getCloudCollectionData<any>(altKey, sId);
+      if (Array.isArray(altCloud) && altCloud.length > 0) return altCloud;
     }
     return [];
   };
@@ -142,16 +139,16 @@ export default function JurnalHarianView({
     const rangeServices = services.filter(s => s.date >= start && s.date <= end);
     const rangeViolations = violations.filter(v => v.date >= start && v.date <= end);
 
-    const homeVisits = readScopedOrLegacyArray('bk_home_visits');
+    const homeVisits = readCloudArray('bk_home_visits');
     const rangeHomeVisits = homeVisits.filter(hv => hv.date >= start && hv.date <= end);
 
-    const summons = readScopedOrLegacyArray('bk_parent_summons');
+    const summons = readCloudArray('bk_parent_summons');
     const rangeSummons = summons.filter(sm => (sm.summonDate || sm.date) >= start && (sm.summonDate || sm.date) <= end);
 
-    const achievements = readScopedOrLegacyArray('bk_achievements', 'bk_student_achievements');
+    const achievements = readCloudArray('bk_achievements', 'bk_student_achievements');
     const rangeAch = achievements.filter(a => a.date >= start && a.date <= end);
 
-    const attendanceHistory = readScopedOrLegacyArray('bk_attendance_history');
+    const attendanceHistory = readCloudArray('bk_attendance_history');
     const rangeAtt = attendanceHistory.filter(att => {
       const d = normalizeDateStr(att.date);
       return d >= start && d <= end;
@@ -261,24 +258,15 @@ export default function JurnalHarianView({
     );
   };
 
-  // Main Journal entries state (school-scoped & filtered against soft deletes)
+  // Main Journal entries state strictly from Firestore cloud store
   const [journalEntries, setJournalEntries] = useState<BKJournalEntry[]>(() => {
     const deletedSet = new Set(getDeletedIds());
-    const list = loadSchoolData<BKJournalEntry[]>('bk_daily_journals', [], activeCounselor?.schoolId);
-    if (Array.isArray(list) && list.length > 0) {
-      return list.filter((j) => j && j.isDeleted !== true && !deletedSet.has(String(j.id)));
-    }
-    try {
-      const legacyRaw = localStorage.getItem('bk_daily_journals');
-      if (legacyRaw) {
-        const parsed = JSON.parse(legacyRaw);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((j: any) => j && j.isDeleted !== true && !deletedSet.has(String(j.id)));
-        }
-      }
-    } catch {}
-    return [];
+    const list = getCloudCollectionData<BKJournalEntry>('bk_daily_journals', activeCounselor?.schoolId);
+    return list.filter((j) => j && j.isDeleted !== true && !deletedSet.has(String(j.id)));
   });
+
+  // Reactive auxiliary collections for auto-activities summary
+  const [cloudTick, setCloudTick] = useState(0);
 
   // Form State
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -351,15 +339,10 @@ export default function JurnalHarianView({
   const detectedClass = findSelectedClass();
   const classProgressInfo = useMemo(() => {
     if (!detectedClass) return null;
-    try {
-      const saved = localStorage.getItem('bk_class_teaching_progress');
-      if (!saved) return null;
-      const map = JSON.parse(saved);
-      return map[detectedClass] || null;
-    } catch {
-      return null;
-    }
-  }, [target, classList]);
+    const rawList = getCloudCollectionData<any>('bk_class_teaching_progress', activeCounselor?.schoolId);
+    const found = rawList.find((p: any) => p && (p.className === detectedClass || p.id === detectedClass));
+    return found || null;
+  }, [target, classList, activeCounselor?.schoolId, cloudTick]);
 
   // Handle incoming journal preset navigation from Jadwal Mengajar Widget
   useEffect(() => {
@@ -399,18 +382,11 @@ export default function JurnalHarianView({
     return dayMap[d.getDay()] || 'Senin';
   }, [selectedDate]);
 
-  // Read teaching schedule for selected day from localStorage
+  // Read teaching schedule for selected day strictly from Firestore cloud store
   const daySchedules = useMemo(() => {
-    try {
-      const saved = localStorage.getItem('bk_teaching_schedule');
-      if (!saved) return [];
-      const list = JSON.parse(saved);
-      if (!Array.isArray(list)) return [];
-      return list.filter((s: any) => s.day === selectedDayName);
-    } catch {
-      return [];
-    }
-  }, [selectedDayName, isFormOpen]);
+    const list = getCloudCollectionData<any>('bk_teaching_schedule', activeCounselor?.schoolId);
+    return list.filter((s: any) => s && s.day === selectedDayName);
+  }, [selectedDayName, isFormOpen, activeCounselor?.schoolId, cloudTick]);
 
   // Fast apply scheduled class to journal form
   const handleApplyScheduleItem = (sch: any) => {
@@ -430,15 +406,11 @@ export default function JurnalHarianView({
     setTitle(sch.subject || `Bimbingan Klasikal - ${sch.className}`);
 
     let lastProgText = '';
-    try {
-      const progSaved = localStorage.getItem('bk_class_teaching_progress');
-      if (progSaved) {
-        const pObj = JSON.parse(progSaved);
-        if (pObj[sch.className]?.lastTopic) {
-          lastProgText = `\nProgress Catatan Sebelumnya: ${pObj[sch.className].lastTopic}`;
-        }
-      }
-    } catch {}
+    const progList = getCloudCollectionData<any>('bk_class_teaching_progress', activeCounselor?.schoolId);
+    const foundProg = progList.find((p: any) => p && (p.className === sch.className || p.id === sch.className));
+    if (foundProg?.lastTopic) {
+      lastProgText = `\nProgress Catatan Sebelumnya: ${foundProg.lastTopic}`;
+    }
 
     setDescription(`Pelaksanaan KBM / Bimbingan Klasikal (${sch.period || 'Jam KBM'}) pukul ${sTime} - ${eTime} WIB di ${sch.className}.\nMateri / Topik: ${sch.subject || 'Bimbingan Klasikal'}.${lastProgText}`);
   };
@@ -448,7 +420,7 @@ export default function JurnalHarianView({
   const handleAutoLoadAbsensi = (customClassTarget?: string) => {
     let detected = customClassTarget || findSelectedClass();
 
-    const attendanceHistory: any[] = readScopedOrLegacyArray('bk_attendance_history');
+    const attendanceHistory: any[] = readCloudArray('bk_attendance_history');
     const dateNorm = normalizeDateStr(selectedDate);
 
     // If still not detected, and there is attendance on this date, check if there's only 1 record or suggest
@@ -601,9 +573,9 @@ export default function JurnalHarianView({
     reader.readAsDataURL(file);
   };
 
-  // Sync to local cache
+  // Background Google sync trigger on journal edits
   useEffect(() => {
-    saveSchoolData('bk_daily_journals', journalEntries, activeCounselor?.schoolId);
+    setCloudCollectionData('bk_daily_journals', journalEntries, activeCounselor?.schoolId);
     if (isInitialMountJournal.current) {
       isInitialMountJournal.current = false;
       return;
@@ -611,32 +583,33 @@ export default function JurnalHarianView({
     triggerBackgroundAutoSync();
   }, [journalEntries, activeCounselor?.schoolId]);
 
-  // Realtime subscriber for remote changes
+  // Realtime subscriber for Firestore changes
   useEffect(() => {
-    const handleRealtimeUpdate = (e: any) => {
-      if (e.detail?.key === 'bk_daily_journals') {
+    const sId = activeCounselor?.schoolId;
+    const unsubJournals = subscribeCloudCollection<BKJournalEntry>(
+      'bk_daily_journals',
+      (data) => {
         const deletedSet = new Set(getDeletedIds());
-        if (Array.isArray(e.detail.data)) {
-          setJournalEntries(e.detail.data.filter((j: any) => j && j.isDeleted !== true && !deletedSet.has(String(j.id))));
-        } else {
-          const loaded = loadSchoolData<BKJournalEntry[]>('bk_daily_journals', [], activeCounselor?.schoolId);
-          setJournalEntries(loaded.filter((j) => j && j.isDeleted !== true && !deletedSet.has(String(j.id))));
-        }
-      }
-    };
-
-    const handleStorageEvent = (e: StorageEvent) => {
-      if (e.key && (e.key === 'bk_daily_journals' || e.key.startsWith('bk_daily_journals_sch_'))) {
-        handleRealtimeUpdate({ detail: { key: 'bk_daily_journals' } });
-      }
-    };
-
-    window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
-    window.addEventListener('storage', handleStorageEvent);
+        setJournalEntries(data.filter((j) => j && j.isDeleted !== true && !deletedSet.has(String(j.id))));
+      },
+      sId
+    );
+    const bump = () => setCloudTick((t) => t + 1);
+    const unsubHv = subscribeCloudCollection('bk_home_visits', bump, sId);
+    const unsubSm = subscribeCloudCollection('bk_parent_summons', bump, sId);
+    const unsubAch = subscribeCloudCollection('bk_achievements', bump, sId);
+    const unsubAtt = subscribeCloudCollection('bk_attendance_history', bump, sId);
+    const unsubSch = subscribeCloudCollection('bk_teaching_schedule', bump, sId);
+    const unsubProg = subscribeCloudCollection('bk_class_teaching_progress', bump, sId);
 
     return () => {
-      window.removeEventListener('bk_realtime_sync', handleRealtimeUpdate);
-      window.removeEventListener('storage', handleStorageEvent);
+      unsubJournals();
+      unsubHv();
+      unsubSm();
+      unsubAch();
+      unsubAtt();
+      unsubSch();
+      unsubProg();
     };
   }, [activeCounselor?.schoolId]);
 
@@ -739,22 +712,20 @@ export default function JurnalHarianView({
       }
     }
 
-    // Auto-linkage: Update Class Teaching Progress in LocalStorage
+    // Auto-linkage: Update Class Teaching Progress directly in Firestore
     if (detectedClass) {
-      try {
-        const currentProgressRaw = localStorage.getItem('bk_class_teaching_progress');
-        const progressMap = currentProgressRaw ? JSON.parse(currentProgressRaw) : {};
-        progressMap[detectedClass] = {
-          className: detectedClass,
-          lastDate: selectedDate,
-          lastTopic: title.trim(),
-          notes: description.trim(),
-          updatedAt: new Date().toISOString()
-        };
-        localStorage.setItem('bk_class_teaching_progress', JSON.stringify(progressMap));
-      } catch (err) {
-        console.warn('Failed to auto-update class teaching progress:', err);
-      }
+      const progressItem = {
+        id: detectedClass,
+        className: detectedClass,
+        lastDate: selectedDate,
+        lastTopic: title.trim(),
+        notes: description.trim(),
+        updatedAt: new Date().toISOString()
+      };
+      const curList = getCloudCollectionData<any>('bk_class_teaching_progress', activeCounselor?.schoolId);
+      const nextList = [progressItem, ...curList.filter((p: any) => p && p.className !== detectedClass && p.id !== detectedClass)];
+      setCloudCollectionData('bk_class_teaching_progress', nextList, activeCounselor?.schoolId);
+      saveToFirestore('bk_class_teaching_progress', progressItem, activeCounselor?.schoolId);
     }
 
     handleResetForm();
@@ -793,16 +764,16 @@ export default function JurnalHarianView({
   const currentDayViolations = violations.filter(v => v.date === selectedDate);
   const currentSchoolId = activeCounselor?.schoolId;
 
-  const homeVisits: any[] = loadSchoolData('bk_home_visits', [], currentSchoolId);
+  const homeVisits: any[] = getCloudCollectionData('bk_home_visits', currentSchoolId);
   const currentDayHomeVisits = homeVisits.filter(hv => hv.date === selectedDate);
 
-  const summons: any[] = loadSchoolData('bk_parent_summons', [], currentSchoolId);
+  const summons: any[] = getCloudCollectionData('bk_parent_summons', currentSchoolId);
   const currentDaySummons = summons.filter(sm => (sm.summonDate || sm.date) === selectedDate);
 
-  const achievements: any[] = loadSchoolData('bk_achievements', [], currentSchoolId);
+  const achievements: any[] = getCloudCollectionData('bk_achievements', currentSchoolId);
   const currentDayAchievements = achievements.filter(a => a.date === selectedDate);
 
-  const attendanceHistory: any[] = loadSchoolData('bk_attendance_history', [], currentSchoolId);
+  const attendanceHistory: any[] = getCloudCollectionData('bk_attendance_history', currentSchoolId);
   const currentDayAttendance = attendanceHistory.filter(att => normalizeDateStr(att.date) === normalizeDateStr(selectedDate));
 
   // Map services & violations to standard structures

@@ -52,7 +52,7 @@ import {
   downloadRekapLayananPDF,
   downloadRekapSiswaKritisPDF,
 } from '../utils/pdfGenerator';
-import { loadSchoolData } from '../utils/schoolConfig';
+import { getCloudCollectionData, subscribeCloudCollection } from '../utils/firestoreSync';
 import { BK_COMPONENTS_DATA, getBKComponentForService } from '../utils/bkKomprehensif';
 import { SERVICE_CATEGORIES } from './GrafikLayananBulananCard';
 import BehavioralDiagnosisModal from './BehavioralDiagnosisModal';
@@ -212,6 +212,18 @@ export default function LaporanRekapView({
       document.removeEventListener('keydown', handleEscape);
     };
   }, [exportMenuOpen]);
+
+  const [allAttendanceHistory, setAllAttendanceHistory] = useState<any[]>(() =>
+    getCloudCollectionData('bk_attendance_history', activeCounselor?.schoolId)
+  );
+
+  useEffect(() => {
+    return subscribeCloudCollection(
+      'bk_attendance_history',
+      (data) => setAllAttendanceHistory(data),
+      activeCounselor?.schoolId
+    );
+  }, [activeCounselor?.schoolId]);
 
   // Soft-delete guard at component boundary
   const activeStudents = useMemo(
@@ -385,8 +397,6 @@ export default function LaporanRekapView({
 
   // Critical & High Attention Students
   const criticalStudentsList = useMemo(() => {
-    const allAttendanceHistory: any[] = loadSchoolData<any[]>('bk_attendance_history', [], activeCounselor?.schoolId);
-
     return activeStudents
       .filter((st) => {
         const matchesClass =

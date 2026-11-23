@@ -44,6 +44,7 @@ import EmailNotificationModal from './EmailNotificationModal';
 import { showToast } from '../utils/toast';
 import { isValidDeleteId } from '../utils/safeDelete';
 import { formatCardDateTime, formatCardDate, formatCardTime } from '../utils/dateFormatter';
+import { getCloudCollectionData, subscribeCloudCollection } from '../utils/firestoreSync';
 
 interface DataSiswaViewProps {
   students: Student[];
@@ -475,18 +476,25 @@ export default function DataSiswaView({
   const [newClass, setNewClass] = useState(initialAddClass);
   const [newGender, setNewGender] = useState<'L' | 'P'>('L');
 
-  // Load wali kelas config from localStorage to dynamically resolve email addresses
-  const waliKelasConfig = useMemo(() => {
-    const saved = localStorage.getItem('bk_walikelas_config');
-    if (saved) {
-      try {
-        return JSON.parse(saved) as { class: string; name: string; email: string }[];
-      } catch (e) {
-        return defaultWaliKelasList;
-      }
+  // Load wali kelas config from Firestore pengaturan cache
+  const [waliKelasConfig, setWaliKelasConfig] = useState<{ class: string; name: string; email: string }[]>(() => {
+    const cloudList = getCloudCollectionData<{ class: string; name: string; email: string }>('bk_walikelas_config', activeCounselor?.schoolId);
+    return Array.isArray(cloudList) && cloudList.length > 0 ? cloudList : defaultWaliKelasList;
+  });
+
+  useEffect(() => {
+    const sid = activeCounselor?.schoolId;
+    const cloudList = getCloudCollectionData<{ class: string; name: string; email: string }>('bk_walikelas_config', sid);
+    if (Array.isArray(cloudList) && cloudList.length > 0) {
+      setWaliKelasConfig(cloudList);
     }
-    return defaultWaliKelasList;
-  }, []);
+    const unsub = subscribeCloudCollection<{ class: string; name: string; email: string }>('bk_walikelas_config', (list) => {
+      if (Array.isArray(list) && list.length > 0) {
+        setWaliKelasConfig(list);
+      }
+    }, sid);
+    return () => unsub();
+  }, [activeCounselor?.schoolId]);
 
   const getWaliKelasEmail = (className: string) => {
     if (!className) return '';

@@ -51,7 +51,7 @@ import {
 import { fetchDisciplineFormAi, DisciplineFormType } from '../utils/geminiDisciplineAi';
 import { autoPushToJournal } from '../utils/journalAutoLink';
 import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, softDeleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import { getCloudCollectionData, setCloudCollectionData, subscribeCloudCollection, softDeleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
 import { DisciplineConfigModal } from './DisciplineConfigModal';
 import { getDisciplineConfig, DisciplineConfig } from '../utils/disciplineConfig';
 import { getValidatedSchoolIdentity, buildSchoolStamp } from '../utils/schoolConfig';
@@ -93,119 +93,89 @@ export default function PembinaanPendisiplinanView({
     kelas?: string;
   } | null>(null);
 
-  // Persistence list state for Surat Perjanjian
-  const [perjanjianList, setPerjanjianList] = useState<SuratPerjanjianRecord[]>(() => {
+  const currentSchoolId = activeCounselor?.schoolId;
+
+  const filterActiveDocs = <T extends { id: string; isDeleted?: boolean }>(arr: T[]) => {
     const deletedSet = new Set(getDeletedIds());
-    return loadSchoolData<SuratPerjanjianRecord[]>('bk_surat_perjanjian_list', []).filter(
-      (p) => p && p.isDeleted !== true && !deletedSet.has(String(p.id))
+    return (Array.isArray(arr) ? arr : []).filter(
+      (x) => x && x.isDeleted !== true && !deletedSet.has(String(x.id))
     );
-  });
+  };
 
-  // Persistence list state for Kontrak Perilaku
-  const [kontrakList, setKontrakList] = useState<KontrakPerilakuRecord[]>(() => {
-    const deletedSet = new Set(getDeletedIds());
-    return loadSchoolData<KontrakPerilakuRecord[]>('bk_kontrak_perilaku_list', []).filter(
-      (k) => k && k.isDeleted !== true && !deletedSet.has(String(k.id))
-    );
-  });
+  // Persistence list state fed from Firestore live cache
+  const [perjanjianList, setPerjanjianList] = useState<SuratPerjanjianRecord[]>(() =>
+    filterActiveDocs(getCloudCollectionData<SuratPerjanjianRecord>('bk_surat_perjanjian_list', currentSchoolId))
+  );
+  const [kontrakList, setKontrakList] = useState<KontrakPerilakuRecord[]>(() =>
+    filterActiveDocs(getCloudCollectionData<KontrakPerilakuRecord>('bk_kontrak_perilaku_list', currentSchoolId))
+  );
+  const [jurnalList, setJurnalList] = useState<JurnalPembinaanDisiplinRecord[]>(() =>
+    filterActiveDocs(getCloudCollectionData<JurnalPembinaanDisiplinRecord>('bk_jurnal_pembinaan_disiplin_list', currentSchoolId))
+  );
+  const [komitmenList, setKomitmenList] = useState<KomitmenRtlRecord[]>(() =>
+    filterActiveDocs(getCloudCollectionData<KomitmenRtlRecord>('bk_komitmen_rtl_list', currentSchoolId))
+  );
+  const [attRecords, setAttRecords] = useState<ClassAttendanceRecord[]>(() =>
+    getCloudCollectionData<ClassAttendanceRecord>('bk_attendance_history', currentSchoolId)
+  );
+  const [parentSummonsCache, setParentSummonsCache] = useState<any[]>(() =>
+    getCloudCollectionData<any>('bk_parent_summons', currentSchoolId)
+  );
+  const [homeVisitsCache, setHomeVisitsCache] = useState<any[]>(() =>
+    getCloudCollectionData<any>('bk_home_visits', currentSchoolId)
+  );
 
-  // Persistence list state for Jurnal Pembinaan Disiplin BK
-  const [jurnalList, setJurnalList] = useState<JurnalPembinaanDisiplinRecord[]>(() => {
-    const deletedSet = new Set(getDeletedIds());
-    return loadSchoolData<JurnalPembinaanDisiplinRecord[]>('bk_jurnal_pembinaan_disiplin_list', []).filter(
-      (j) => j && j.isDeleted !== true && !deletedSet.has(String(j.id))
-    );
-  });
-
-  // Persistence list state for Lembar Komitmen & RTL
-  const [komitmenList, setKomitmenList] = useState<KomitmenRtlRecord[]>(() => {
-    const deletedSet = new Set(getDeletedIds());
-    return loadSchoolData<KomitmenRtlRecord[]>('bk_komitmen_rtl_list', []).filter(
-      (k) => k && k.isDeleted !== true && !deletedSet.has(String(k.id))
-    );
-  });
-
-  // LocalStorage Realtime Persist
+  // Realtime subscriber directly from Firestore memory cache
   useEffect(() => {
-    saveSchoolData('bk_surat_perjanjian_list', perjanjianList);
-  }, [perjanjianList]);
+    setPerjanjianList(filterActiveDocs(getCloudCollectionData<SuratPerjanjianRecord>('bk_surat_perjanjian_list', currentSchoolId)));
+    setKontrakList(filterActiveDocs(getCloudCollectionData<KontrakPerilakuRecord>('bk_kontrak_perilaku_list', currentSchoolId)));
+    setJurnalList(filterActiveDocs(getCloudCollectionData<JurnalPembinaanDisiplinRecord>('bk_jurnal_pembinaan_disiplin_list', currentSchoolId)));
+    setKomitmenList(filterActiveDocs(getCloudCollectionData<KomitmenRtlRecord>('bk_komitmen_rtl_list', currentSchoolId)));
+    setAttRecords(getCloudCollectionData<ClassAttendanceRecord>('bk_attendance_history', currentSchoolId));
+    setParentSummonsCache(getCloudCollectionData<any>('bk_parent_summons', currentSchoolId));
+    setHomeVisitsCache(getCloudCollectionData<any>('bk_home_visits', currentSchoolId));
 
-  useEffect(() => {
-    saveSchoolData('bk_kontrak_perilaku_list', kontrakList);
-  }, [kontrakList]);
-
-  useEffect(() => {
-    saveSchoolData('bk_jurnal_pembinaan_disiplin_list', jurnalList);
-  }, [jurnalList]);
-
-  useEffect(() => {
-    saveSchoolData('bk_komitmen_rtl_list', komitmenList);
-  }, [komitmenList]);
-
-  // Realtime subscriber for remote changes
-  useEffect(() => {
-    const handleRealtimeUpdate = (e: any) => {
-      const key = e.detail?.key;
-      const data = e.detail?.data;
-      const deletedSet = new Set(getDeletedIds());
-      const filterActive = <T extends { id: string; isDeleted?: boolean }>(arr: T[]) =>
-        arr.filter((x) => x && x.isDeleted !== true && !deletedSet.has(String(x.id)));
-      if (key === 'bk_surat_perjanjian_list') {
-        if (Array.isArray(data)) setPerjanjianList(filterActive(data));
-        else setPerjanjianList(filterActive(loadSchoolData('bk_surat_perjanjian_list', [])));
-      } else if (key === 'bk_kontrak_perilaku_list') {
-        if (Array.isArray(data)) setKontrakList(filterActive(data));
-        else setKontrakList(filterActive(loadSchoolData('bk_kontrak_perilaku_list', [])));
-      } else if (key === 'bk_jurnal_pembinaan_disiplin_list') {
-        if (Array.isArray(data)) setJurnalList(filterActive(data));
-        else setJurnalList(filterActive(loadSchoolData('bk_jurnal_pembinaan_disiplin_list', [])));
-      } else if (key === 'bk_komitmen_rtl_list') {
-        if (Array.isArray(data)) setKomitmenList(filterActive(data));
-        else setKomitmenList(filterActive(loadSchoolData('bk_komitmen_rtl_list', [])));
-      }
-    };
-
-    window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
-    window.addEventListener('storage', (e) => {
-      if (e.key && e.key.startsWith('bk_')) {
-        handleRealtimeUpdate({ detail: { key: e.key } });
-      }
-    });
-
+    const unsubs = [
+      subscribeCloudCollection<SuratPerjanjianRecord>('bk_surat_perjanjian_list', (list) => {
+        setPerjanjianList(filterActiveDocs(list));
+      }, currentSchoolId),
+      subscribeCloudCollection<KontrakPerilakuRecord>('bk_kontrak_perilaku_list', (list) => {
+        setKontrakList(filterActiveDocs(list));
+      }, currentSchoolId),
+      subscribeCloudCollection<JurnalPembinaanDisiplinRecord>('bk_jurnal_pembinaan_disiplin_list', (list) => {
+        setJurnalList(filterActiveDocs(list));
+      }, currentSchoolId),
+      subscribeCloudCollection<KomitmenRtlRecord>('bk_komitmen_rtl_list', (list) => {
+        setKomitmenList(filterActiveDocs(list));
+      }, currentSchoolId),
+      subscribeCloudCollection<ClassAttendanceRecord>('bk_attendance_history', (list) => {
+        setAttRecords(Array.isArray(list) ? list : []);
+      }, currentSchoolId),
+      subscribeCloudCollection<any>('bk_parent_summons', (list) => {
+        setParentSummonsCache(Array.isArray(list) ? list : []);
+      }, currentSchoolId),
+      subscribeCloudCollection<any>('bk_home_visits', (list) => {
+        setHomeVisitsCache(Array.isArray(list) ? list : []);
+      }, currentSchoolId),
+    ];
     return () => {
-      window.removeEventListener('bk_realtime_sync', handleRealtimeUpdate);
+      unsubs.forEach((u) => u());
     };
-  }, []);
+  }, [currentSchoolId]);
 
   // --- AUTOMATED SINKRONISASI DATA ABSENSI ALPA & RESTITUSI ---
   const studentDisciplineAnalytics = useMemo(() => {
-    let attRecords: ClassAttendanceRecord[] = [];
-    try {
-      const saved = localStorage.getItem('bk_attendance_history');
-      if (saved) attRecords = JSON.parse(saved);
-    } catch (e) {}
-
-    let parentNamesMap: Record<string, string> = {};
-    try {
-      const savedSummons = localStorage.getItem('bk_parent_summons');
-      if (savedSummons) {
-        const list = JSON.parse(savedSummons);
-        list.forEach((ps: any) => {
-          if (ps.studentId && ps.parentName) parentNamesMap[ps.studentId] = ps.parentName;
-        });
-      }
-      const savedHomeVisits = localStorage.getItem('bk_home_visits');
-      if (savedHomeVisits) {
-        const list = JSON.parse(savedHomeVisits);
-        list.forEach((hv: any) => {
-          if (hv.studentId && hv.parentNameMet) parentNamesMap[hv.studentId] = hv.parentNameMet;
-        });
-      }
-    } catch (e) {}
+    const parentNamesMap: Record<string, string> = {};
+    (Array.isArray(parentSummonsCache) ? parentSummonsCache : []).forEach((ps: any) => {
+      if (ps?.studentId && ps?.parentName) parentNamesMap[ps.studentId] = ps.parentName;
+    });
+    (Array.isArray(homeVisitsCache) ? homeVisitsCache : []).forEach((hv: any) => {
+      if (hv?.studentId && hv?.parentNameMet) parentNamesMap[hv.studentId] = hv.parentNameMet;
+    });
 
     return students.map((st) => {
       const alpaEntries: { date: string; notes?: string }[] = [];
-      attRecords.forEach((att) => {
+      (Array.isArray(attRecords) ? attRecords : []).forEach((att) => {
         if (att.records) {
           const match = att.records.find(
             (r) =>
@@ -247,7 +217,7 @@ export default function PembinaanPendisiplinanView({
         isRecommendedForPembinaan
       };
     });
-  }, [students, violations, disciplineConfig]);
+  }, [students, violations, disciplineConfig, attRecords, parentSummonsCache, homeVisitsCache]);
 
   // Recommended students list
   const recommendedStudentsList = useMemo(() => {
@@ -2466,7 +2436,11 @@ export default function PembinaanPendisiplinanView({
                     deletedRecord = res.removed || target.id;
                     setPerjanjianList((prev) => {
                       const next = safeFilterSingleDelete(prev, target.id);
-                      return next.ok ? next.next : prev;
+                      if (next.ok) {
+                        setCloudCollectionData('bk_surat_perjanjian_list', next.next, currentSchoolId);
+                        return next.next;
+                      }
+                      return prev;
                     });
                   } else if (target.localKey === 'bk_kontrak_perilaku_list') {
                     const res = safeFilterSingleDelete(kontrakList, target.id);
@@ -2474,7 +2448,11 @@ export default function PembinaanPendisiplinanView({
                     deletedRecord = res.removed || target.id;
                     setKontrakList((prev) => {
                       const next = safeFilterSingleDelete(prev, target.id);
-                      return next.ok ? next.next : prev;
+                      if (next.ok) {
+                        setCloudCollectionData('bk_kontrak_perilaku_list', next.next, currentSchoolId);
+                        return next.next;
+                      }
+                      return prev;
                     });
                   } else if (target.localKey === 'bk_jurnal_pembinaan_disiplin_list') {
                     const res = safeFilterSingleDelete(jurnalList, target.id);
@@ -2482,7 +2460,11 @@ export default function PembinaanPendisiplinanView({
                     deletedRecord = res.removed || target.id;
                     setJurnalList((prev) => {
                       const next = safeFilterSingleDelete(prev, target.id);
-                      return next.ok ? next.next : prev;
+                      if (next.ok) {
+                        setCloudCollectionData('bk_jurnal_pembinaan_disiplin_list', next.next, currentSchoolId);
+                        return next.next;
+                      }
+                      return prev;
                     });
                   } else if (target.localKey === 'bk_komitmen_rtl_list') {
                     const res = safeFilterSingleDelete(komitmenList, target.id);
@@ -2490,7 +2472,11 @@ export default function PembinaanPendisiplinanView({
                     deletedRecord = res.removed || target.id;
                     setKomitmenList((prev) => {
                       const next = safeFilterSingleDelete(prev, target.id);
-                      return next.ok ? next.next : prev;
+                      if (next.ok) {
+                        setCloudCollectionData('bk_komitmen_rtl_list', next.next, currentSchoolId);
+                        return next.next;
+                      }
+                      return prev;
                     });
                   }
 

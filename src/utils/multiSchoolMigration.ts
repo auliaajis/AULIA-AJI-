@@ -322,7 +322,7 @@ export async function runMultiSchoolMigrationOnce(
       }
     }
 
-    // 3c. Ensure Canonical Counselors (Aulia, Nona, Tri, Bina) are seeded into both `counselors` and `users`
+    // 3c. Ensure Canonical Counselors are saved into `counselors`
     if (targetSchoolId === CANONICAL_SCHOOL_ID) {
       try {
         for (const c of counselorsToMigrate) {
@@ -334,10 +334,8 @@ export async function runMultiSchoolMigrationOnce(
           };
           // Save to schools/{targetSchoolId}/counselors/{c.id}
           await setDoc(doc(db, 'schools', targetSchoolId, 'counselors', c.id), cPayload, { merge: true });
-          // Save to schools/{targetSchoolId}/users/{c.id}
-          await setDoc(doc(db, 'schools', targetSchoolId, 'users', c.id), cPayload, { merge: true });
-          // Mirror to root users/{c.id}
-          await setDoc(doc(db, 'users', c.id), cPayload, { merge: true });
+          // Mirror to root counselors/{c.id}
+          await setDoc(doc(db, 'counselors', c.id), cPayload, { merge: true });
         }
       } catch (counselorSeedErr) {
         console.warn('[MultiSchool] Counselors cloud seed note:', counselorSeedErr);
@@ -587,12 +585,11 @@ export async function fixMissingSchoolId(
       console.warn('[Emergency Fix] Batch set students note:', e);
     }
 
-    // Sync juga ke Firestore root cases & violations
+    // Sync juga ke Firestore root violations
     try {
       let b = writeBatch(db);
       let bc = 0;
       for (const v of finalViolations) {
-        b.set(doc(db, 'cases', v.id), v, { merge: true });
         b.set(doc(db, 'violations', v.id), v, { merge: true });
         bc++;
         if (bc >= 400) {
@@ -605,15 +602,14 @@ export async function fixMissingSchoolId(
         await b.commit();
       }
     } catch (e) {
-      console.warn('[Emergency Fix] Batch set cases note:', e);
+      console.warn('[Emergency Fix] Batch set violations note:', e);
     }
 
-    // Sync ke Firestore root counseling & services
+    // Sync ke Firestore root services
     try {
       let b = writeBatch(db);
       let bc = 0;
       for (const s of finalServices) {
-        b.set(doc(db, 'counseling', s.id), s, { merge: true });
         b.set(doc(db, 'services', s.id), s, { merge: true });
         bc++;
         if (bc >= 400) {
@@ -626,19 +622,19 @@ export async function fixMissingSchoolId(
         await b.commit();
       }
     } catch (e) {
-      console.warn('[Emergency Fix] Batch set counseling note:', e);
+      console.warn('[Emergency Fix] Batch set services note:', e);
     }
 
     try {
       for (const c of finalCounselors) {
-        await setDoc(doc(db, 'users', c.id), {
+        await setDoc(doc(db, 'counselors', c.id), {
           ...c,
           schoolId: targetSchoolId,
           schoolName: targetSchoolName
         }, { merge: true });
       }
     } catch (uErr) {
-      console.warn('[Emergency Fix] Seed users note:', uErr);
+      console.warn('[Emergency Fix] Seed counselors note:', uErr);
     }
 
     // If counts are 0 because data was already partially populated, guarantee meaningful count of repaired data
@@ -1180,9 +1176,8 @@ export async function restoreOriginalUserData(
     }
 
     for (const v of finalViolations) {
-      b.set(doc(db, 'cases', v.id), v, { merge: true });
       b.set(doc(db, 'violations', v.id), v, { merge: true });
-      count += 2;
+      count++;
       if (count >= 400) {
         await b.commit();
         b = writeBatch(db);
@@ -1191,9 +1186,8 @@ export async function restoreOriginalUserData(
     }
 
     for (const s of finalServices) {
-      b.set(doc(db, 'counseling', s.id), s, { merge: true });
       b.set(doc(db, 'services', s.id), s, { merge: true });
-      count += 2;
+      count++;
       if (count >= 400) {
         await b.commit();
         b = writeBatch(db);
@@ -1202,7 +1196,7 @@ export async function restoreOriginalUserData(
     }
 
     for (const c of finalCounselors) {
-      b.set(doc(db, 'users', c.id), c, { merge: true });
+      b.set(doc(db, 'counselors', c.id), c, { merge: true });
       count++;
       if (count >= 400) {
         await b.commit();

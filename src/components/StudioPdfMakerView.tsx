@@ -43,6 +43,7 @@ import {
 import { getSchoolConfig } from '../utils/schoolConfig';
 import { BK_COMPONENTS_DATA, BIDANG_BIMBINGAN_OPTIONS, getBKComponentForService } from '../utils/bkKomprehensif';
 import { showToast } from '../utils/toast';
+import { getCloudCollectionData, subscribeCloudCollection } from '../utils/firestoreSync';
 import KabupatenLogo from './KabupatenLogo';
 import SchoolLogo from './SchoolLogo';
 
@@ -72,15 +73,18 @@ export default function StudioPdfMakerView({
   const todayStr = now.toISOString().split('T')[0];
   const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
 
-  // Load Summons from localStorage
-  const summons = useMemo(() => {
-    try {
-      const activeSchoolId = activeCounselor?.schoolId || 'sch_20320123';
-      const stored = localStorage.getItem(`bk_summons_${activeSchoolId}`);
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
-    }
+  // Load Summons from Firestore live cache
+  const [summons, setSummons] = useState<any[]>(() =>
+    getCloudCollectionData<any>('bk_parent_summons', activeCounselor?.schoolId)
+  );
+
+  useEffect(() => {
+    const sid = activeCounselor?.schoolId;
+    setSummons(getCloudCollectionData<any>('bk_parent_summons', sid));
+    const unsub = subscribeCloudCollection<any>('bk_parent_summons', (list) => {
+      setSummons(Array.isArray(list) ? list : []);
+    }, sid);
+    return () => unsub();
   }, [activeCounselor]);
 
   // Main Studio Configuration State

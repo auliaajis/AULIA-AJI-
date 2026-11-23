@@ -9,7 +9,7 @@ import {
   Counselor,
   ProgramEvaluation,
 } from '../types';
-import { loadSchoolData } from '../utils/firestoreSync';
+import { getCloudCollectionData, subscribeCloudCollection } from '../utils/firestoreSync';
 import { getSchoolConfig, hasConfiguredSchool } from '../utils/schoolConfig';
 import { getAllowedClassesList, filterAttendanceHistory } from '../utils/accessControl';
 import { isEvaluationDueFor14DayFollowUp } from '../utils/evaluationHelpers';
@@ -68,9 +68,9 @@ export default function DashboardView({
   onNavigateToForm,
   onLogout,
 }: DashboardViewProps) {
-  // Reactive Attendance records state
+  // Reactive Attendance records state strictly from Firestore cloud store
   const [attendanceHistory, setAttendanceHistory] = useState<ClassAttendanceRecord[]>(() => {
-    return loadSchoolData('bk_attendance_history', []);
+    return getCloudCollectionData<ClassAttendanceRecord>('bk_attendance_history', activeCounselor?.schoolId);
   });
 
   const [schoolCfg, setSchoolCfg] = useState(() => getSchoolConfig(activeCounselor?.schoolId));
@@ -80,13 +80,19 @@ export default function DashboardView({
   }, [activeCounselor?.schoolId, activeCounselor?.schoolName]);
 
   useEffect(() => {
+    const unsubAtt = subscribeCloudCollection<ClassAttendanceRecord>(
+      'bk_attendance_history',
+      (data) => setAttendanceHistory(data),
+      activeCounselor?.schoolId
+    );
+
     const handleAttendanceUpdate = (e?: any) => {
       if (Array.isArray(e?.detail)) {
         setAttendanceHistory(e.detail);
       } else if (e?.detail?.key === 'bk_attendance_history' && Array.isArray(e.detail.data)) {
         setAttendanceHistory(e.detail.data);
       } else {
-        setAttendanceHistory(loadSchoolData('bk_attendance_history', []));
+        setAttendanceHistory(getCloudCollectionData<ClassAttendanceRecord>('bk_attendance_history', activeCounselor?.schoolId));
       }
     };
 
@@ -95,16 +101,13 @@ export default function DashboardView({
     };
 
     window.addEventListener('bk_attendance_history_changed', handleAttendanceUpdate);
-    window.addEventListener('bk_realtime_sync', handleAttendanceUpdate);
-    window.addEventListener('storage', handleAttendanceUpdate);
     window.addEventListener('bk_school_changed', handleAttendanceUpdate);
     window.addEventListener('bk_school_config_updated', handleSchoolConfigUpdate);
     window.addEventListener('bk_school_changed', handleSchoolConfigUpdate);
 
     return () => {
+      unsubAtt();
       window.removeEventListener('bk_attendance_history_changed', handleAttendanceUpdate);
-      window.removeEventListener('bk_realtime_sync', handleAttendanceUpdate);
-      window.removeEventListener('storage', handleAttendanceUpdate);
       window.removeEventListener('bk_school_changed', handleAttendanceUpdate);
       window.removeEventListener('bk_school_config_updated', handleSchoolConfigUpdate);
       window.removeEventListener('bk_school_changed', handleSchoolConfigUpdate);

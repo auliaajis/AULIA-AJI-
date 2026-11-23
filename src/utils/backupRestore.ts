@@ -4,8 +4,6 @@ import {
   getActiveSchoolId,
   getSchoolConfig,
   saveSchoolConfig,
-  loadSchoolData,
-  saveSchoolData,
   sanitizeSchoolId,
   SchoolConfig,
 } from './schoolConfig';
@@ -22,6 +20,8 @@ import {
   getCanonicalRootCollections,
   getSchoolDocRef,
   syncSettingsToPengaturan,
+  getCloudCollectionData,
+  setCloudCollectionData,
   SYNC_MAP,
 } from './firestoreSync';
 import { getDeletedIds, unregisterDeletedId } from './deletionTracker';
@@ -213,77 +213,6 @@ function mergeArraySources(localKey: string, schoolId: string, deletedSet: Set<s
   return sortCollectionData(localKey, combined, schoolId);
 }
 
-function collectDynamicTeachingKeys(prefix: 'bk_teaching_schedule' | 'bk_class_teaching_progress', schoolId: string): any[] {
-  if (typeof localStorage === 'undefined') return [];
-  const items: any[] = [];
-  const seenKey = new Set<string>();
-
-  const pushEntry = (rawVal: any, storageKeyTag: string) => {
-    if (Array.isArray(rawVal)) {
-      rawVal.forEach((it) => {
-        if (it && typeof it === 'object' && it.isDeleted !== true) {
-          const id = String(it.id || `${it.day || ''}_${it.className || ''}_${it.period || ''}`);
-          if (String(id).startsWith('sch-')) return;
-          const dedup = `${storageKeyTag}::${id}`;
-          if (!seenKey.has(dedup)) {
-            seenKey.add(dedup);
-            items.push({ ...it, _storageKeyTag: storageKeyTag });
-          }
-        }
-      });
-    } else if (rawVal && typeof rawVal === 'object') {
-      Object.values(rawVal).forEach((it: any) => {
-        if (it && typeof it === 'object') {
-          const id = String(it.id || it.className || '');
-          const dedup = `${storageKeyTag}::${id}`;
-          if (id && !seenKey.has(dedup)) {
-            seenKey.add(dedup);
-            items.push({ ...it, id, _storageKeyTag: storageKeyTag });
-          }
-        }
-      });
-    }
-  };
-
-  pushEntry(loadSchoolData<any>(prefix, [], schoolId), prefix);
-
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (!k || !k.startsWith(prefix)) continue;
-      // Only include unscoped or matching current schoolId keys
-      if (k.includes('_sch_') && !k.endsWith(`_${schoolId}`)) continue;
-      const raw = localStorage.getItem(k);
-      if (!raw) continue;
-      try {
-        const parsed = JSON.parse(raw);
-        const tag = k.endsWith(`_${schoolId}`) ? k.slice(0, -(`_${schoolId}`).length) : k;
-        pushEntry(parsed, tag);
-      } catch {}
-    }
-  } catch {}
-
-  return items;
-}
-
-function safeReadLocalKey<T>(key: string, fallback: T, schoolId: string): T {
-  const scoped = loadSchoolData<T>(key, fallback, schoolId);
-  if (Array.isArray(scoped)) {
-    if (scoped.length > 0) return scoped;
-  } else if (scoped && typeof scoped === 'object' && Object.keys(scoped as any).length > 0) {
-    return scoped;
-  }
-  if (typeof localStorage !== 'undefined') {
-    try {
-      const raw = localStorage.getItem(key);
-      if (raw) {
-        return JSON.parse(raw) as T;
-      }
-    } catch {}
-  }
-  return scoped;
-}
-
 export function computeCounts(collections: BackupCollections): BackupCounts {
   const students = collections.students.length;
   const violations = collections.violations.length;
@@ -348,53 +277,53 @@ export function collectFullBackupSnapshot(
   const schoolConfig = getSchoolConfig(schoolId);
   const deletedSet = new Set(getDeletedIds());
 
-  const localStudents = safeReadLocalKey<any[]>('bk_students', [], schoolId);
-  const localViolations = safeReadLocalKey<any[]>('bk_violations', [], schoolId);
-  const localCases = safeReadLocalKey<any[]>('bk_cases', [], schoolId);
-  const localServices = safeReadLocalKey<any[]>('bk_services', [], schoolId);
-  const localCounseling = safeReadLocalKey<any[]>('bk_counseling', [], schoolId);
-  const localHomeVisits = safeReadLocalKey<any[]>('bk_home_visits', [], schoolId);
-  const localParentSummons = safeReadLocalKey<any[]>('bk_parent_summons', [], schoolId);
-  const localDailyJournals = safeReadLocalKey<any[]>('bk_daily_journals', [], schoolId);
-  const localAttendance = safeReadLocalKey<any[]>('bk_attendance_history', [], schoolId);
-  const localAchievements = mergeArraySources(
+  const cloudStudents = getCloudCollectionData<any>('bk_students', schoolId);
+  const cloudViolations = getCloudCollectionData<any>('bk_violations', schoolId);
+  const cloudServices = getCloudCollectionData<any>('bk_services', schoolId);
+  const cloudHomeVisits = getCloudCollectionData<any>('bk_home_visits', schoolId);
+  const cloudParentSummons = getCloudCollectionData<any>('bk_parent_summons', schoolId);
+  const cloudDailyJournals = getCloudCollectionData<any>('bk_daily_journals', schoolId);
+  const cloudAttendance = getCloudCollectionData<any>('bk_attendance_history', schoolId);
+  const cloudAchievements = mergeArraySources(
     'bk_achievements',
     schoolId,
     deletedSet,
-    safeReadLocalKey<any[]>('bk_achievements', [], schoolId),
-    safeReadLocalKey<any[]>('bk_student_achievements', [], schoolId),
+    getCloudCollectionData<any>('bk_achievements', schoolId),
+    getCloudCollectionData<any>('bk_student_achievements', schoolId),
     liveState?.achievements || []
   );
-  const localSuratPerjanjian = safeReadLocalKey<any[]>('bk_surat_perjanjian_list', [], schoolId);
-  const localKontrakPerilaku = safeReadLocalKey<any[]>('bk_kontrak_perilaku_list', [], schoolId);
-  const localJurnalPembinaan = safeReadLocalKey<any[]>('bk_jurnal_pembinaan_disiplin_list', [], schoolId);
-  const localKomitmenRtl = safeReadLocalKey<any[]>('bk_komitmen_rtl_list', [], schoolId);
-  const localStickyNotes = safeReadLocalKey<any[]>('bk_sticky_notes', [], schoolId);
-  const localProgEval = safeReadLocalKey<any[]>('bk_program_evaluations', [], schoolId);
-  const localSrvEval = safeReadLocalKey<any[]>('bk_service_evaluations', [], schoolId);
-  const localLogs = safeReadLocalKey<any[]>('bk_logs', [], schoolId);
-  const localCounselors = safeReadLocalKey<any[]>('bk_counselors', [], schoolId);
+  const cloudSuratPerjanjian = getCloudCollectionData<any>('bk_surat_perjanjian_list', schoolId);
+  const cloudKontrakPerilaku = getCloudCollectionData<any>('bk_kontrak_perilaku_list', schoolId);
+  const cloudJurnalPembinaan = getCloudCollectionData<any>('bk_jurnal_pembinaan_disiplin_list', schoolId);
+  const cloudKomitmenRtl = getCloudCollectionData<any>('bk_komitmen_rtl_list', schoolId);
+  const cloudTeachingSchedule = getCloudCollectionData<any>('bk_teaching_schedule', schoolId);
+  const cloudClassProgress = getCloudCollectionData<any>('bk_class_teaching_progress', schoolId);
+  const cloudStickyNotes = getCloudCollectionData<any>('bk_sticky_notes', schoolId);
+  const cloudProgEval = getCloudCollectionData<any>('bk_program_evaluations', schoolId);
+  const cloudSrvEval = getCloudCollectionData<any>('bk_service_evaluations', schoolId);
+  const cloudLogs = getCloudCollectionData<any>('bk_logs', schoolId);
+  const cloudCounselors = getCloudCollectionData<any>('bk_counselors', schoolId);
 
   const collections: BackupCollections = {
-    students: mergeArraySources('bk_students', schoolId, deletedSet, localStudents, liveState?.students || []),
-    violations: mergeArraySources('bk_violations', schoolId, deletedSet, localViolations, localCases, liveState?.violations || []),
-    services: mergeArraySources('bk_services', schoolId, deletedSet, localServices, localCounseling, liveState?.services || []),
-    homeVisits: mergeArraySources('bk_home_visits', schoolId, deletedSet, localHomeVisits, liveState?.homeVisits || []),
-    parentSummons: mergeArraySources('bk_parent_summons', schoolId, deletedSet, localParentSummons),
-    dailyJournals: mergeArraySources('bk_daily_journals', schoolId, deletedSet, localDailyJournals),
-    attendanceHistory: mergeArraySources('bk_attendance_history', schoolId, deletedSet, localAttendance),
-    achievements: localAchievements,
-    suratPerjanjianList: mergeArraySources('bk_surat_perjanjian_list', schoolId, deletedSet, localSuratPerjanjian),
-    kontrakPerilakuList: mergeArraySources('bk_kontrak_perilaku_list', schoolId, deletedSet, localKontrakPerilaku),
-    jurnalPembinaanDisiplinList: mergeArraySources('bk_jurnal_pembinaan_disiplin_list', schoolId, deletedSet, localJurnalPembinaan),
-    komitmenRtlList: mergeArraySources('bk_komitmen_rtl_list', schoolId, deletedSet, localKomitmenRtl),
-    teachingSchedule: collectDynamicTeachingKeys('bk_teaching_schedule', schoolId),
-    classTeachingProgress: collectDynamicTeachingKeys('bk_class_teaching_progress', schoolId),
-    stickyNotes: mergeArraySources('bk_sticky_notes', schoolId, deletedSet, localStickyNotes),
-    programEvaluations: mergeArraySources('bk_program_evaluations', schoolId, deletedSet, localProgEval, liveState?.programEvaluations || []),
-    serviceEvaluations: mergeArraySources('bk_service_evaluations', schoolId, deletedSet, localSrvEval, liveState?.serviceEvaluations || []),
-    activityLogs: mergeArraySources('bk_logs', schoolId, deletedSet, localLogs, liveState?.logs || []),
-    counselors: mergeArraySources('bk_counselors', schoolId, deletedSet, localCounselors, liveState?.allCounselors || []),
+    students: mergeArraySources('bk_students', schoolId, deletedSet, cloudStudents, liveState?.students || []),
+    violations: mergeArraySources('bk_violations', schoolId, deletedSet, cloudViolations, liveState?.violations || []),
+    services: mergeArraySources('bk_services', schoolId, deletedSet, cloudServices, liveState?.services || []),
+    homeVisits: mergeArraySources('bk_home_visits', schoolId, deletedSet, cloudHomeVisits, liveState?.homeVisits || []),
+    parentSummons: mergeArraySources('bk_parent_summons', schoolId, deletedSet, cloudParentSummons),
+    dailyJournals: mergeArraySources('bk_daily_journals', schoolId, deletedSet, cloudDailyJournals),
+    attendanceHistory: mergeArraySources('bk_attendance_history', schoolId, deletedSet, cloudAttendance),
+    achievements: cloudAchievements,
+    suratPerjanjianList: mergeArraySources('bk_surat_perjanjian_list', schoolId, deletedSet, cloudSuratPerjanjian),
+    kontrakPerilakuList: mergeArraySources('bk_kontrak_perilaku_list', schoolId, deletedSet, cloudKontrakPerilaku),
+    jurnalPembinaanDisiplinList: mergeArraySources('bk_jurnal_pembinaan_disiplin_list', schoolId, deletedSet, cloudJurnalPembinaan),
+    komitmenRtlList: mergeArraySources('bk_komitmen_rtl_list', schoolId, deletedSet, cloudKomitmenRtl),
+    teachingSchedule: cloudTeachingSchedule,
+    classTeachingProgress: cloudClassProgress,
+    stickyNotes: mergeArraySources('bk_sticky_notes', schoolId, deletedSet, cloudStickyNotes),
+    programEvaluations: mergeArraySources('bk_program_evaluations', schoolId, deletedSet, cloudProgEval, liveState?.programEvaluations || []),
+    serviceEvaluations: mergeArraySources('bk_service_evaluations', schoolId, deletedSet, cloudSrvEval, liveState?.serviceEvaluations || []),
+    activityLogs: mergeArraySources('bk_logs', schoolId, deletedSet, cloudLogs, liveState?.logs || []),
+    counselors: mergeArraySources('bk_counselors', schoolId, deletedSet, cloudCounselors, liveState?.allCounselors || []),
   };
 
   let siBecikFabEnabled: boolean | null = null;
@@ -405,11 +334,11 @@ export function collectFullBackupSnapshot(
 
   const settings: BackupSettingsPayload = {
     schoolConfig,
-    walikelasConfig: safeReadLocalKey<any>('bk_walikelas_config', [], schoolId),
-    violationRules: safeReadLocalKey<any>('bk_violation_rules', [], schoolId),
-    parentSummonTemplates: safeReadLocalKey<any>('bk_parent_summon_templates', [], schoolId),
-    akpdClassSessions: safeReadLocalKey<any>('bk_akpd_class_sessions', [], schoolId),
-    autoJournalSettings: safeReadLocalKey<any>('bk_auto_journal_settings', null, schoolId),
+    walikelasConfig: getCloudCollectionData<any>('bk_walikelas_config', schoolId),
+    violationRules: getCloudCollectionData<any>('bk_violation_rules', schoolId),
+    parentSummonTemplates: getCloudCollectionData<any>('bk_parent_summon_templates', schoolId),
+    akpdClassSessions: getCloudCollectionData<any>('bk_akpd_class_sessions', schoolId),
+    autoJournalSettings: null,
     siBecikFabEnabled,
   };
 
@@ -488,7 +417,7 @@ export function downloadStudentsCSV(studentsInput?: Student[], activeCounselor?:
   const deletedSet = new Set(getDeletedIds());
   const list = studentsInput && studentsInput.length > 0
     ? normalizeArrayItems(studentsInput, 'bk_students', deletedSet, schoolId)
-    : normalizeArrayItems(safeReadLocalKey<any[]>('bk_students', [], schoolId), 'bk_students', deletedSet, schoolId);
+    : normalizeArrayItems(getCloudCollectionData<any>('bk_students', schoolId), 'bk_students', deletedSet, schoolId);
 
   const headers = ['ID', 'NIS', 'NISN', 'Nama Siswa', 'Kelas', 'Jenis Kelamin', 'Poin Pelanggaran', 'Poin Prestasi', 'Jumlah Layanan', 'No HP Orang Tua', 'Alamat'];
   const rows = list.map((s: any) => [
@@ -518,7 +447,7 @@ export function downloadViolationsCSV(violationsInput?: ViolationRecord[], activ
   const deletedSet = new Set(getDeletedIds());
   const list = violationsInput && violationsInput.length > 0
     ? normalizeArrayItems(violationsInput, 'bk_violations', deletedSet, schoolId)
-    : normalizeArrayItems(safeReadLocalKey<any[]>('bk_violations', [], schoolId), 'bk_violations', deletedSet, schoolId);
+    : normalizeArrayItems(getCloudCollectionData<any>('bk_violations', schoolId), 'bk_violations', deletedSet, schoolId);
 
   const headers = ['ID', 'Tanggal', 'Jam', 'Nama Siswa', 'Kelas', 'Jenis Pelanggaran', 'Kategori', 'Poin', 'Status', 'Kronologi / Deskripsi', 'Tindak Lanjut / Restitusi', 'Dicatat Oleh'];
   const rows = list.map((v: any) => [
@@ -1052,23 +981,15 @@ export async function restoreBackupData(
   const finalCollectionsMap: Record<string, any[]> = {};
 
   if (mode === 'replace') {
-    // Clear cleared flag only if students exist in backup
-    if (typeof localStorage !== 'undefined') {
-      if (c.students.length > 0) {
-        localStorage.removeItem(`bk_cleared_${schoolId}`);
-        localStorage.removeItem(`bk_students_cleared_${schoolId}`);
-      }
-    }
-
     for (const pair of collectionKeyPairs) {
       const stamped = sortCollectionData(pair.localKey, stampItems(pair.backupList), schoolId);
       finalCollectionsMap[pair.localKey] = stamped;
-      saveSchoolData(pair.localKey, stamped, schoolId);
+      setCloudCollectionData(pair.localKey, stamped, schoolId);
     }
   } else {
-    // Merge mode: preserve existing active records, add missing IDs from backup
+    // Merge mode: preserve existing active Firestore records, add missing IDs from backup
     for (const pair of collectionKeyPairs) {
-      const existing = safeReadLocalKey<any[]>(pair.localKey, [], schoolId);
+      const existing = getCloudCollectionData<any>(pair.localKey, schoolId);
       const map = new Map<string, any>();
       if (Array.isArray(existing)) {
         existing.forEach((item) => {
@@ -1086,72 +1007,48 @@ export async function restoreBackupData(
       });
       const merged = sortCollectionData(pair.localKey, Array.from(map.values()), schoolId);
       finalCollectionsMap[pair.localKey] = merged;
-      saveSchoolData(pair.localKey, merged, schoolId);
+      setCloudCollectionData(pair.localKey, merged, schoolId);
     }
   }
 
-  // Restore teaching schedule & class progress (both generic and tagged per counselor)
+  // Restore teaching schedule & class progress into Firestore cloud cache
   const restoreTeachingGrouped = (
     items: any[],
     defaultKey: 'bk_teaching_schedule' | 'bk_class_teaching_progress'
   ) => {
     if (!Array.isArray(items)) return;
-    const grouped = new Map<string, any[]>();
-    const activeCid = activeCounselor?.id || 'c1';
-    const fallbackKey = `${defaultKey}_${activeCid}`;
+    const cleanedItems = items
+      .filter((raw) => raw && typeof raw === 'object')
+      .map((raw) => {
+        const copy = { ...raw };
+        delete copy._storageKeyTag;
+        const id = String(copy.id || copy.className || `${copy.day || ''}_${copy.className || ''}_${copy.period || ''}`);
+        return { ...copy, id, schoolId, schoolName };
+      });
 
-    items.forEach((raw) => {
-      if (!raw || typeof raw !== 'object') return;
-      const tag = typeof raw._storageKeyTag === 'string' && raw._storageKeyTag.startsWith(defaultKey)
-        ? raw._storageKeyTag
-        : fallbackKey;
-      const clean = { ...raw };
-      delete clean._storageKeyTag;
-      if (!grouped.has(tag)) grouped.set(tag, []);
-      grouped.get(tag)!.push({ ...clean, schoolId, schoolName });
-    });
-
-    if (mode === 'replace' && grouped.size === 0) {
-      saveSchoolData(defaultKey, [], schoolId);
-      saveSchoolData(fallbackKey, [], schoolId);
+    if (mode === 'replace') {
+      finalCollectionsMap[defaultKey] = cleanedItems;
+      setCloudCollectionData(defaultKey, cleanedItems, schoolId);
       return;
     }
 
-    grouped.forEach((list, keyName) => {
-      if (defaultKey === 'bk_class_teaching_progress') {
-        const currentObj = mode === 'merge' ? loadSchoolData<Record<string, any>>(keyName, {}, schoolId) : {};
-        const nextObj: Record<string, any> = { ...(currentObj && typeof currentObj === 'object' ? currentObj : {}) };
-        list.forEach((it) => {
-          const k = String(it.className || it.id || '');
-          if (k && (mode === 'replace' || !nextObj[k])) {
-            nextObj[k] = it;
-          }
-        });
-        saveSchoolData(keyName, nextObj, schoolId);
-      } else {
-        const existing = mode === 'merge' ? loadSchoolData<any[]>(keyName, [], schoolId) : [];
-        const map = new Map<string, any>();
-        if (Array.isArray(existing)) {
-          existing.forEach((it) => { if (it && it.id) map.set(String(it.id), it); });
-        }
-        list.forEach((it) => {
-          const id = String(it.id || `${it.day}_${it.className}_${it.period}`);
-          if (mode === 'replace' || !map.has(id)) {
-            map.set(id, { ...it, id });
-          }
-        });
-        saveSchoolData(keyName, Array.from(map.values()), schoolId);
+    const existing = getCloudCollectionData<any>(defaultKey, schoolId);
+    const map = new Map<string, any>();
+    if (Array.isArray(existing)) {
+      existing.forEach((it) => {
+        const key = String(it?.id || it?.className || '');
+        if (key) map.set(key, it);
+      });
+    }
+    cleanedItems.forEach((it) => {
+      const key = String(it.id || it.className || '');
+      if (key && !map.has(key)) {
+        map.set(key, it);
       }
     });
-
-    // Also mirror combined teachingSchedule to generic bk_teaching_schedule
-    if (defaultKey === 'bk_teaching_schedule') {
-      const combined = Array.from(grouped.values()).flat();
-      if (mode === 'replace' || combined.length > 0) {
-        finalCollectionsMap['bk_teaching_schedule'] = combined;
-        saveSchoolData('bk_teaching_schedule', combined, schoolId);
-      }
-    }
+    const merged = Array.from(map.values());
+    finalCollectionsMap[defaultKey] = merged;
+    setCloudCollectionData(defaultKey, merged, schoolId);
   };
 
   restoreTeachingGrouped(c.teachingSchedule, 'bk_teaching_schedule');
@@ -1165,17 +1062,17 @@ export async function restoreBackupData(
     }
     const restoreSimpleSetting = (key: string, val: any) => {
       if (val === null || val === undefined) return;
-      if (Array.isArray(val) && val.length === 0 && mode === 'merge') return;
+      const arrVal = Array.isArray(val) ? val : Object.values(val || {});
+      if (arrVal.length === 0 && mode === 'merge') return;
       if (mode === 'replace') {
-        saveSchoolData(key, val, schoolId);
+        setCloudCollectionData(key, arrVal, schoolId);
+        finalCollectionsMap[key] = arrVal;
       } else {
-        const curr = loadSchoolData<any>(key, null, schoolId);
-        if (!curr || (Array.isArray(curr) && curr.length === 0)) {
-          saveSchoolData(key, val, schoolId);
+        const curr = getCloudCollectionData<any>(key, schoolId);
+        if (!Array.isArray(curr) || curr.length === 0) {
+          setCloudCollectionData(key, arrVal, schoolId);
+          finalCollectionsMap[key] = arrVal;
         }
-      }
-      if (Array.isArray(val)) {
-        finalCollectionsMap[key] = val;
       }
     };
 
@@ -1319,7 +1216,7 @@ export async function syncAllLocalDataToFirestore(
       { localKey: 'bk_counselors', items: c.counselors },
     ];
 
-    // Save arrays cleanly to localStorage too (so cache and Firestore match)
+    // Update pure in-memory cloud cache to stay consistent during upload
     for (const target of uploadTargets) {
       if (target.items.length > 0 && target.localKey !== 'bk_class_teaching_progress') {
         const cleanToSave = target.items.map((it) => {
@@ -1334,7 +1231,7 @@ export async function syncAllLocalDataToFirestore(
             schoolName: copy.schoolName || snapshot.schoolName,
           };
         });
-        saveSchoolData(target.localKey, cleanToSave, schoolId);
+        setCloudCollectionData(target.localKey, cleanToSave, schoolId);
       }
     }
 
@@ -1549,7 +1446,6 @@ export async function migrateLegacyLocalDataToFirestore(
         }
 
         existingIds.add(docId);
-        const isAgendaCol = target.colName === 'daily_journals' || target.colName === 'teaching_schedule' || target.colName === 'sticky_notes';
         const payload = {
           ...clean,
           id: docId,
@@ -1562,7 +1458,6 @@ export async function migrateLegacyLocalDataToFirestore(
           updatedAt: nowIso,
           _version: Number(clean._version) > 0 ? Number(clean._version) : 1,
           _updatedAt: nowMs,
-          ...(isAgendaCol ? { _agendaType: target.colName } : {}),
         };
         toUpload.push(payload);
       }

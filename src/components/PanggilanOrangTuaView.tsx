@@ -36,7 +36,14 @@ import { downloadParentSummonPDF, downloadParentAttendancePDF, formatIndonesianD
 import { formatCardDate, formatCardTime } from '../utils/dateFormatter';
 import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
 import { autoPushToJournal } from '../utils/journalAutoLink';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, softDeleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
+import {
+  saveBulkToFirestore,
+  softDeleteFromFirestore,
+  saveToFirestore,
+  getCloudCollectionData,
+  setCloudCollectionData,
+  subscribeCloudCollection
+} from '../utils/firestoreSync';
 import { showToast } from '../utils/toast';
 import { isValidDeleteId, safeFilterSingleDelete, generateUniqueId } from '../utils/safeDelete';
 import { 
@@ -322,13 +329,10 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
     }),
   };
   
-  // Summons State
-  const [summons, setSummons] = useState<ParentSummon[]>(() => {
-    const deletedSet = new Set(getDeletedIds());
-    return loadSchoolData<ParentSummon[]>('bk_parent_summons', []).filter(
-      (s) => s && s.isDeleted !== true && !deletedSet.has(String(s.id))
-    );
-  });
+  // Summons State fed ONLY from Firestore onSnapshot
+  const [summons, setSummons] = useState<ParentSummon[]>(() =>
+    getCloudCollectionData<ParentSummon>('bk_parent_summons')
+  );
 
   // Templates State
   const [templates, setTemplates] = useState<ParentSummonTemplate[]>(() => {
@@ -414,41 +418,21 @@ export default function PanggilanOrangTuaView({ students, activeCounselor }: Pan
   const [saveAsTplTitle, setSaveAsTplTitle] = useState<string>('');
   const [saveAsTplCategory, setSaveAsTplCategory] = useState<ParentSummonTemplate['category']>('Kedisiplinan');
 
-  // Auto-sync summons to local cache
+  // Realtime subscriber directly from Firestore onSnapshot
   useEffect(() => {
-    saveSchoolData('bk_parent_summons', summons);
-  }, [summons]);
-
-  // Realtime subscriber for remote changes
-  useEffect(() => {
-    const handleRealtimeUpdate = (e: any) => {
-      const key = e.detail?.key;
-      const data = e.detail?.data;
+    const unsubSummons = subscribeCloudCollection<ParentSummon>('bk_parent_summons', (cloudList) => {
       const deletedSet = new Set(getDeletedIds());
-      if (key === 'bk_parent_summons') {
-        if (Array.isArray(data)) {
-          setSummons(data.filter((s: any) => s && s.isDeleted !== true && !deletedSet.has(String(s.id))));
-        } else {
-          setSummons(loadSchoolData<ParentSummon[]>('bk_parent_summons', []).filter((s) => s && s.isDeleted !== true && !deletedSet.has(String(s.id))));
-        }
-      } else if (key === 'bk_parent_summon_templates') {
-        if (Array.isArray(data)) {
-          setTemplates(data.filter((t: any) => t && t.isDeleted !== true && !deletedSet.has(String(t.id))));
-        } else {
-          setTemplates(loadSchoolData<ParentSummonTemplate[]>('bk_parent_summon_templates', []).filter((t: any) => t && t.isDeleted !== true && !deletedSet.has(String(t.id))));
-        }
-      }
-    };
-
-    window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
-    window.addEventListener('storage', (e) => {
-      if (e.key === 'bk_parent_summons' || e.key === 'bk_parent_summon_templates') {
-        handleRealtimeUpdate({ detail: { key: e.key } });
+      setSummons(cloudList.filter((s) => s && s.isDeleted !== true && !deletedSet.has(String(s.id))));
+    });
+    const unsubTemplates = subscribeCloudCollection<ParentSummonTemplate>('bk_parent_summon_templates', (cloudTpls) => {
+      const deletedSet = new Set(getDeletedIds());
+      if (cloudTpls.length > 0) {
+        setTemplates(cloudTpls.filter((t: any) => t && t.isDeleted !== true && !deletedSet.has(String(t.id))));
       }
     });
-
     return () => {
-      window.removeEventListener('bk_realtime_sync', handleRealtimeUpdate);
+      unsubSummons();
+      unsubTemplates();
     };
   }, []);
 
@@ -751,7 +735,6 @@ _{NAMA_SEKOLAH}_`);
       const updated = prev.map(s => s.id === id ? { ...s, status: newStatus } : s);
       const target = updated.find(s => s.id === id);
       if (target) saveToFirestore('bk_parent_summons', target);
-      saveSchoolData('bk_parent_summons', updated);
       return updated;
     });
     showToast(`Status penanganan diperbarui ke: ${newStatus}`, 'info');
@@ -837,7 +820,6 @@ _{NAMA_SEKOLAH}_`);
     });
 
     setSummons(updatedSummons);
-    saveSchoolData('bk_parent_summons', updatedSummons);
 
     const targetSummon = updatedSummons.find(s => s.id === selectedSummonForAttendance.id);
     if (targetSummon) {
@@ -921,11 +903,7 @@ _{NAMA_SEKOLAH}_`);
       }
     };
 
-    setSummons(prev => {
-      const next = [newSummon, ...prev];
-      saveSchoolData('bk_parent_summons', next, schoolValidation.schoolId);
-      return next;
-    });
+    setSummons(prev => [newSummon, ...prev]);
     saveToFirestore('bk_parent_summons', newSummon, schoolValidation.schoolId);
 
     autoPushToJournal({
@@ -3052,7 +3030,7 @@ _{NAMA_SEKOLAH}_`);
                     setSummons((prev) => {
                       const check = safeFilterSingleDelete(prev, act.id!);
                       if (!check.ok) return prev;
-                      saveSchoolData('bk_parent_summons', check.next);
+                      setCloudCollectionData('bk_parent_summons', check.next, activeCounselor?.schoolId);
                       return check.next;
                     });
                     registerDeletedId(act.id!);

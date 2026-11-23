@@ -15,12 +15,16 @@ import firebaseConfig from '../firebase-applet-config.json';
 
 export { firebaseConfig };
 
+export const firebaseConfigObj = firebaseConfig;
+
+console.log('Firebase Project:', firebaseConfig.projectId, '(Default Gemini Project)');
+
 // Canonical singleton Firebase App (shared identically across AI Studio Preview & Vercel)
 export const app: FirebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
 const firestoreDatabaseId = (firebaseConfig as any).firestoreDatabaseId || '(default)';
 
-// Initialize Firestore with multi-tab IndexedDB persistent cache for instant 0ms reads & offline auto-sync
+// Initialize Firestore with multi-tab IndexedDB persistent cache for offline support & auto-sync
 function createFirestoreInstance(): Firestore {
   try {
     return initializeFirestore(
@@ -56,7 +60,7 @@ export async function testConnection(): Promise<{ ok: boolean; error?: string }>
   } catch (error: any) {
     const msg = error?.message || String(error);
     if (msg.includes('the client is offline') || error?.code === 'unavailable') {
-      return { ok: false, error: 'offline' };
+      return { ok: false, error: 'Klien sedang offline (tidak dapat menjangkau server Firestore)' };
     }
     return { ok: false, error: msg };
   }

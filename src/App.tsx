@@ -70,8 +70,13 @@ import {
   softDeleteBulkStudentsFromFirestore,
   saveAccountRequestToCloud,
   updateAccountRequestInCloud,
-  deleteAccountRequestFromCloud
+  deleteAccountRequestFromCloud,
+  getCloudCollectionData,
+  setCloudCollectionData,
+  getCloudConnectionInfo,
+  testConnection
 } from './utils/firestoreSync';
+import { firebaseConfig } from './firebase';
 import { getActiveSchoolId, setActiveSchoolId, getSchoolConfig, loadSchoolData, saveSchoolData, sanitizeSchoolId, switchSchoolWorkspace, getRegisteredSchools, getValidatedSchoolIdentity, buildSchoolStamp, enforceCanonicalSchoolCacheRepair } from './utils/schoolConfig';
 import { runStartupStorageCheck } from './utils/storageQuota';
 import { purgeDummyData, purgeDummyStudents, isDummyStudent, deduplicateAndPurgeAllData } from './utils/purgeDummyData';
@@ -79,14 +84,10 @@ import { applyTheme, getIsDarkMode } from './utils/theme';
 import { ensureSchoolDocumentExists } from './utils/multiSchoolMigration';
 
 import {
-  counselors,
-  initialViolations,
-  initialServices,
-  initialLogs,
-  initialHomeVisits
+  counselors
 } from './data/mockData';
 import { Student, ViolationRecord, CounselingService, BKComponentType, ActivityLog, Counselor, StudentAchievement, PresetServiceData, ProgramEvaluation } from './types';
-import { HeartHandshake, Calendar, Clock, Plus, UserCheck, Download, Edit2, Trash2, CheckCircle2, Search, Filter, Home, Mail, Layers, Info, Sparkles, BookOpen, Target, ShieldAlert, Settings, FileText, Printer, ArrowLeft } from 'lucide-react';
+import { HeartHandshake, Calendar, Clock, Plus, UserCheck, Download, Edit2, Trash2, CheckCircle2, Search, Filter, Home, Mail, Layers, Info, Sparkles, BookOpen, Target, ShieldAlert, Settings, FileText, Printer, ArrowLeft, AlertTriangle, RefreshCw } from 'lucide-react';
 import { filterStudents, filterViolations, filterServices, filterAchievements, filterHomeVisits, filterLogs } from './utils/accessControl';
 import { BK_COMPONENTS_DATA, getBKComponentForService, getComponentColorConfig, getPilarBadge, SIKLUS_LAYANAN_TERPADU } from './utils/bkKomprehensif';
 
@@ -430,12 +431,12 @@ export default function App() {
     setHomeVisits([]);
 
     localStorage.setItem(`bk_cleared_${currentSchoolId}`, 'true');
-    saveSchoolData('bk_students', [], currentSchoolId);
-    saveSchoolData('bk_violations', [], currentSchoolId);
-    saveSchoolData('bk_services', [], currentSchoolId);
-    saveSchoolData('bk_logs', [], currentSchoolId);
-    saveSchoolData('bk_achievements', [], currentSchoolId);
-    saveSchoolData('bk_home_visits', [], currentSchoolId);
+    setCloudCollectionData('bk_students', [], currentSchoolId);
+    setCloudCollectionData('bk_violations', [], currentSchoolId);
+    setCloudCollectionData('bk_services', [], currentSchoolId);
+    setCloudCollectionData('bk_logs', [], currentSchoolId);
+    setCloudCollectionData('bk_achievements', [], currentSchoolId);
+    setCloudCollectionData('bk_home_visits', [], currentSchoolId);
 
     saveBulkToFirestore('bk_students', [], currentSchoolId, true);
     saveBulkToFirestore('bk_violations', [], currentSchoolId, true);
@@ -456,130 +457,20 @@ export default function App() {
   // Mobile navigation drawer toggle
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
-  // Core database states synchronized with localStorage & isolated per School ID
-  const [students, setStudents] = useState<Student[]>(() => {
-    const sId = getActiveSchoolId();
-    const isExplicitlyCleared = typeof localStorage !== 'undefined' && 
-      (localStorage.getItem(`bk_cleared_${sId}`) === 'true' || localStorage.getItem(`bk_students_cleared_${sId}`) === 'true');
-    const isDummyPurged = typeof localStorage !== 'undefined' && localStorage.getItem('bk_dummy_students_purged') === 'true';
-
-    const loaded = loadSchoolData<Student[]>('bk_students', [], sId);
-    if (!Array.isArray(loaded)) return [];
-
-    let filtered = loaded;
-    if (isDummyPurged) {
-      filtered = filtered.filter(s => !isDummyStudent(s));
-    }
-    if (isExplicitlyCleared && filtered.length === 0) {
-      return [];
-    }
-
-    const isSmp = sId === 'sch_20320123' || (getSchoolConfig().schoolName || '').toLowerCase().includes('smp');
-    const deletedSet = new Set(getDeletedIds());
-    const cleanNonDummy = filtered.filter((s) => {
-      if (!s || s.isDeleted === true || deletedSet.has(String(s.id)) || isDummyStudent(s)) return false;
-      if (isSmp && /^(10|11|12|X|XI|XII)/i.test(String(s.class || '').replace(/kelas\s*/i, '').trim())) {
-        return false;
-      }
-      return true;
-    });
-
-    if (cleanNonDummy.length !== loaded.length) {
-      saveSchoolData('bk_students', cleanNonDummy, sId);
-    }
-
-    return cleanNonDummy;
+  // Core database states fed ONLY by Firestore onSnapshot (never seeded from localStorage or mockData)
+  const [firebaseConnectionError, setFirebaseConnectionError] = useState<string | null>(() => {
+    const info = getCloudConnectionInfo();
+    return (info.status === 'error' || info.status === 'quota_exceeded') && info.lastError ? info.lastError : null;
   });
 
-  const [violations, setViolations] = useState<ViolationRecord[]>(() => {
-    const sId = getActiveSchoolId();
-    const deletedSet = new Set(getDeletedIds());
-    const hasSeeded = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${sId}`) === 'true';
-    const loaded = loadSchoolData<ViolationRecord[]>('bk_violations', [], sId);
-    const isSmp = sId === 'sch_20320123' || (getSchoolConfig().schoolName || '').toLowerCase().includes('smp');
-    const sanitized = Array.isArray(loaded)
-      ? loaded.filter(v => {
-          if (!v || v.isDeleted === true || deletedSet.has(String(v.id))) return false;
-          if (isSmp && /^(10|11|12|X|XI|XII)/i.test(String(v.studentClass || '').replace(/kelas\s*/i, '').trim())) return false;
-          return true;
-        })
-      : [];
-
-    if (sId === 'sch_20320123' && !hasSeeded && sanitized.length === 0) {
-      const seed = initialViolations.filter(v => !deletedSet.has(String(v.id)));
-      saveSchoolData('bk_violations', seed, sId);
-      return seed;
-    }
-    return sanitized;
-  });
-
-  const [services, setServices] = useState<CounselingService[]>(() => {
-    const sId = getActiveSchoolId();
-    const deletedSet = new Set(getDeletedIds());
-    const hasSeeded = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${sId}`) === 'true';
-    const loaded = loadSchoolData<CounselingService[]>('bk_services', [], sId);
-    const sanitized = Array.isArray(loaded)
-      ? loaded.filter(s => s && s.isDeleted !== true && !deletedSet.has(String(s.id)))
-      : [];
-    if (sId === 'sch_20320123' && !hasSeeded && sanitized.length === 0) {
-      const seed = initialServices.filter(s => !deletedSet.has(String(s.id)));
-      saveSchoolData('bk_services', seed, sId);
-      return seed;
-    }
-    return sanitized;
-  });
-
-  const [logs, setLogs] = useState<ActivityLog[]>(() => {
-    const sId = getActiveSchoolId();
-    const deletedSet = new Set(getDeletedIds());
-    const hasSeeded = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${sId}`) === 'true';
-    const loaded = loadSchoolData<ActivityLog[]>('bk_logs', [], sId);
-    const sanitized = Array.isArray(loaded)
-      ? loaded.filter(l => l && l.isDeleted !== true && !deletedSet.has(String(l.id)))
-      : [];
-    if (sId === 'sch_20320123' && !hasSeeded && sanitized.length === 0) {
-      const seed = initialLogs.filter(l => !deletedSet.has(String(l.id)));
-      saveSchoolData('bk_logs', seed, sId);
-      return seed;
-    }
-    return sanitized.slice(0, 50);
-  });
-
-  const [achievements, setAchievements] = useState<any[]>(() => {
-    const deletedSet = new Set(getDeletedIds());
-    const loaded = loadSchoolData<any[]>('bk_achievements', [], getActiveSchoolId());
-    return Array.isArray(loaded) ? loaded.filter(a => a && a.isDeleted !== true && !deletedSet.has(String(a.id))) : [];
-  });
-
-  const [homeVisits, setHomeVisits] = useState<any[]>(() => {
-    const sId = getActiveSchoolId();
-    const deletedSet = new Set(getDeletedIds());
-    const hasSeeded = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${sId}`) === 'true';
-    const loaded = loadSchoolData<any[]>('bk_home_visits', [], sId);
-    const sanitized = Array.isArray(loaded)
-      ? loaded.filter(h => h && h.isDeleted !== true && !deletedSet.has(String(h.id)))
-      : [];
-    if (sId === 'sch_20320123' && !hasSeeded && sanitized.length === 0) {
-      const seed = initialHomeVisits.filter(h => !deletedSet.has(String(h.id)));
-      saveSchoolData('bk_home_visits', seed, sId);
-      return seed;
-    }
-    return sanitized;
-  });
-
-  const [programEvaluations, setProgramEvaluations] = useState<ProgramEvaluation[]>(() => {
-    const sId = getActiveSchoolId();
-    const deletedSet = new Set(getDeletedIds());
-    const loaded = loadSchoolData<ProgramEvaluation[]>('bk_program_evaluations', [], sId);
-    return Array.isArray(loaded) ? loaded.filter(e => e && e.isDeleted !== true && !deletedSet.has(String(e.id))) : [];
-  });
-
-  const [serviceEvaluations, setServiceEvaluations] = useState<ProgramEvaluation[]>(() => {
-    const sId = getActiveSchoolId();
-    const deletedSet = new Set(getDeletedIds());
-    const loaded = loadSchoolData<ProgramEvaluation[]>('bk_service_evaluations', [], sId);
-    return Array.isArray(loaded) ? loaded.filter(e => e && e.isDeleted !== true && !deletedSet.has(String(e.id))) : [];
-  });
+  const [students, setStudents] = useState<Student[]>([]);
+  const [violations, setViolations] = useState<ViolationRecord[]>([]);
+  const [services, setServices] = useState<CounselingService[]>([]);
+  const [logs, setLogs] = useState<ActivityLog[]>([]);
+  const [achievements, setAchievements] = useState<any[]>([]);
+  const [homeVisits, setHomeVisits] = useState<any[]>([]);
+  const [programEvaluations, setProgramEvaluations] = useState<ProgramEvaluation[]>([]);
+  const [serviceEvaluations, setServiceEvaluations] = useState<ProgramEvaluation[]>([]);
 
   // Modal & Filter states for Layanan BK
   const [editingService, setEditingService] = useState<CounselingService | null>(null);
@@ -680,55 +571,12 @@ export default function App() {
     };
   }, [isLoggedIn, activeCounselor?.id, activeCounselor?.schoolId, serviceEvaluations]);
 
-  // Initialize Firebase Realtime Firestore Synchronization, Theme & Data Setup on mount
+  // Initialize Firebase Realtime Firestore Synchronization, Theme & Connection Health on mount
   useEffect(() => {
     runStartupStorageCheck();
     applyTheme(getIsDarkMode());
 
     const initialSchoolId = getActiveSchoolId();
-    const isCanonicalSchool = initialSchoolId === 'sch_20320123';
-    const deletedSet = new Set(getDeletedIds());
-    const hasSeededFlag = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${initialSchoolId}`) === 'true';
-
-    const rawCheckStudents = loadSchoolData<Student[]>('bk_students', [], initialSchoolId);
-    const cleanLocalStudents = Array.isArray(rawCheckStudents)
-      ? rawCheckStudents.filter((s) => s && s.isDeleted !== true && !deletedSet.has(String(s.id)) && !isDummyStudent(s))
-      : [];
-
-    if (!Array.isArray(rawCheckStudents) || cleanLocalStudents.length !== rawCheckStudents.length) {
-      saveSchoolData('bk_students', cleanLocalStudents, initialSchoolId);
-    }
-    setStudents(cleanLocalStudents);
-
-    if (isCanonicalSchool && !hasSeededFlag) {
-      const checkServices = loadSchoolData<CounselingService[]>('bk_services', [], initialSchoolId);
-      if (!checkServices || checkServices.length === 0) {
-        const seedS = initialServices.filter(s => !deletedSet.has(String(s.id)));
-        saveSchoolData('bk_services', seedS, initialSchoolId);
-        setServices(seedS);
-      }
-      const checkViolations = loadSchoolData<ViolationRecord[]>('bk_violations', [], initialSchoolId);
-      if (!checkViolations || checkViolations.length === 0) {
-        const seedV = initialViolations.filter(v => !deletedSet.has(String(v.id)));
-        saveSchoolData('bk_violations', seedV, initialSchoolId);
-        setViolations(seedV);
-      }
-      const checkHomeVisits = loadSchoolData<any[]>('bk_home_visits', [], initialSchoolId);
-      if (!checkHomeVisits || checkHomeVisits.length === 0) {
-        const seedHv = initialHomeVisits.filter(h => !deletedSet.has(String(h.id)));
-        saveSchoolData('bk_home_visits', seedHv, initialSchoolId);
-        setHomeVisits(seedHv);
-      }
-      const checkLogs = loadSchoolData<ActivityLog[]>('bk_logs', [], initialSchoolId);
-      if (!checkLogs || checkLogs.length === 0) {
-        const seedL = initialLogs.filter(l => !deletedSet.has(String(l.id)));
-        saveSchoolData('bk_logs', seedL, initialSchoolId);
-        setLogs(seedL);
-      }
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(`bk_initial_seeded_${initialSchoolId}`, 'true');
-      }
-    }
     const checkCounselors = loadSchoolData<Counselor[]>('bk_counselors', [], initialSchoolId);
     if (!checkCounselors || checkCounselors.length < 5) {
       const mergedCounselors = [...counselors];
@@ -749,13 +597,34 @@ export default function App() {
       localStorage.setItem('bk_active_counselor_id', 'c1');
     }
 
-    initRealtimeFirestoreSync();
-    // Cloud-First: Immediately pull latest remote data from Firestore (<300ms)
-    forceFullCloudSync().catch(console.warn);
-    // Initialize & verify Google Drive organized folder structure ('SIKAP-BK/Laporan_Layanan', 'SIKAP-BK/Pelanggaran', 'SIKAP-BK/Jurnal', etc.)
-    ensureDriveFolderStructure().catch(console.warn);
+    // Verify Firebase connection immediately & listen for status errors
+    testConnection().then((res) => {
+      if (!res.ok && res.error) {
+        setFirebaseConnectionError(res.error);
+      } else if (res.ok) {
+        setFirebaseConnectionError(null);
+      }
+    }).catch((err: any) => {
+      setFirebaseConnectionError(err?.message || String(err));
+    });
 
-    // Multi-sekolah: Ensure collection `schools/{schoolId}` exists
+    const handleCloudStatus = (e: any) => {
+      const info = e?.detail;
+      if (!info) return;
+      if ((info.status === 'error' || info.status === 'quota_exceeded') && info.lastError) {
+        setFirebaseConnectionError(info.lastError);
+      } else if (info.status === 'connected') {
+        setFirebaseConnectionError(null);
+      }
+    };
+    window.addEventListener('bk_cloud_status', handleCloudStatus);
+
+    // Start Firestore onSnapshot listeners immediately when app opens
+    initRealtimeFirestoreSync();
+    forceFullCloudSync().catch((err: any) => {
+      setFirebaseConnectionError(err?.message || String(err));
+    });
+    ensureDriveFolderStructure().catch(console.warn);
     ensureSchoolDocumentExists(initialSchoolId).catch(console.warn);
 
     const handleGoogleSessionRestored = (e: any) => {
@@ -772,13 +641,11 @@ export default function App() {
       const schoolId = e.detail?.schoolId;
       const activeSchoolId = getActiveSchoolId();
 
-      // If the broadcasted update belongs to another school workspace, ignore it (except counselors for cross-school pending ACC)
       if (schoolId && schoolId !== activeSchoolId && key !== 'bk_counselors') {
         return;
       }
       if (!key) return;
 
-      // Surgical 1-item removal for doc_deleted events (never wipe whole state!)
       if (eventType === 'doc_deleted' && isValidDeleteId(itemId)) {
         const cleanTarget = String(itemId).trim();
         if (key === 'bk_students') {
@@ -801,48 +668,35 @@ export default function App() {
         return;
       }
 
-      const isExplicitClear = typeof localStorage !== 'undefined' &&
-        (localStorage.getItem(`bk_cleared_${activeSchoolId}`) === 'true' || localStorage.getItem(`bk_students_cleared_${activeSchoolId}`) === 'true');
-
       const getSafeData = (k: string) => {
         if (Array.isArray(data)) return data;
-        return loadSchoolData(k, [], activeSchoolId);
-      };
-
-      const applyGuardedSync = <T,>(setter: (fn: (prev: T[]) => T[]) => void, val: T[], allowEmpty = true) => {
-        if (!Array.isArray(val)) return;
-        setter(prev => {
-          if (Array.isArray(prev) && prev.length > 5 && val.length === 0 && !allowEmpty) {
-            return prev;
-          }
-          return val;
-        });
+        return getCloudCollectionData(k, activeSchoolId);
       };
 
       if (key === 'bk_students') {
         const val = getSafeData('bk_students');
-        if (val) applyGuardedSync(setStudents, val, isExplicitClear);
+        if (Array.isArray(val)) setStudents(val);
       } else if (key === 'bk_violations' || key === 'bk_cases') {
         const val = getSafeData('bk_violations');
-        if (val) applyGuardedSync(setViolations, val, isExplicitClear);
+        if (Array.isArray(val)) setViolations(val);
       } else if (key === 'bk_services' || key === 'bk_counseling') {
         const val = getSafeData('bk_services');
-        if (val) applyGuardedSync(setServices, val, isExplicitClear);
+        if (Array.isArray(val)) setServices(val);
       } else if (key === 'bk_logs') {
         const val = getSafeData('bk_logs');
-        if (val) setLogs(Array.isArray(val) ? val.slice(0, 80) : val);
+        if (Array.isArray(val)) setLogs(val.slice(0, 80));
       } else if (key === 'bk_achievements' || key === 'bk_student_achievements') {
         const val = getSafeData('bk_achievements');
-        if (val) applyGuardedSync(setAchievements, val, isExplicitClear);
+        if (Array.isArray(val)) setAchievements(val);
       } else if (key === 'bk_home_visits') {
         const val = getSafeData('bk_home_visits');
-        if (val) applyGuardedSync(setHomeVisits, val, isExplicitClear);
+        if (Array.isArray(val)) setHomeVisits(val);
       } else if (key === 'bk_program_evaluations') {
         const val = getSafeData('bk_program_evaluations');
-        if (val && Array.isArray(val)) applyGuardedSync(setProgramEvaluations, val, isExplicitClear);
+        if (Array.isArray(val)) setProgramEvaluations(val);
       } else if (key === 'bk_service_evaluations') {
         const val = getSafeData('bk_service_evaluations');
-        if (val && Array.isArray(val)) applyGuardedSync(setServiceEvaluations, val, isExplicitClear);
+        if (Array.isArray(val)) setServiceEvaluations(val);
       } else if (key === 'bk_counselors') {
         const val = getSafeData('bk_counselors');
         if (val && Array.isArray(val) && val.length > 0) {
@@ -870,7 +724,6 @@ export default function App() {
       }
     };
 
-    // Dedicated listener for new account requests (pengajuan akun baru) in realtime
     const handleAccountRequestsUpdated = (e: any) => {
       const requests = e.detail?.requests;
       if (Array.isArray(requests)) {
@@ -898,33 +751,23 @@ export default function App() {
                 avatar: merged.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120'
               });
             });
-            const updated = Array.from(map.values());
-            saveSchoolData('bk_counselors', updated, curSchoolId);
-            return updated;
+            return Array.from(map.values());
           });
         }
       }
     };
 
-    // When switching active school, immediately reload school-isolated states (filter soft-deleted!)
     const handleSchoolChanged = (e: any) => {
       const newSchoolId = e.detail?.schoolId || getActiveSchoolId();
-      const delSet = new Set(getDeletedIds());
-      const filterActive = <T extends { id?: any; isDeleted?: boolean }>(arr: T[]): T[] =>
-        Array.isArray(arr) ? arr.filter(it => it && it.isDeleted !== true && !delSet.has(String(it.id))) : [];
+      setStudents(getCloudCollectionData<Student>('bk_students', newSchoolId));
+      setViolations(getCloudCollectionData<ViolationRecord>('bk_violations', newSchoolId));
+      setServices(getCloudCollectionData<CounselingService>('bk_services', newSchoolId));
+      setLogs(getCloudCollectionData<ActivityLog>('bk_logs', newSchoolId).slice(0, 80));
+      setAchievements(getCloudCollectionData<any>('bk_achievements', newSchoolId));
+      setHomeVisits(getCloudCollectionData<any>('bk_home_visits', newSchoolId));
+      setProgramEvaluations(getCloudCollectionData<ProgramEvaluation>('bk_program_evaluations', newSchoolId));
+      setServiceEvaluations(getCloudCollectionData<ProgramEvaluation>('bk_service_evaluations', newSchoolId));
 
-      const st = loadSchoolData<Student[]>('bk_students', [], newSchoolId);
-      setStudents(filterActive(st).filter(s => !isDummyStudent(s)));
-      const vl = loadSchoolData<ViolationRecord[]>('bk_violations', [], newSchoolId);
-      setViolations(filterActive(vl));
-      const sv = loadSchoolData<CounselingService[]>('bk_services', [], newSchoolId);
-      setServices(filterActive(sv));
-      const lg = loadSchoolData<ActivityLog[]>('bk_logs', [], newSchoolId);
-      setLogs(filterActive(lg).slice(0, 80));
-      setAchievements(filterActive(loadSchoolData<any[]>('bk_achievements', [], newSchoolId)));
-      setHomeVisits(filterActive(loadSchoolData<any[]>('bk_home_visits', [], newSchoolId)));
-      setProgramEvaluations(filterActive(loadSchoolData<ProgramEvaluation[]>('bk_program_evaluations', [], newSchoolId)));
-      setServiceEvaluations(filterActive(loadSchoolData<ProgramEvaluation[]>('bk_service_evaluations', [], newSchoolId)));
       const loadedCounselors = loadSchoolData('bk_counselors', counselors, newSchoolId);
       if (loadedCounselors && loadedCounselors.length > 0) {
         setAllCounselors(loadedCounselors);
@@ -938,74 +781,22 @@ export default function App() {
       }
     };
 
-    const handleStorageEvent = (e: StorageEvent) => {
-      if (e.key) {
-        // Strip school partition suffix if any
-        let baseKey = e.key;
-        if (baseKey.includes('_sch_')) {
-          baseKey = baseKey.split('_sch_')[0];
-        }
-        if (['bk_students', 'bk_violations', 'bk_services', 'bk_logs', 'bk_achievements', 'bk_home_visits', 'bk_program_evaluations', 'bk_service_evaluations', 'bk_counselors'].includes(baseKey)) {
-          handleRealtimeSync({ detail: { key: baseKey, schoolId: getActiveSchoolId() } });
-        }
-      }
-    };
-
     window.addEventListener('bk_realtime_sync', handleRealtimeSync);
     window.addEventListener('bk_school_changed', handleSchoolChanged);
     window.addEventListener('bk_account_requests_updated', handleAccountRequestsUpdated);
-    window.addEventListener('storage', handleStorageEvent as EventListener);
 
     return () => {
+      window.removeEventListener('bk_cloud_status', handleCloudStatus);
       window.removeEventListener('bk_realtime_sync', handleRealtimeSync);
       window.removeEventListener('bk_school_changed', handleSchoolChanged);
       window.removeEventListener('bk_account_requests_updated', handleAccountRequestsUpdated);
       window.removeEventListener('bk_google_session_restored', handleGoogleSessionRestored as EventListener);
-      window.removeEventListener('storage', handleStorageEvent as EventListener);
     };
   }, []);
-
-  // Keep cleared flag in sync if students are dynamically added
-  useEffect(() => {
-    const sId = getActiveSchoolId();
-    const isCleared = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_cleared_${sId}`) === 'true';
-    if (isCleared && students.length > 0) {
-      localStorage.removeItem(`bk_cleared_${sId}`);
-    }
-  }, [students.length]);
-
-  // Local cache mirrors for instant page transitions without circular cloud writes
-  useEffect(() => {
-    saveSchoolData('bk_students', students);
-  }, [students]);
-
-  useEffect(() => {
-    saveSchoolData('bk_violations', violations);
-  }, [violations]);
-
-  useEffect(() => {
-    saveSchoolData('bk_services', services);
-  }, [services]);
-
-  useEffect(() => {
-    saveSchoolData('bk_logs', logs);
-  }, [logs]);
-
-  useEffect(() => {
-    saveSchoolData('bk_achievements', achievements);
-  }, [achievements]);
 
   useEffect(() => {
     saveSchoolData('bk_counselors', allCounselors);
   }, [allCounselors]);
-
-  useEffect(() => {
-    saveSchoolData('bk_program_evaluations', programEvaluations);
-  }, [programEvaluations]);
-
-  useEffect(() => {
-    saveSchoolData('bk_service_evaluations', serviceEvaluations);
-  }, [serviceEvaluations]);
 
   // Background Auto-Sync Trigger when core data changes (debounced to avoid network spikes)
   const isInitialMount = useRef(true);
@@ -1185,11 +976,7 @@ export default function App() {
       initials,
     };
 
-    setStudents((prev) => {
-      const updated = [added, ...prev.filter((s) => s.id !== added.id)];
-      saveSchoolData('bk_students', updated, currentSchoolId);
-      return updated;
-    });
+    setStudents((prev) => [added, ...prev.filter((s) => s.id !== added.id)]);
     saveToFirestore('bk_students', added, currentSchoolId);
     showToast(`✅ Data siswa "${added.name}" berhasil disimpan!`, 'success');
   };
@@ -1207,11 +994,7 @@ export default function App() {
       schoolName: updatedStudent.schoolName || currentSchoolName
     };
 
-    setStudents((prev) => {
-      const updated = prev.map((s) => (s.id === updatedStudent.id ? studentWithInitials : s));
-      saveSchoolData('bk_students', updated, currentSchoolId);
-      return updated;
-    });
+    setStudents((prev) => prev.map((s) => (s.id === updatedStudent.id ? studentWithInitials : s)));
     saveToFirestore('bk_students', studentWithInitials, currentSchoolId);
     showToast(`✅ Profil siswa "${studentWithInitials.name}" berhasil diperbarui!`, 'success');
   };
@@ -1233,7 +1016,6 @@ export default function App() {
         aborted = true;
         return prev;
       }
-      saveSchoolData('bk_students', res.next, currentSchoolId);
       return res.next;
     });
 
@@ -1283,7 +1065,7 @@ export default function App() {
     localStorage.setItem(`bk_students_cleared_${currentSchoolId}`, 'true');
     localStorage.setItem(`bk_cleared_${currentSchoolId}`, 'true');
     localStorage.setItem('bk_dummy_students_purged', 'true');
-    saveSchoolData('bk_students', [], currentSchoolId);
+    setCloudCollectionData('bk_students', [], currentSchoolId);
     softDeleteBulkStudentsFromFirestore(toClear, activeCounselor?.name || 'Koordinator BK', currentSchoolId);
 
     window.dispatchEvent(new Event('storage'));
@@ -1322,17 +1104,12 @@ export default function App() {
       reportedBy: newViolation.reportedBy || activeCounselor?.name || 'Guru BK',
     };
 
-    // Update violations list & sync directly to local school storage
-    setViolations((prev) => {
-      const updated = [added, ...prev.filter((v) => v.id !== added.id)];
-      saveSchoolData('bk_violations', updated, currentSchoolId);
-      return updated;
-    });
+    // Optimistic UI update + immediate direct write to Firestore
+    setViolations((prev) => [added, ...prev.filter((v) => v.id !== added.id)]);
     saveToFirestore('bk_violations', added, currentSchoolId);
 
-    // Update associated student points & sync directly to local school storage
-    setStudents((prev) => {
-      const updated = prev.map((student) => {
+    setStudents((prev) =>
+      prev.map((student) => {
         if (student.id === newViolation.studentId) {
           const updatedStudent = {
             ...student,
@@ -1342,10 +1119,8 @@ export default function App() {
           return updatedStudent;
         }
         return student;
-      });
-      saveSchoolData('bk_students', updated, currentSchoolId);
-      return updated;
-    });
+      })
+    );
 
     // Provide immediate, joyful success feedback
     showToast(
@@ -1566,20 +1341,15 @@ export default function App() {
       id: (newService as Partial<CounselingService>).id || generateUniqueId('srv'),
     };
 
-    // Update counseling list & sync directly to local school storage
-    setServices((prev) => {
-      const updated = [added, ...prev.filter((s) => s.id !== added.id)];
-      saveSchoolData('bk_services', updated, currentSchoolId);
-      return updated;
-    });
+    // Optimistic UI update + immediate direct write to Firestore
+    setServices((prev) => [added, ...prev.filter((s) => s.id !== added.id)]);
     saveToFirestore('bk_services', added, currentSchoolId);
 
-    // If linked to a student violation record, automatically mark violation handled by Guru BK
     if (added.linkedViolationId || added.linkedTicketId) {
       const vId = added.linkedViolationId;
       const tId = added.linkedTicketId;
-      setViolations((prevViolations) => {
-        const updatedViolations = prevViolations.map((v) => {
+      setViolations((prevViolations) =>
+        prevViolations.map((v) => {
           if ((vId && v.id === vId) || (tId && v.ticketId === tId)) {
             const updatedV: ViolationRecord = {
               ...v,
@@ -1590,17 +1360,14 @@ export default function App() {
             return updatedV;
           }
           return v;
-        });
-        saveSchoolData('bk_violations', updatedViolations, currentSchoolId);
-        return updatedViolations;
-      });
+        })
+      );
     }
     setPresetServiceData(null);
 
-    // Update bkServicesCount for all participants & sync directly to local school storage
     const participantIds = newService.students.map((s) => s.id);
-    setStudents((prev) => {
-      const updated = prev.map((student) => {
+    setStudents((prev) =>
+      prev.map((student) => {
         if (participantIds.includes(student.id)) {
           const updatedStudent = {
             ...student,
@@ -1610,10 +1377,8 @@ export default function App() {
           return updatedStudent;
         }
         return student;
-      });
-      saveSchoolData('bk_students', updated, currentSchoolId);
-      return updated;
-    });
+      })
+    );
 
     const primaryStudentName = newService.students[0]?.name || 'Siswa';
     showToast(
@@ -1771,28 +1536,23 @@ export default function App() {
     handledBy: 'Belum Ditangani' | 'Wali Kelas' | 'Guru BK' | 'Wali Kelas & Guru BK',
     handlingProgress: string
   ) => {
-    setViolations((prev) =>
-      prev.map((v) => {
-        if (v.id === violationId) {
-          return {
-            ...v,
-            handledBy,
-            handlingProgress,
-          };
-        }
-        return v;
-      })
-    );
-
-    // Add activity log
-    const today = new Date();
-    const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(
-      today.getMinutes()
-    ).padStart(2, '0')}`;
-    const timeLabel = `HARI INI, ${formattedHour}`;
-
+    const currentSchoolId = getActiveSchoolId();
     const targetV = violations.find((v) => v.id === violationId);
     if (targetV) {
+      const updatedV: ViolationRecord = {
+        ...targetV,
+        handledBy,
+        handlingProgress,
+      };
+      setViolations((prev) => prev.map((v) => (v.id === violationId ? updatedV : v)));
+      saveToFirestore('bk_violations', updatedV, currentSchoolId);
+
+      const today = new Date();
+      const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(
+        today.getMinutes()
+      ).padStart(2, '0')}`;
+      const timeLabel = `HARI INI, ${formattedHour}`;
+
       const newLog: ActivityLog = {
         id: `log-${Date.now()}`,
         timeLabel,
@@ -1812,28 +1572,23 @@ export default function App() {
     status: 'Terjadwal' | 'Selesai' | 'Dibatalkan',
     followUp?: string
   ) => {
-    setServices((prev) =>
-      prev.map((s) => {
-        if (s.id === serviceId) {
-          return {
-            ...s,
-            status,
-            followUp: followUp || s.followUp,
-          };
-        }
-        return s;
-      })
-    );
-
-    // Add activity log
-    const today = new Date();
-    const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(
-      today.getMinutes()
-    ).padStart(2, '0')}`;
-    const timeLabel = `HARI INI, ${formattedHour}`;
-
+    const currentSchoolId = getActiveSchoolId();
     const targetS = services.find((s) => s.id === serviceId);
     if (targetS) {
+      const updatedS: CounselingService = {
+        ...targetS,
+        status,
+        followUp: followUp || targetS.followUp,
+      };
+      setServices((prev) => prev.map((s) => (s.id === serviceId ? updatedS : s)));
+      saveToFirestore('bk_services', updatedS, currentSchoolId);
+
+      const today = new Date();
+      const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(
+        today.getMinutes()
+      ).padStart(2, '0')}`;
+      const timeLabel = `HARI INI, ${formattedHour}`;
+
       const studentNames = targetS.students.map((st) => st.name).join(', ');
       const newLog: ActivityLog = {
         id: `log-${Date.now()}`,
@@ -1866,7 +1621,7 @@ export default function App() {
         aborted = true;
         return prev;
       }
-      saveSchoolData('bk_violations', res.next, currentSchoolId);
+      setCloudCollectionData('bk_violations', res.next, currentSchoolId);
       return res.next;
     });
 
@@ -1891,7 +1646,7 @@ export default function App() {
         }
         return student;
       });
-      saveSchoolData('bk_students', updatedStudents, currentSchoolId);
+      setCloudCollectionData('bk_students', updatedStudents, currentSchoolId);
       return updatedStudents;
     });
 
@@ -1998,7 +1753,7 @@ export default function App() {
         aborted = true;
         return prev;
       }
-      saveSchoolData('bk_services', res.next, currentSchoolId);
+      setCloudCollectionData('bk_services', res.next, currentSchoolId);
       return res.next;
     });
 
@@ -2024,7 +1779,7 @@ export default function App() {
         }
         return student;
       });
-      saveSchoolData('bk_students', updatedStudents, currentSchoolId);
+      setCloudCollectionData('bk_students', updatedStudents, currentSchoolId);
       return updatedStudents;
     });
 
@@ -2083,7 +1838,7 @@ export default function App() {
 
     setServices(prev => {
       const next = prev.map(s => s.id === ensuredUpdated.id ? ensuredUpdated : s);
-      saveSchoolData('bk_services', next, currentSchoolId);
+      setCloudCollectionData('bk_services', next, currentSchoolId);
       return next;
     });
     saveToFirestore('bk_services', ensuredUpdated, currentSchoolId).catch((err) => {
@@ -2111,7 +1866,7 @@ export default function App() {
           }
           return student;
         });
-        saveSchoolData('bk_students', nextStudents, currentSchoolId);
+        setCloudCollectionData('bk_students', nextStudents, currentSchoolId);
         return nextStudents;
       });
     }
@@ -2151,7 +1906,7 @@ export default function App() {
         aborted = true;
         return prev;
       }
-      saveSchoolData('bk_achievements', res.next, currentSchoolId);
+      setCloudCollectionData('bk_achievements', res.next, currentSchoolId);
       return res.next;
     });
 
@@ -2176,7 +1931,7 @@ export default function App() {
         }
         return student;
       });
-      saveSchoolData('bk_students', updatedStudents, currentSchoolId);
+      setCloudCollectionData('bk_students', updatedStudents, currentSchoolId);
       return updatedStudents;
     });
 
@@ -2275,7 +2030,7 @@ export default function App() {
       const next = exists
         ? prev.map((e) => (e.id === stamped.id ? stamped : e))
         : [stamped, ...prev];
-      saveSchoolData('bk_program_evaluations', next, currentSchoolId);
+      setCloudCollectionData('bk_program_evaluations', next, currentSchoolId);
       return next;
     });
     saveToFirestore('bk_program_evaluations', stamped, currentSchoolId);
@@ -2297,7 +2052,7 @@ export default function App() {
         aborted = true;
         return prev;
       }
-      saveSchoolData('bk_program_evaluations', res.next, currentSchoolId);
+      setCloudCollectionData('bk_program_evaluations', res.next, currentSchoolId);
       return res.next;
     });
 
@@ -2346,7 +2101,7 @@ export default function App() {
       const next = exists
         ? prev.map((e) => (e.id === stamped.id ? stamped : e))
         : [stamped, ...prev];
-      saveSchoolData('bk_service_evaluations', next, currentSchoolId);
+      setCloudCollectionData('bk_service_evaluations', next, currentSchoolId);
       return next;
     });
     saveToFirestore('bk_service_evaluations', stamped, currentSchoolId);
@@ -2368,7 +2123,7 @@ export default function App() {
         aborted = true;
         return prev;
       }
-      saveSchoolData('bk_service_evaluations', res.next, currentSchoolId);
+      setCloudCollectionData('bk_service_evaluations', res.next, currentSchoolId);
       return res.next;
     });
 
@@ -2412,18 +2167,39 @@ export default function App() {
     localStorage.setItem('bk_google_sync_verified', 'true');
     window.dispatchEvent(new Event('storage'));
 
-    if (data.students) setStudents(data.students);
-    if (data.violations) setViolations(data.violations);
-    if (data.services) setServices(data.services);
-    if (data.achievements) setAchievements(data.achievements);
+    const importSchoolId = getActiveSchoolId();
+    if (data.students) {
+      setStudents(data.students);
+      setCloudCollectionData('bk_students', data.students, importSchoolId);
+      void saveBulkToFirestore('bk_students', data.students, importSchoolId);
+    }
+    if (data.violations) {
+      setViolations(data.violations);
+      setCloudCollectionData('bk_violations', data.violations, importSchoolId);
+      void saveBulkToFirestore('bk_violations', data.violations, importSchoolId);
+    }
+    if (data.services) {
+      setServices(data.services);
+      setCloudCollectionData('bk_services', data.services, importSchoolId);
+      void saveBulkToFirestore('bk_services', data.services, importSchoolId);
+    }
+    if (data.achievements) {
+      setAchievements(data.achievements);
+      setCloudCollectionData('bk_achievements', data.achievements, importSchoolId);
+      void saveBulkToFirestore('bk_achievements', data.achievements, importSchoolId);
+    }
     if (data.attendance) {
-      localStorage.setItem('bk_attendance_history', JSON.stringify(data.attendance));
+      setCloudCollectionData('bk_attendance_history', data.attendance, importSchoolId);
+      void saveBulkToFirestore('bk_attendance_history', data.attendance, importSchoolId);
     }
     if (data.journals) {
-      localStorage.setItem('bk_daily_journals', JSON.stringify(data.journals));
+      setCloudCollectionData('bk_daily_journals', data.journals, importSchoolId);
+      void saveBulkToFirestore('bk_daily_journals', data.journals, importSchoolId);
     }
     if (data.homeVisits) {
-      localStorage.setItem('bk_home_visits', JSON.stringify(data.homeVisits));
+      setHomeVisits(data.homeVisits);
+      setCloudCollectionData('bk_home_visits', data.homeVisits, importSchoolId);
+      void saveBulkToFirestore('bk_home_visits', data.homeVisits, importSchoolId);
     }
 
     // Register all imported IDs as synced
@@ -3349,18 +3125,15 @@ export default function App() {
             onBack={() => setCurrentView('lainnya')}
             onDataRestored={() => {
               const sid = getActiveSchoolId();
-              setStudents(loadSchoolData('bk_students', [], sid));
-              setViolations(loadSchoolData('bk_violations', [], sid));
-              setServices(loadSchoolData('bk_services', [], sid));
-              setLogs(loadSchoolData('bk_logs', [], sid));
-              setAchievements(loadSchoolData('bk_achievements', [], sid));
-              setHomeVisits(loadSchoolData('bk_home_visits', [], sid));
-              setProgramEvaluations(loadSchoolData('bk_program_evaluations', [], sid));
-              setServiceEvaluations(loadSchoolData('bk_service_evaluations', [], sid));
-              const nextCounselors = loadSchoolData('bk_counselors', [], sid);
-              if (Array.isArray(nextCounselors) && nextCounselors.length > 0) {
-                setAllCounselors(nextCounselors);
-              }
+              setStudents(getCloudCollectionData('bk_students', sid));
+              setViolations(getCloudCollectionData('bk_violations', sid));
+              setServices(getCloudCollectionData('bk_services', sid));
+              setLogs(getCloudCollectionData('bk_logs', sid));
+              setAchievements(getCloudCollectionData('bk_achievements', sid));
+              setHomeVisits(getCloudCollectionData('bk_home_visits', sid));
+              setProgramEvaluations(getCloudCollectionData('bk_program_evaluations', sid));
+              setServiceEvaluations(getCloudCollectionData('bk_service_evaluations', sid));
+              forceFullCloudSync().catch(() => {});
             }}
           />
         );
@@ -3526,147 +3299,140 @@ export default function App() {
 
   if (!isLoggedIn) {
     return (
-      <LoginView
-        allCounselors={allCounselors}
-        onCreateNewCounselor={handleCreateCounselor}
-        onLoginSuccess={async (counselor) => {
-          const isAulia = counselor.id === 'c1' || 
-                          counselor.username === 'aulia' || 
-                          (counselor.email && counselor.email.toLowerCase().includes('auliasasongko')) ||
-                          (counselor.name && counselor.name.toLowerCase().includes('aulia'));
+      <>
+        <div className={`px-4 py-1.5 text-[11px] sm:text-xs font-bold flex flex-wrap items-center justify-between gap-2 border-b relative z-[1200] ${
+          firebaseConnectionError
+            ? 'bg-red-50 text-red-800 border-red-200'
+            : 'bg-[#e6f4f1] text-[#005049] border-[#00685f]/20'
+        }`}>
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full shrink-0 ${firebaseConnectionError ? 'bg-red-600' : 'bg-emerald-600 animate-pulse'}`} />
+            <span>Cloud: Default Gemini Project - students: {students.length} data</span>
+          </div>
+          <span className="text-[10px] opacity-80 font-mono">projectId: {firebaseConfig.projectId}</span>
+        </div>
+        {firebaseConnectionError && (
+          <div className="bg-red-600 text-white px-4 py-3 text-xs sm:text-sm font-extrabold flex flex-wrap items-center justify-between gap-2 shadow-md relative z-[1200]">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>GAGAL KONEK FIREBASE: {firebaseConnectionError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setFirebaseConnectionError(null);
+                initRealtimeFirestoreSync();
+                forceFullCloudSync().catch((err: any) => setFirebaseConnectionError(err?.message || String(err)));
+              }}
+              className="px-3 py-1 rounded-lg bg-white text-red-700 text-xs font-extrabold cursor-pointer"
+            >
+              Coba Lagi
+            </button>
+          </div>
+        )}
+        <LoginView
+          allCounselors={allCounselors}
+          onCreateNewCounselor={handleCreateCounselor}
+          onLoginSuccess={async (counselor) => {
+            const isAulia = counselor.id === 'c1' || 
+                            counselor.username === 'aulia' || 
+                            (counselor.email && counselor.email.toLowerCase().includes('auliasasongko')) ||
+                            (counselor.name && counselor.name.toLowerCase().includes('aulia'));
 
-          const cleanNpsn = counselor.schoolNpsn ? String(counselor.schoolNpsn).replace(/[^0-9a-zA-Z]/g, '') : '';
-          const hasCounselorSchool = Boolean(isAulia || cleanNpsn || counselor.schoolId || counselor.schoolName);
-          const cSchoolId = isAulia 
-            ? 'sch_20320123' 
-            : ((cleanNpsn ? sanitizeSchoolId(cleanNpsn) : '') || (counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : (hasCounselorSchool ? getActiveSchoolId() : '')));
+            const cleanNpsn = counselor.schoolNpsn ? String(counselor.schoolNpsn).replace(/[^0-9a-zA-Z]/g, '') : '';
+            const hasCounselorSchool = Boolean(isAulia || cleanNpsn || counselor.schoolId || counselor.schoolName);
+            const cSchoolId = isAulia 
+              ? 'sch_20320123' 
+              : ((cleanNpsn ? sanitizeSchoolId(cleanNpsn) : '') || (counselor.schoolId ? sanitizeSchoolId(counselor.schoolId) : (hasCounselorSchool ? getActiveSchoolId() : '')));
 
-          const finalSchoolId = (isAulia || cSchoolId === 'sch_20320123' || cleanNpsn === '20320123') ? 'sch_20320123' : (cSchoolId || getActiveSchoolId());
+            const finalSchoolId = (isAulia || cSchoolId === 'sch_20320123' || cleanNpsn === '20320123') ? 'sch_20320123' : (cSchoolId || getActiveSchoolId());
 
-          // Ensure active school workspace matches target school
-          if (hasCounselorSchool && finalSchoolId !== getActiveSchoolId()) {
-            const registered = getRegisteredSchools();
-            const targetSchool = registered.find(s => s.schoolId === finalSchoolId || (cleanNpsn && s.npsn === cleanNpsn)) || {
-              schoolId: finalSchoolId,
-              schoolName: isAulia ? 'SMP N 2 Susukan' : (counselor.schoolName || ''),
-              npsn: isAulia ? '20320123' : (cleanNpsn || counselor.schoolNpsn || ''),
-              schoolAddress: isAulia ? 'Jl. Kyai Hasan Anwar No. 16, Susukan, Kab. Semarang' : 'Alamat Sekolah',
-              principalName: isAulia ? 'Agus Setiawan, S.Pd. Fis' : 'Kepala Sekolah',
-              principalNip: isAulia ? '19680831 199103 1 007' : '-',
-              governmentName: 'PEMERINTAH KABUPATEN SEMARANG',
-              departmentName: 'DINAS PENDIDIKAN, KEBUDAYAAN, KEPEMUDAAN DAN OLAHRAGA'
-            };
-            switchSchoolWorkspace(targetSchool);
-          }
-
-          if (hasCounselorSchool) {
-            setActiveSchoolId(finalSchoolId);
-          }
-
-          // Build finalized counselor profile (jangan memalsukan schoolName/schoolId jika sekolah user belum diatur)
-          const finalizedCounselor: Counselor = isAulia ? {
-            ...counselor,
-            id: 'c1',
-            name: 'Aulia Aji Sasongko, S.Pd.',
-            role: 'Koordinator BK & Guru Pembimbing Kelas 8',
-            nip: counselor.nip && counselor.nip !== '-' ? counselor.nip : 'NIP. 19931231 202221 1 002',
-            avatar: counselor.avatar || counselors.find(c => c.id === 'c1')?.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
-            allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
-            username: 'aulia',
-            email: 'auliasasongko12@guru.smp.belajar.id',
-            phone: '089681287339',
-            schoolId: 'sch_20320123',
-            schoolNpsn: '20320123',
-            schoolName: 'SMP N 2 Susukan'
-          } : {
-            ...counselor,
-            schoolId: counselor.schoolId || (cleanNpsn ? sanitizeSchoolId(cleanNpsn) : ''),
-            schoolNpsn: cleanNpsn || counselor.schoolNpsn || '',
-            schoolName: counselor.schoolName || ''
-          };
-
-          // 1. Synchronously load non-deleted states WITHOUT resurrecting deleted records!
-          const isCanonical = finalSchoolId === 'sch_20320123';
-          const deletedSet = new Set(getDeletedIds());
-          const hasSeededFlag = typeof localStorage !== 'undefined' && localStorage.getItem(`bk_initial_seeded_${finalSchoolId}`) === 'true';
-          const filterActive = <T extends { id?: any; isDeleted?: boolean }>(arr: T[]): T[] =>
-            Array.isArray(arr) ? arr.filter(it => it && it.isDeleted !== true && !deletedSet.has(String(it.id))) : [];
-
-          const loadedStudents = loadSchoolData<Student[]>('bk_students', [], finalSchoolId);
-          const cleanStudents = filterActive(loadedStudents).filter(s => !isDummyStudent(s));
-          setStudents(cleanStudents);
-          saveSchoolData('bk_students', cleanStudents, finalSchoolId);
-
-          const loadedViolations = filterActive(loadSchoolData<ViolationRecord[]>('bk_violations', [], finalSchoolId));
-          const finalViolations = (loadedViolations.length === 0 && isCanonical && !hasSeededFlag)
-            ? initialViolations.filter(v => !deletedSet.has(String(v.id)))
-            : loadedViolations;
-          setViolations(finalViolations);
-          saveSchoolData('bk_violations', finalViolations, finalSchoolId);
-
-          const loadedServices = filterActive(loadSchoolData<CounselingService[]>('bk_services', [], finalSchoolId));
-          const finalServices = (loadedServices.length === 0 && isCanonical && !hasSeededFlag)
-            ? initialServices.filter(s => !deletedSet.has(String(s.id)))
-            : loadedServices;
-          setServices(finalServices);
-          saveSchoolData('bk_services', finalServices, finalSchoolId);
-
-          const loadedLogs = filterActive(loadSchoolData<ActivityLog[]>('bk_logs', [], finalSchoolId));
-          const finalLogs = (loadedLogs.length === 0 && isCanonical && !hasSeededFlag)
-            ? initialLogs.filter(l => !deletedSet.has(String(l.id)))
-            : loadedLogs;
-          setLogs(finalLogs);
-          saveSchoolData('bk_logs', finalLogs, finalSchoolId);
-
-          const loadedHomeVisits = filterActive(loadSchoolData<any[]>('bk_home_visits', [], finalSchoolId));
-          const finalHomeVisits = (loadedHomeVisits.length === 0 && isCanonical && !hasSeededFlag)
-            ? initialHomeVisits.filter(h => !deletedSet.has(String(h.id)))
-            : loadedHomeVisits;
-          setHomeVisits(finalHomeVisits);
-          saveSchoolData('bk_home_visits', finalHomeVisits, finalSchoolId);
-
-          if (typeof localStorage !== 'undefined' && isCanonical) {
-            localStorage.setItem(`bk_initial_seeded_${finalSchoolId}`, 'true');
-          }
-
-          setAchievements(filterActive(loadSchoolData<any[]>('bk_achievements', [], finalSchoolId)));
-          setProgramEvaluations(filterActive(loadSchoolData<ProgramEvaluation[]>('bk_program_evaluations', [], finalSchoolId)));
-          setServiceEvaluations(filterActive(loadSchoolData<ProgramEvaluation[]>('bk_service_evaluations', [], finalSchoolId)));
-
-          // 2. Set authenticated state
-          setActiveCounselor(finalizedCounselor);
-          setIsLoggedIn(true);
-          sessionStorage.setItem('bk_session_logged_in', 'true');
-          localStorage.setItem('bk_is_logged_in', 'true');
-          localStorage.setItem('bk_active_counselor_id', finalizedCounselor.id);
-
-          // 3. Background cloud sync (strictly respects isDeleted !== true from Firestore)
-          (async () => {
-            try {
-              await ensureSchoolDocumentExists(finalSchoolId, finalizedCounselor);
-
-              const loadedCounselors = loadSchoolData('bk_counselors', isCanonical ? counselors : [finalizedCounselor], finalSchoolId);
-              let mergedCounselors = isCanonical ? [...counselors] : [finalizedCounselor];
-              if (loadedCounselors && loadedCounselors.length > 0) {
-                loadedCounselors.forEach(c => {
-                  const idx = mergedCounselors.findIndex(mc => mc.id === c.id || mc.username === c.username);
-                  if (idx !== -1) mergedCounselors[idx] = { ...mergedCounselors[idx], ...c };
-                  else mergedCounselors.push(c);
-                });
-              }
-              setAllCounselors(mergedCounselors);
-              saveSchoolData('bk_counselors', mergedCounselors, finalSchoolId);
-
-              stopRealtimeFirestoreSync();
-              await initRealtimeFirestoreSync();
-              await forceFullCloudSync();
-              await flushPendingCloudQueue();
-            } catch (syncErr) {
-              console.warn('Background sync on login warning:', syncErr);
+            if (hasCounselorSchool && finalSchoolId !== getActiveSchoolId()) {
+              const registered = getRegisteredSchools();
+              const targetSchool = registered.find(s => s.schoolId === finalSchoolId || (cleanNpsn && s.npsn === cleanNpsn)) || {
+                schoolId: finalSchoolId,
+                schoolName: isAulia ? 'SMP N 2 Susukan' : (counselor.schoolName || ''),
+                npsn: isAulia ? '20320123' : (cleanNpsn || counselor.schoolNpsn || ''),
+                schoolAddress: isAulia ? 'Jl. Kyai Hasan Anwar No. 16, Susukan, Kab. Semarang' : 'Alamat Sekolah',
+                principalName: isAulia ? 'Agus Setiawan, S.Pd. Fis' : 'Kepala Sekolah',
+                principalNip: isAulia ? '19680831 199103 1 007' : '-',
+                governmentName: 'PEMERINTAH KABUPATEN SEMARANG',
+                departmentName: 'DINAS PENDIDIKAN, KEBUDAYAAN, KEPEMUDAAN DAN OLAHRAGA'
+              };
+              switchSchoolWorkspace(targetSchool);
             }
-          })();
-        }}
-      />
+
+            if (hasCounselorSchool) {
+              setActiveSchoolId(finalSchoolId);
+            }
+
+            const finalizedCounselor: Counselor = isAulia ? {
+              ...counselor,
+              id: 'c1',
+              name: 'Aulia Aji Sasongko, S.Pd.',
+              role: 'Koordinator BK & Guru Pembimbing Kelas 8',
+              nip: counselor.nip && counselor.nip !== '-' ? counselor.nip : 'NIP. 19931231 202221 1 002',
+              avatar: counselor.avatar || counselors.find(c => c.id === 'c1')?.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120',
+              allowedClasses: ['8A', '8B', '8C', '8D', '8E', '8F', '8G'],
+              username: 'aulia',
+              email: 'auliasasongko12@guru.smp.belajar.id',
+              phone: '089681287339',
+              schoolId: 'sch_20320123',
+              schoolNpsn: '20320123',
+              schoolName: 'SMP N 2 Susukan'
+            } : {
+              ...counselor,
+              schoolId: counselor.schoolId || (cleanNpsn ? sanitizeSchoolId(cleanNpsn) : ''),
+              schoolNpsn: cleanNpsn || counselor.schoolNpsn || '',
+              schoolName: counselor.schoolName || ''
+            };
+
+            // 1. PURE FIRESTORE SOURCE OF TRUTH: Isi state hanya dari snapshot cloud di memori (mulai 0 jika belum ada di Firestore)
+            const isCanonical = finalSchoolId === 'sch_20320123';
+            setStudents(getCloudCollectionData<Student>('bk_students', finalSchoolId));
+            setViolations(getCloudCollectionData<ViolationRecord>('bk_violations', finalSchoolId));
+            setServices(getCloudCollectionData<CounselingService>('bk_services', finalSchoolId));
+            setLogs(getCloudCollectionData<ActivityLog>('bk_logs', finalSchoolId));
+            setHomeVisits(getCloudCollectionData<any>('bk_home_visits', finalSchoolId));
+            setAchievements(getCloudCollectionData<any>('bk_achievements', finalSchoolId));
+            setProgramEvaluations(getCloudCollectionData<ProgramEvaluation>('bk_program_evaluations', finalSchoolId));
+            setServiceEvaluations(getCloudCollectionData<ProgramEvaluation>('bk_service_evaluations', finalSchoolId));
+
+            // 2. Set authenticated state
+            setActiveCounselor(finalizedCounselor);
+            setIsLoggedIn(true);
+            sessionStorage.setItem('bk_session_logged_in', 'true');
+            localStorage.setItem('bk_is_logged_in', 'true');
+            localStorage.setItem('bk_active_counselor_id', finalizedCounselor.id);
+
+            // 3. Langsung jalankan onSnapshot & forceFullCloudSync dari Firestore
+            (async () => {
+              try {
+                await ensureSchoolDocumentExists(finalSchoolId, finalizedCounselor);
+
+                const loadedCounselors = loadSchoolData('bk_counselors', isCanonical ? counselors : [finalizedCounselor], finalSchoolId);
+                let mergedCounselors = isCanonical ? [...counselors] : [finalizedCounselor];
+                if (loadedCounselors && loadedCounselors.length > 0) {
+                  loadedCounselors.forEach(c => {
+                    const idx = mergedCounselors.findIndex(mc => mc.id === c.id || mc.username === c.username);
+                    if (idx !== -1) mergedCounselors[idx] = { ...mergedCounselors[idx], ...c };
+                    else mergedCounselors.push(c);
+                  });
+                }
+                setAllCounselors(mergedCounselors);
+                saveSchoolData('bk_counselors', mergedCounselors, finalSchoolId);
+
+                stopRealtimeFirestoreSync();
+                await initRealtimeFirestoreSync();
+                await forceFullCloudSync();
+                await flushPendingCloudQueue();
+              } catch (syncErr: any) {
+                setFirebaseConnectionError(syncErr?.message || String(syncErr));
+              }
+            })();
+          }}
+        />
+      </>
     );
   }
 
@@ -3792,6 +3558,40 @@ export default function App() {
 
         {/* Central Workspace view with bottom padding 100px on both mobile and laptop for BottomNavBar */}
         <main className="mt-16 p-4 sm:p-6 lg:p-8 pb-[100px] flex-1 app-workspace">
+          <div className={`max-w-7xl mx-auto mb-3 px-4 py-2 rounded-xl border text-xs font-bold flex flex-wrap items-center justify-between gap-2 shadow-2xs ${
+            firebaseConnectionError
+              ? 'bg-red-50 text-red-800 border-red-200'
+              : 'bg-[#e6f4f1] text-[#005049] border-[#00685f]/20'
+          }`}>
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${firebaseConnectionError ? 'bg-red-600' : 'bg-emerald-600 animate-pulse'}`} />
+              <span>Cloud: Default Gemini Project - students: {students.length} data</span>
+            </div>
+            <span className="text-[11px] opacity-80 font-mono">
+              projectId: {firebaseConfig.projectId} • violations: {violations.length} • services: {services.length}
+            </span>
+          </div>
+          {firebaseConnectionError && (
+            <div className="max-w-7xl mx-auto mb-4 bg-red-600 text-white px-4 py-3 rounded-2xl shadow-md flex flex-wrap items-center justify-between gap-3 border border-red-700">
+              <div className="flex items-center gap-2.5 text-xs sm:text-sm font-extrabold">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+                <span>GAGAL KONEK FIREBASE: {firebaseConnectionError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setFirebaseConnectionError(null);
+                  stopRealtimeFirestoreSync();
+                  initRealtimeFirestoreSync();
+                  forceFullCloudSync().catch((err: any) => setFirebaseConnectionError(err?.message || String(err)));
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white text-red-700 text-xs font-extrabold hover:bg-red-50 cursor-pointer shrink-0"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Hubungkan Ulang</span>
+              </button>
+            </div>
+          )}
           <div className="max-w-7xl mx-auto app-content-container">
             {/* Tombol Kembali yang Jelas & Judul Halaman Besar di Atas (Setiap Halaman selain Beranda, Lainnya, dan Form Layanan Wizard) */}
             {currentView !== 'dashboard' && currentView !== 'lainnya' && currentView !== 'tambah-layanan' && currentView !== 'input-konseling' && currentView !== 'layanan-konseling' && currentView !== 'konseling' && currentView !== 'form-layanan' && (

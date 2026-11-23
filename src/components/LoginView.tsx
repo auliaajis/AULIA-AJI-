@@ -42,9 +42,6 @@ import {
   sanitizeSchoolId, 
   SchoolConfig 
 } from '../utils/schoolConfig';
-import { initialViolations, initialServices } from '../data/mockData';
-import { getDeletedIds } from '../utils/deletionTracker';
-import { isDummyStudent } from '../utils/purgeDummyData';
 import { showToast } from '../utils/toast';
 
 interface LoginViewProps {
@@ -375,39 +372,6 @@ export default function LoginView({
       }
       if (isAulia) {
         setActiveSchoolId('sch_20320123');
-        const deletedSet = new Set(getDeletedIds());
-        const seededFlagKey = 'bk_initial_seeded_sch_20320123';
-        const alreadySeeded = typeof localStorage !== 'undefined' && localStorage.getItem(seededFlagKey) === 'true';
-        const existingStudents = loadSchoolData<any[]>('bk_students', [], 'sch_20320123');
-        if (Array.isArray(existingStudents) && existingStudents.length > 0) {
-          const cleanOnly = existingStudents.filter(
-            (s: any) => s && !isDummyStudent(s) && s.isDeleted !== true && !deletedSet.has(String(s.id))
-          );
-          if (cleanOnly.length !== existingStudents.length) {
-            saveSchoolData('bk_students', cleanOnly, 'sch_20320123');
-          }
-        }
-        if (!alreadySeeded) {
-          const existingViolations = loadSchoolData<any[]>('bk_violations', [], 'sch_20320123');
-          if (!existingViolations || existingViolations.length === 0) {
-            saveSchoolData(
-              'bk_violations',
-              initialViolations.filter((v) => !deletedSet.has(String(v.id))),
-              'sch_20320123'
-            );
-          }
-          const existingServices = loadSchoolData<any[]>('bk_services', [], 'sch_20320123');
-          if (!existingServices || existingServices.length === 0) {
-            saveSchoolData(
-              'bk_services',
-              initialServices.filter((s) => !deletedSet.has(String(s.id))),
-              'sch_20320123'
-            );
-          }
-          if (typeof localStorage !== 'undefined') {
-            localStorage.setItem(seededFlagKey, 'true');
-          }
-        }
       }
       onLoginSuccess(counselorToLogin);
     } catch (err: any) {
@@ -508,39 +472,6 @@ export default function LoginView({
 
       if (isAulia) {
         setActiveSchoolId('sch_20320123');
-        const deletedSet = new Set(getDeletedIds());
-        const seededFlagKey = 'bk_initial_seeded_sch_20320123';
-        const alreadySeeded = typeof localStorage !== 'undefined' && localStorage.getItem(seededFlagKey) === 'true';
-        const existingStudents = loadSchoolData<any[]>('bk_students', [], 'sch_20320123');
-        if (Array.isArray(existingStudents) && existingStudents.length > 0) {
-          const cleanOnly = existingStudents.filter(
-            (s: any) => s && !isDummyStudent(s) && s.isDeleted !== true && !deletedSet.has(String(s.id))
-          );
-          if (cleanOnly.length !== existingStudents.length) {
-            saveSchoolData('bk_students', cleanOnly, 'sch_20320123');
-          }
-        }
-        if (!alreadySeeded) {
-          const existingViolations = loadSchoolData<any[]>('bk_violations', [], 'sch_20320123');
-          if (!existingViolations || existingViolations.length === 0) {
-            saveSchoolData(
-              'bk_violations',
-              initialViolations.filter((v) => !deletedSet.has(String(v.id))),
-              'sch_20320123'
-            );
-          }
-          const existingServices = loadSchoolData<any[]>('bk_services', [], 'sch_20320123');
-          if (!existingServices || existingServices.length === 0) {
-            saveSchoolData(
-              'bk_services',
-              initialServices.filter((s) => !deletedSet.has(String(s.id))),
-              'sch_20320123'
-            );
-          }
-          if (typeof localStorage !== 'undefined') {
-            localStorage.setItem(seededFlagKey, 'true');
-          }
-        }
       }
 
       const resolvedSchoolId = isAulia ? 'sch_20320123' : (activeTargetSchool.schoolId ? sanitizeSchoolId(activeTargetSchool.schoolId) : getActiveSchoolId());

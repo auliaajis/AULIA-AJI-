@@ -1,50 +1,8 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // Helper: ambil schoolId dari token
-    function getSchoolId() {
-      return request.auth.token.schoolId;
-    }
-    function isKoordinator() {
-      return request.auth.token.role == 'koordinator_bk';
-    }
-
-    // SCHOOLS - hanya bisa dibaca sekolah sendiri
-    match /schools/{schoolId} {
-      allow read: if request.auth != null && getSchoolId() == schoolId;
-      allow create: if request.auth != null;
-      allow update: if request.auth != null && getSchoolId() == schoolId && isKoordinator();
-    }
-
-    // USERS - guru
-    match /users/{userId} {
-      // Daftar baru: boleh buat dokumen dirinya sendiri dengan status pending
-      allow create: if request.auth != null 
-                    && request.auth.uid == userId 
-                    && request.resource.data.status == 'pending';
-      // Baca: hanya sekolah yang sama, atau dirinya sendiri
-      allow read: if request.auth != null 
-                  && (resource.data.schoolId == getSchoolId() || request.auth.uid == userId);
-      // Update status (approve): hanya Koordinator sekolah yang sama
-      allow update: if request.auth != null 
-                    && resource.data.schoolId == getSchoolId() 
-                    && isKoordinator();
-      allow delete: if request.auth != null && isKoordinator() && resource.data.schoolId == getSchoolId();
-    }
-
-    // STUDENTS, CASES, COUNSELING - kunci per sekolah
-    match /students/{docId} {
-      allow read, write: if request.auth != null && resource.data.schoolId == getSchoolId();
-      allow create: if request.auth != null && request.resource.data.schoolId == getSchoolId();
-    }
-    match /cases/{docId} {
-      allow read, write: if request.auth != null && resource.data.schoolId == getSchoolId();
-      allow create: if request.auth != null && request.resource.data.schoolId == getSchoolId();
-    }
-    match /counseling/{docId} {
-      allow read, write: if request.auth != null && resource.data.schoolId == getSchoolId();
-      allow create: if request.auth != null && request.resource.data.schoolId == getSchoolId();
+    match /{document=**} {
+      allow read, write: if true;
     }
   }
 }

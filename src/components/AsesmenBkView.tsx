@@ -1,6 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { showToast } from '../utils/toast';
 import { isValidDeleteId, safeGuardMassDrop, generateUniqueId } from '../utils/safeDelete';
+import { getCloudCollectionData, setCloudCollectionData, subscribeCloudCollection, saveToFirestore } from '../utils/firestoreSync';
+import { getActiveSchoolId } from '../utils/schoolConfig';
 import {
   FileText,
   CheckCircle2,
@@ -89,17 +91,35 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
   const [selectedFase, setSelectedFase] = useState<'Fase D' | 'Fase E' | 'Fase F'>('Fase D');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // AKPD Class Sessions State (persisted in localStorage)
-  const [akpdSessions, setAkpdSessions] = useState<Record<string, AkpdClassSession>>(() => {
-    const saved = localStorage.getItem('bk_akpd_class_sessions');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === 'object') return parsed;
-      } catch (e) {}
+  const sessionsArrayToMap = (raw: any): Record<string, AkpdClassSession> => {
+    if (!raw) return {};
+    if (Array.isArray(raw)) {
+      const map: Record<string, AkpdClassSession> = {};
+      raw.forEach((s: any) => {
+        const key = s?.classId || s?.id;
+        if (key && s.isDeleted !== true) {
+          map[String(key)] = { ...s, classId: String(key) };
+        }
+      });
+      return map;
     }
+    if (typeof raw === 'object') return raw as Record<string, AkpdClassSession>;
     return {};
-  });
+  };
+
+  // AKPD Class Sessions State (synced directly with Firestore)
+  const [akpdSessions, setAkpdSessions] = useState<Record<string, AkpdClassSession>>(() =>
+    sessionsArrayToMap(getCloudCollectionData('bk_akpd_class_sessions', getActiveSchoolId()))
+  );
+
+  useEffect(() => {
+    const sid = getActiveSchoolId();
+    setAkpdSessions(sessionsArrayToMap(getCloudCollectionData('bk_akpd_class_sessions', sid)));
+    const unsub = subscribeCloudCollection('bk_akpd_class_sessions', (data) => {
+      setAkpdSessions(sessionsArrayToMap(data));
+    }, sid);
+    return () => unsub();
+  }, []);
 
   // Modals & Forms State for AKPD
   const [showSpreadModal, setShowSpreadModal] = useState(false);
@@ -174,11 +194,20 @@ export default function AsesmenBkView({ students, onNavigateToForm }: AsesmenBkV
 
   const schoolConfig = getSchoolConfig();
 
-  // Save AKPD sessions helper
+  // Save AKPD sessions helper (direct Firestore sync)
   const updateAkpdSessions = (updater: (prev: Record<string, AkpdClassSession>) => Record<string, AkpdClassSession>) => {
     setAkpdSessions((prev) => {
       const updated = updater(prev);
-      localStorage.setItem('bk_akpd_class_sessions', JSON.stringify(updated));
+      const sid = getActiveSchoolId();
+      const listToStore = Object.entries(updated).map(([clsKey, session]) => ({
+        ...session,
+        classId: session.classId || clsKey,
+        id: `akpd_${session.classId || clsKey}`,
+      }));
+      setCloudCollectionData('bk_akpd_class_sessions', listToStore, sid);
+      listToStore.forEach((item) => {
+        void saveToFirestore('bk_akpd_class_sessions', item, sid);
+      });
       return updated;
     });
   };

@@ -2,13 +2,12 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Student, ClassAttendanceRecord, StudentAttendance } from '../types';
 import { downloadAttendanceRecapPDF, formatIndonesianDate } from '../utils/pdfGenerator';
 import { 
-  saveBulkToFirestore, 
-  saveSchoolData, 
-  loadSchoolData, 
   softDeleteFromFirestore,
   saveToFirestore,
   fetchCloudAttendance,
-  flushPendingCloudQueue
+  flushPendingCloudQueue,
+  getCloudCollectionData,
+  subscribeCloudCollection
 } from '../utils/firestoreSync';
 import { getSchoolConfig, getActiveSchoolId, getValidatedSchoolIdentity, buildSchoolStamp } from '../utils/schoolConfig';
 import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
@@ -36,7 +35,6 @@ import {
   Edit3,
   RotateCcw
 } from 'lucide-react';
-import { initialAttendanceHistory } from '../data/mockData';
 import { compareClassNames, compareStudentNamesAZ } from '../utils/classNormalizer';
 
 interface AbsensiViewProps {
@@ -190,69 +188,35 @@ export default function AbsensiView({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'H' | 'S' | 'I' | 'A'>('ALL');
 
-  // Historical attendance list from school storage & Firestore (only seed once; never resurrect deleted docs)
-  const [history, setHistory] = useState<ClassAttendanceRecord[]>(() => {
-    const schoolId = getActiveSchoolId();
-    const seedFlag = `bk_att_seeded_${schoolId}`;
-    const alreadySeeded = typeof localStorage !== 'undefined' && localStorage.getItem(seedFlag) === 'true';
-    const deletedSet = new Set(getDeletedIds());
-    const loaded = loadSchoolData<ClassAttendanceRecord[]>('bk_attendance_history', []);
-    if (Array.isArray(loaded) && loaded.length > 0) {
-      return loaded.filter((h) => h && h.isDeleted !== true && !deletedSet.has(String(h.id)));
-    }
-    if (!alreadySeeded) {
-      const initialClean = initialAttendanceHistory.filter((h) => h && !deletedSet.has(String(h.id)));
-      saveSchoolData('bk_attendance_history', initialClean);
-      if (typeof localStorage !== 'undefined') localStorage.setItem(seedFlag, 'true');
-      return initialClean;
-    }
-    return [];
-  });
+  // Historical attendance list fed ONLY from Firestore onSnapshot
+  const [history, setHistory] = useState<ClassAttendanceRecord[]>(() =>
+    getCloudCollectionData<ClassAttendanceRecord>('bk_attendance_history')
+  );
 
   const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(false);
 
-  // Automatically fetch fresh cloud attendance from Firestore on mount (across devices)
+  // Realtime subscriber directly from Firestore onSnapshot + immediate server pull
   useEffect(() => {
     let isMounted = true;
     fetchCloudAttendance().then((cloudRecords) => {
       const deletedSet = new Set(getDeletedIds());
       if (isMounted && Array.isArray(cloudRecords)) {
         const active = cloudRecords.filter((h) => h && h.isDeleted !== true && !deletedSet.has(String(h.id)));
-        if (active.length > 0) {
-          setHistory(active);
-        }
+        setHistory(active);
       }
     }).catch(console.warn);
 
+    const unsub = subscribeCloudCollection<ClassAttendanceRecord>(
+      'bk_attendance_history',
+      (cloudList) => {
+        const deletedSet = new Set(getDeletedIds());
+        setHistory(cloudList.filter((h) => h && h.isDeleted !== true && !deletedSet.has(String(h.id))));
+      }
+    );
+
     return () => {
       isMounted = false;
-    };
-  }, []);
-
-  // Realtime subscriber for remote changes
-  useEffect(() => {
-    const handleRealtimeUpdate = (e: any) => {
-      if (e.detail?.key === 'bk_attendance_history') {
-        const deletedSet = new Set(getDeletedIds());
-        if (Array.isArray(e.detail.data)) {
-          setHistory(e.detail.data.filter((h: any) => h && h.isDeleted !== true && !deletedSet.has(String(h.id))));
-        } else {
-          setHistory(loadSchoolData<ClassAttendanceRecord[]>('bk_attendance_history', []).filter((h) => h && h.isDeleted !== true && !deletedSet.has(String(h.id))));
-        }
-      }
-    };
-
-    window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
-    window.addEventListener('bk_attendance_history_changed', handleRealtimeUpdate);
-    window.addEventListener('storage', (e) => {
-      if (e.key && (e.key === 'bk_attendance_history' || e.key.startsWith('bk_attendance_history_sch_'))) {
-        handleRealtimeUpdate({ detail: { key: 'bk_attendance_history' } });
-      }
-    });
-
-    return () => {
-      window.removeEventListener('bk_realtime_sync', handleRealtimeUpdate);
-      window.removeEventListener('bk_attendance_history_changed', handleRealtimeUpdate);
+      unsub();
     };
   }, []);
 
@@ -288,8 +252,7 @@ export default function AbsensiView({
 
   const executeRestoreAttendanceData = async () => {
     setShowRestoreAttConfirm(false);
-    await saveHistoryToStorage(initialAttendanceHistory);
-    showToast('🎉 Seluruh data absensi kelas 8A - 8G berhasil dipulihkan secara penuh!', 'success');
+    await handleManualCloudRefresh();
   };
 
   // Selected Detail Modal Record for Inspection
@@ -328,20 +291,15 @@ export default function AbsensiView({
     setRecapClass(selectedClass);
   }, [selectedClass]);
 
-  // Save history back to school storage and Firestore Realtime
+  // Save history directly to Firestore Realtime (optimistic React state + cloud write)
   const saveHistoryToStorage = async (updatedHistory: ClassAttendanceRecord[], singleRecord?: ClassAttendanceRecord) => {
     setHistory(updatedHistory);
-    saveSchoolData('bk_attendance_history', updatedHistory);
-    localStorage.setItem('bk_attendance_history', JSON.stringify(updatedHistory));
 
-    // Save individual record to Firestore with atomic versioning & optimistic sync (<1ms)
     if (singleRecord && singleRecord.id) {
       saveToFirestore('bk_attendance_history', singleRecord).catch(console.warn);
     }
-    saveBulkToFirestore('bk_attendance_history', updatedHistory).catch(console.warn);
 
     window.dispatchEvent(new CustomEvent('bk_attendance_history_changed', { detail: updatedHistory }));
-    window.dispatchEvent(new Event('storage'));
     if (onAttendanceChanged) {
       onAttendanceChanged();
     }

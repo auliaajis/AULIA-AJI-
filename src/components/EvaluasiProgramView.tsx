@@ -65,7 +65,8 @@ import {
   downloadSingleEvaluationCardPDF,
 } from '../utils/evaluationPdfGenerator';
 import { exportBKProgramToExcel } from '../utils/bkExcelExporter';
-import { getActiveSchoolId, loadSchoolData } from '../utils/schoolConfig';
+import { getActiveSchoolId } from '../utils/schoolConfig';
+import { getCloudCollectionData, subscribeCloudCollection } from '../utils/firestoreSync';
 import EvaluasiWizardModal from './EvaluasiWizardModal';
 import EvaluasiProgramWizardModal from './EvaluasiProgramWizardModal';
 import FollowUpCheckModal from './FollowUpCheckModal';
@@ -115,36 +116,20 @@ export default function EvaluasiProgramView({
   const [classFilter, setClassFilter] = useState<string>('Semua');
   const [searchTerm, setSearchTerm] = useState<string>('');
 
-  // Read-only journals state from bk_daily_journals for global summary metrics
+  // Read-only journals state strictly from Firestore cloud store
   const [dailyJournals, setDailyJournals] = useState<BKJournalEntry[]>(() => {
-    const sId = getActiveSchoolId();
-    const schoolScoped = loadSchoolData<BKJournalEntry[]>('bk_daily_journals', [], sId);
-    if (Array.isArray(schoolScoped) && schoolScoped.length > 0) return schoolScoped;
-    try {
-      const legacyRaw = localStorage.getItem('bk_daily_journals');
-      if (legacyRaw) {
-        const parsed = JSON.parse(legacyRaw);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {}
-    return [];
+    const sId = activeCounselor?.schoolId || getActiveSchoolId();
+    return getCloudCollectionData<BKJournalEntry>('bk_daily_journals', sId);
   });
 
   useEffect(() => {
-    const refreshJournals = () => {
-      const sId = getActiveSchoolId();
-      const loaded = loadSchoolData<BKJournalEntry[]>('bk_daily_journals', [], sId);
-      if (Array.isArray(loaded) && loaded.length > 0) {
-        setDailyJournals(loaded);
-      }
-    };
-    window.addEventListener('bk_realtime_sync', refreshJournals);
-    window.addEventListener('storage', refreshJournals);
-    return () => {
-      window.removeEventListener('bk_realtime_sync', refreshJournals);
-      window.removeEventListener('storage', refreshJournals);
-    };
-  }, []);
+    const sId = activeCounselor?.schoolId || getActiveSchoolId();
+    return subscribeCloudCollection<BKJournalEntry>(
+      'bk_daily_journals',
+      (data) => setDailyJournals(data),
+      sId
+    );
+  }, [activeCounselor?.schoolId]);
 
   // Jalur 1 Modal: Evaluasi Layanan
   const [isServiceWizardOpen, setIsServiceWizardOpen] = useState(false);

@@ -26,7 +26,7 @@ import {
 import { Counselor } from '../types';
 import { showToast } from '../utils/toast';
 import { getActiveSchoolId, getSchoolConfig } from '../utils/schoolConfig';
-import { getLastCloudSyncInfo, CloudSyncRecordInfo } from '../utils/firestoreSync';
+import { getLastCloudSyncInfo, CloudSyncRecordInfo, clearLocalCacheAndReloadFromCloud } from '../utils/firestoreSync';
 import {
   collectFullBackupSnapshot,
   downloadFullBackupJSON,
@@ -67,6 +67,7 @@ export default function BackupRestoreView({
   const [refreshTick, setRefreshTick] = useState(0);
   const [cloudInfo, setCloudInfo] = useState<CloudSyncRecordInfo>(() => getLastCloudSyncInfo(schoolId));
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
+  const [isReloadingFromCloud, setIsReloadingFromCloud] = useState(false);
   const [cloudActionMsg, setCloudActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const [lastBackupResult, setLastBackupResult] = useState<BackupDownloadResult | null>(null);
@@ -193,6 +194,32 @@ export default function BackupRestoreView({
       showToast('Gagal sinkron ke Cloud.', 'error');
     } finally {
       setIsSyncingCloud(false);
+    }
+  };
+
+  const handleClearLocalCacheAndReload = async () => {
+    setIsReloadingFromCloud(true);
+    setCloudActionMsg(null);
+    try {
+      const res = await clearLocalCacheAndReloadFromCloud();
+      setRefreshTick((t) => t + 1);
+      setCloudInfo(getLastCloudSyncInfo(schoolId));
+      if (res.success) {
+        if (onDataRestored) onDataRestored();
+        const summary = `Cache lokal dihapus & data ditarik ulang langsung dari Firestore: ${res.counts.students} siswa, ${res.counts.violations} pelanggaran, ${res.counts.services} layanan, ${res.counts.homeVisits} home visit, ${res.counts.journals} jurnal, & ${res.counts.attendance} sesi absensi.`;
+        setCloudActionMsg({ type: 'success', text: summary });
+        showToast(summary, 'success');
+      } else {
+        const errMsg = res.error || 'Gagal menarik ulang data dari Firebase Firestore.';
+        setCloudActionMsg({ type: 'error', text: errMsg });
+        showToast(errMsg, 'error');
+      }
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      setCloudActionMsg({ type: 'error', text: `GAGAL KONEK FIREBASE: ${errMsg}` });
+      showToast(`Gagal mengambil data Cloud: ${errMsg}`, 'error');
+    } finally {
+      setIsReloadingFromCloud(false);
     }
   };
 
@@ -366,15 +393,31 @@ export default function BackupRestoreView({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={handleSyncToCloud}
-            disabled={isSyncingCloud}
-            className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-[#00685f] hover:bg-[#005049] disabled:opacity-60 text-white text-xs sm:text-sm font-extrabold shadow-xs transition-all cursor-pointer shrink-0"
-          >
-            <RefreshCw className={`w-4 h-4 ${isSyncingCloud ? 'animate-spin' : ''}`} />
-            <span>{isSyncingCloud ? 'Menyinkronkan ke Cloud...' : 'Sinkron ke Cloud (Firebase)'}</span>
-          </button>
+          <div className="flex flex-col sm:flex-row gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={handleClearLocalCacheAndReload}
+              disabled={isReloadingFromCloud || isSyncingCloud}
+              className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-xs sm:text-sm font-extrabold shadow-xs transition-all cursor-pointer shrink-0"
+            >
+              <Trash2 className={`w-4 h-4 ${isReloadingFromCloud ? 'animate-pulse' : ''}`} />
+              <span>
+                {isReloadingFromCloud
+                  ? 'Mengambil dari Firestore...'
+                  : 'Hapus Cache Lokal & Ambil Ulang dari Cloud'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSyncToCloud}
+              disabled={isSyncingCloud || isReloadingFromCloud}
+              className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-[#00685f] hover:bg-[#005049] disabled:opacity-60 text-white text-xs sm:text-sm font-extrabold shadow-xs transition-all cursor-pointer shrink-0"
+            >
+              <RefreshCw className={`w-4 h-4 ${isSyncingCloud ? 'animate-spin' : ''}`} />
+              <span>{isSyncingCloud ? 'Menyinkronkan ke Cloud...' : 'Sinkron ke Cloud (Firebase)'}</span>
+            </button>
+          </div>
         </div>
 
         {cloudActionMsg && (

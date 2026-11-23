@@ -25,11 +25,15 @@ import { formatCardDate, formatCardDateTime } from '../utils/dateFormatter';
 import { triggerBackgroundAutoSync } from '../utils/googleSync';
 import { getDeletedIds, registerDeletedId } from '../utils/deletionTracker';
 import { autoPushToJournal } from '../utils/journalAutoLink';
-import { saveBulkToFirestore, saveSchoolData, loadSchoolData, softDeleteFromFirestore, saveToFirestore } from '../utils/firestoreSync';
-import { getActiveSchoolId, getValidatedSchoolIdentity, buildSchoolStamp } from '../utils/schoolConfig';
+import {
+  softDeleteFromFirestore,
+  saveToFirestore,
+  getCloudCollectionData,
+  subscribeCloudCollection
+} from '../utils/firestoreSync';
+import { getValidatedSchoolIdentity, buildSchoolStamp } from '../utils/schoolConfig';
 import { filterHomeVisits } from '../utils/accessControl';
 import GoogleDrivePhotoUploader from './GoogleDrivePhotoUploader';
-import { initialHomeVisits } from '../data/mockData';
 import { showToast } from '../utils/toast';
 import { isValidDeleteId, safeFilterSingleDelete, generateUniqueId } from '../utils/safeDelete';
 
@@ -174,24 +178,10 @@ interface HomeVisitViewProps {
 export default function HomeVisitView({ students, activeCounselor }: HomeVisitViewProps) {
   const isInitialMount = useRef(true);
 
-  // Core states (seed once per school; never resurrect deleted visits)
-  const [visits, setVisits] = useState<HomeVisitRecord[]>(() => {
-    const schoolId = activeCounselor?.schoolId || getActiveSchoolId();
-    const seedFlag = `bk_hv_seeded_${schoolId}`;
-    const alreadySeeded = typeof localStorage !== 'undefined' && localStorage.getItem(seedFlag) === 'true';
-    const deletedSet = new Set(getDeletedIds());
-    const loaded = loadSchoolData<HomeVisitRecord[]>('bk_home_visits', []);
-    if (Array.isArray(loaded) && loaded.length > 0) {
-      return loaded.filter((v) => v && v.isDeleted !== true && !deletedSet.has(String(v.id)));
-    }
-    if (!alreadySeeded) {
-      const initialClean = initialHomeVisits.filter((v) => v && !deletedSet.has(String(v.id)));
-      saveSchoolData('bk_home_visits', initialClean);
-      if (typeof localStorage !== 'undefined') localStorage.setItem(seedFlag, 'true');
-      return initialClean;
-    }
-    return [];
-  });
+  // Core states fed exclusively by Firestore onSnapshot
+  const [visits, setVisits] = useState<HomeVisitRecord[]>(() =>
+    getCloudCollectionData<HomeVisitRecord>('bk_home_visits', activeCounselor?.schoolId)
+  );
 
   // Navigation / Modal States
   const [showAddForm, setShowAddForm] = useState(false);
@@ -223,9 +213,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
   const [parentSignature, setParentSignature] = useState<string | undefined>(undefined);
   const [counselorSignature, setCounselorSignature] = useState<string | undefined>(undefined);
 
-  // Sync to local cache
   useEffect(() => {
-    saveSchoolData('bk_home_visits', visits);
     if (isInitialMount.current) {
       isInitialMount.current = false;
       return;
@@ -233,30 +221,17 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
     triggerBackgroundAutoSync();
   }, [visits]);
 
-  // Realtime subscriber for remote changes
+  // Realtime subscriber directly from Firestore onSnapshot updates
   useEffect(() => {
-    const handleRealtimeUpdate = (e: any) => {
-      if (e.detail?.key === 'bk_home_visits') {
+    return subscribeCloudCollection<HomeVisitRecord>(
+      'bk_home_visits',
+      (cloudList) => {
         const deletedSet = new Set(getDeletedIds());
-        if (Array.isArray(e.detail.data)) {
-          setVisits(e.detail.data.filter((v: any) => v && v.isDeleted !== true && !deletedSet.has(String(v.id))));
-        } else {
-          setVisits(loadSchoolData<HomeVisitRecord[]>('bk_home_visits', []).filter((v) => v && v.isDeleted !== true && !deletedSet.has(String(v.id))));
-        }
-      }
-    };
-
-    window.addEventListener('bk_realtime_sync', handleRealtimeUpdate);
-    window.addEventListener('storage', (e) => {
-      if (e.key === 'bk_home_visits') {
-        handleRealtimeUpdate({ detail: { key: e.key } });
-      }
-    });
-
-    return () => {
-      window.removeEventListener('bk_realtime_sync', handleRealtimeUpdate);
-    };
-  }, []);
+        setVisits(cloudList.filter((v) => v && v.isDeleted !== true && !deletedSet.has(String(v.id))));
+      },
+      activeCounselor?.schoolId
+    );
+  }, [activeCounselor?.schoolId]);
 
   // Handle student selection from autocomplete
   const handleSelectStudent = (student: Student) => {
@@ -339,14 +314,6 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
     ).padStart(2, '0')}`;
     const timeLabel = `HARI INI, ${formattedHour}`;
     
-    const savedLogs = localStorage.getItem('bk_logs');
-    let existingLogs = [];
-    try {
-      existingLogs = savedLogs ? JSON.parse(savedLogs) : [];
-      if (!Array.isArray(existingLogs)) existingLogs = [];
-    } catch (e) {
-      existingLogs = [];
-    }
     const newLog = {
       id: `log-hv-${Date.now()}`,
       timeLabel,
@@ -357,8 +324,7 @@ export default function HomeVisitView({ students, activeCounselor }: HomeVisitVi
       studentClass: selectedStudent.class,
       timestamp: new Date().toISOString()
     };
-    saveSchoolData('bk_logs', [newLog, ...existingLogs.slice(0, 79)]);
-    saveToFirestore('bk_logs', newLog);
+    saveToFirestore('bk_logs', newLog, schoolValidation.schoolId);
 
     // Automatically push entry directly to Jurnal Harian
     autoPushToJournal({
