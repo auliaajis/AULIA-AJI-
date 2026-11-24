@@ -32,6 +32,9 @@ import EvaluasiProgramView from './components/EvaluasiProgramView';
 import EvaluasiWizardModal from './components/EvaluasiWizardModal';
 import FloatingSiBecik from './components/FloatingSiBecik';
 import AiAssistantWidget from './components/AiAssistantWidget';
+import RujukanPiketView from './components/RujukanPiketView';
+import FormPembinaanModal, { PembinaanSubmitPayload } from './components/FormPembinaanModal';
+import { getRujukanItemStatus, getRujukanCategoryLabel } from './utils/rujukanHelper';
 import {
   getLocalSiBecikFabEnabled,
   saveSiBecikFabSettings,
@@ -76,10 +79,12 @@ import {
   getCloudConnectionInfo,
   testConnection
 } from './utils/firestoreSync';
-import { firebaseConfig } from './firebase';
+import { firebaseConfig, auth } from './firebase';
+import { googleSignIn } from './utils/firebaseAuth';
+import PiketPage from './components/PiketPage';
 import { getActiveSchoolId, setActiveSchoolId, getSchoolConfig, loadSchoolData, saveSchoolData, sanitizeSchoolId, switchSchoolWorkspace, getRegisteredSchools, getValidatedSchoolIdentity, buildSchoolStamp, enforceCanonicalSchoolCacheRepair } from './utils/schoolConfig';
 import { runStartupStorageCheck } from './utils/storageQuota';
-import { purgeDummyData, purgeDummyStudents, isDummyStudent, deduplicateAndPurgeAllData } from './utils/purgeDummyData';
+import { purgeDummyData, purgeDummyStudents, isDummyStudent, deduplicateAndPurgeAllData, isRealNonDummyViolation } from './utils/purgeDummyData';
 import { applyTheme, getIsDarkMode } from './utils/theme';
 import { ensureSchoolDocumentExists } from './utils/multiSchoolMigration';
 
@@ -91,7 +96,47 @@ import { HeartHandshake, Calendar, Clock, Plus, UserCheck, Download, Edit2, Tras
 import { filterStudents, filterViolations, filterServices, filterAchievements, filterHomeVisits, filterLogs } from './utils/accessControl';
 import { BK_COMPONENTS_DATA, getBKComponentForService, getComponentColorConfig, getPilarBadge, SIKLUS_LAYANAN_TERPADU } from './utils/bkKomprehensif';
 
+function isPiketPublicPath(): boolean {
+  if (typeof window === 'undefined') return false;
+  const path = (window.location.pathname || '').toLowerCase();
+  const hash = (window.location.hash || '').toLowerCase();
+  return (
+    path === '/piket' ||
+    path.startsWith('/piket/') ||
+    hash === '#/piket' ||
+    hash.startsWith('#/piket/')
+  );
+}
+
 export default function App() {
+  const [isPiketRoute, setIsPiketRoute] = useState<boolean>(() => isPiketPublicPath());
+
+  useEffect(() => {
+    const handleRouteChange = () => {
+      setIsPiketRoute(isPiketPublicPath());
+    };
+    window.addEventListener('popstate', handleRouteChange);
+    window.addEventListener('hashchange', handleRouteChange);
+    return () => {
+      window.removeEventListener('popstate', handleRouteChange);
+      window.removeEventListener('hashchange', handleRouteChange);
+    };
+  }, []);
+
+  // Route publik /piket: langsung tampilkan form piket tanpa cek login / onAuthStateChanged
+  if (isPiketRoute) {
+    return (
+      <>
+        <PiketPage />
+        <ToastContainer />
+      </>
+    );
+  }
+
+  return <AuthenticatedBkApp />;
+}
+
+function AuthenticatedBkApp() {
   // Navigation Routing States
   const [currentView, setCurrentView] = useState<string>('dashboard');
   const [peringatanFilter, setPeringatanFilter] = useState<PeringatanFilterTab>('semua');
@@ -99,6 +144,8 @@ export default function App() {
   const [violationInitialTab, setViolationInitialTab] = useState<'input' | 'arsip'>('input');
   const [violationInitialSearch, setViolationInitialSearch] = useState('');
   const [violationInitialOpenId, setViolationInitialOpenId] = useState<string | undefined>(undefined);
+  const [rujukanInitialSearch, setRujukanInitialSearch] = useState('');
+  const [pembinaanTargetViolation, setPembinaanTargetViolation] = useState<ViolationRecord | null>(null);
   const [selectedProfileStudentId, setSelectedProfileStudentId] = useState<string | null>(null);
   const [previousView, setPreviousView] = useState<string>('dashboard');
   const [presetServiceData, setPresetServiceData] = useState<PresetServiceData | null>(null);
@@ -549,6 +596,33 @@ export default function App() {
     }
   }, [isSiBecikOpen, currentView]);
 
+  // Redirect URL lama /catat, /catat-pelanggaran, /catat-kasus ke halaman Rujukan dari Piket
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const checkAndRedirectOldCatatRoute = () => {
+      const path = window.location.pathname || '';
+      const hash = window.location.hash || '';
+      const isOldPath = /^\/catat(-pelanggaran|-kasus)?\/?$/i.test(path);
+      const isOldHash = /^#\/?catat(-pelanggaran|-kasus)?\/?$/i.test(hash);
+      if (isOldPath || isOldHash) {
+        setCurrentView('rujukan-piket');
+        try {
+          window.history.replaceState(null, '', '/rujukan');
+        } catch {
+          // ignore history error
+        }
+        showToast('Menu Catat Pelanggaran kini dialihkan ke Rujukan dari Piket.', 'info');
+      }
+    };
+    checkAndRedirectOldCatatRoute();
+    window.addEventListener('popstate', checkAndRedirectOldCatatRoute);
+    window.addEventListener('hashchange', checkAndRedirectOldCatatRoute);
+    return () => {
+      window.removeEventListener('popstate', checkAndRedirectOldCatatRoute);
+      window.removeEventListener('hashchange', checkAndRedirectOldCatatRoute);
+    };
+  }, []);
+
   // Sync Si Becik FAB preference from Firestore userSettings & compute real >14 day overdue follow-ups
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -620,13 +694,15 @@ export default function App() {
     };
     window.addEventListener('bk_cloud_status', handleCloudStatus);
 
-    // Start Firestore onSnapshot listeners immediately when app opens
-    initRealtimeFirestoreSync();
-    forceFullCloudSync().catch((err: any) => {
-      setFirebaseConnectionError(err?.message || String(err));
-    });
-    ensureDriveFolderStructure().catch(console.warn);
-    ensureSchoolDocumentExists(initialSchoolId).catch(console.warn);
+    // Only start full Firestore realtime sync once Guru BK is logged in
+    if (isLoggedIn) {
+      initRealtimeFirestoreSync();
+      forceFullCloudSync().catch((err: any) => {
+        setFirebaseConnectionError(err?.message || String(err));
+      });
+      ensureDriveFolderStructure().catch(console.warn);
+      ensureSchoolDocumentExists(initialSchoolId).catch(console.warn);
+    }
 
     const handleGoogleSessionRestored = (e: any) => {
       const tok = e?.detail?.token;
@@ -880,7 +956,24 @@ export default function App() {
       setCurrentView('layanan-bk');
     } else if (tab === 'tambah-layanan' || tab === 'input-konseling' || tab === 'layanan-konseling' || tab === 'konseling') {
       setCurrentView('tambah-layanan');
-    } else if (tab === 'pelanggaran' || tab === 'catat-pelanggaran' || tab === 'arsip-pelanggaran' || tab === 'arsip-restitusi') {
+    } else if (
+      tab === 'catat' ||
+      tab === 'catat-pelanggaran' ||
+      tab === 'catat-kasus' ||
+      tab === 'rujukan-piket' ||
+      tab === 'rujukan'
+    ) {
+      setRujukanInitialSearch(searchQueryOrClass || '');
+      setCurrentView('rujukan-piket');
+      if (tab.startsWith('catat')) {
+        showToast('Menu Catat Pelanggaran dialihkan ke Rujukan dari Piket.', 'info');
+      }
+    } else if (
+      tab === 'pelanggaran' ||
+      tab === 'arsip-pembinaan' ||
+      tab === 'arsip-pelanggaran' ||
+      tab === 'arsip-restitusi'
+    ) {
       setViolationInitialOpenId(undefined);
       if (searchQueryOrClass) {
         setViolationInitialSearch(searchQueryOrClass);
@@ -889,7 +982,7 @@ export default function App() {
         setViolationInitialTab('arsip');
         setViolationInitialSearch('');
       }
-      setCurrentView('pelanggaran');
+      setCurrentView('arsip-pembinaan');
     } else if (tab === 'profil-siswa' || tab === 'profil' || tab === 'profile') {
       if (searchQueryOrClass) {
         const matched = students.find(
@@ -949,9 +1042,20 @@ export default function App() {
       setCurrentView('layanan-bk');
     } else if (form === 'input-konseling' || form === 'layanan-konseling' || form === 'konseling' || form === 'tambah-layanan') {
       setCurrentView('tambah-layanan');
-    } else if (form === 'pelanggaran' || form === 'catat-pelanggaran') {
+    } else if (
+      form === 'catat' ||
+      form === 'catat-pelanggaran' ||
+      form === 'catat-kasus' ||
+      form === 'rujukan-piket' ||
+      form === 'rujukan'
+    ) {
+      setCurrentView('rujukan-piket');
+      if (form.startsWith('catat')) {
+        showToast('Menu Catat Pelanggaran dialihkan ke Rujukan dari Piket.', 'info');
+      }
+    } else if (form === 'pelanggaran' || form === 'arsip-pembinaan') {
       setViolationInitialTab('arsip');
-      setCurrentView('pelanggaran');
+      setCurrentView('arsip-pembinaan');
     } else if (form === 'apresiasi' || form === 'catat-apresiasi') {
       setCurrentView('apresiasi');
     } else {
@@ -1739,6 +1843,117 @@ export default function App() {
     pushActivityLog(newLog);
   };
 
+  // Simpan Pembinaan 3 Langkah dari FormPembinaanModal (tetap menjaga seluruh field asal rujukan Piket / data lama)
+  const handleSavePembinaan = (payload: PembinaanSubmitPayload) => {
+    const currentSchoolId = getActiveSchoolId();
+    const orig = payload.violation;
+    const counselorName = activeCounselor?.name || 'Guru BK';
+    const nextRestitutionStatus =
+      payload.pembinaanStatus === 'Selesai' ? 'Selesai / Dipantau' : 'Proses Restitusi';
+
+    const updatedViolation: ViolationRecord = {
+      ...orig,
+      schoolId: orig.schoolId || currentSchoolId,
+      counselorId: orig.counselorId || activeCounselor?.id,
+      pembinaanDate: payload.pembinaanDate,
+      pembinaanKronologi: payload.pembinaanKronologi,
+      pembinaanResult: payload.pembinaanResult,
+      pembinaanFollowUpPlan: payload.pembinaanFollowUpPlan,
+      pembinaanStatus: payload.pembinaanStatus,
+      pembinaanCounselor: counselorName,
+      handledBy: 'Guru BK',
+      handlingProgress:
+        payload.pembinaanResult ||
+        payload.pembinaanFollowUpPlan ||
+        'Pembinaan telah dilakukan oleh Guru BK',
+      restitutionStatus: nextRestitutionStatus,
+      restitutionAgreement: payload.pembinaanFollowUpPlan || orig.restitutionAgreement,
+      restitutionSupervisor: counselorName || orig.restitutionSupervisor || 'Guru BK',
+      restitutionCompletedDate:
+        payload.pembinaanStatus === 'Selesai'
+          ? payload.pembinaanDate
+          : orig.restitutionCompletedDate,
+      updatedAt: new Date().toISOString(),
+    };
+
+    setViolations((prev) => prev.map((v) => (v.id === updatedViolation.id ? updatedViolation : v)));
+    saveToFirestore('bk_violations', updatedViolation, currentSchoolId);
+
+    const today = new Date();
+    const formattedHour = `${String(today.getHours()).padStart(2, '0')}:${String(
+      today.getMinutes()
+    ).padStart(2, '0')}`;
+    const catLabel = getRujukanCategoryLabel(orig);
+    pushActivityLog({
+      id: `log-pembinaan-${Date.now()}`,
+      timeLabel: `HARI INI, ${formattedHour}`,
+      type: 'violation',
+      title: `Pembinaan BK (${payload.pembinaanStatus}): ${orig.studentName}`,
+      description: `Tindak lanjut rujukan "${catLabel}" untuk ${orig.studentName} (${orig.studentClass}). Hasil: ${payload.pembinaanResult || '-'}`,
+      studentName: orig.studentName,
+      studentClass: orig.studentClass,
+      timestamp: new Date(),
+    });
+
+    autoPushToJournal({
+      sourceType: 'violation',
+      date: payload.pembinaanDate,
+      startTime: formattedHour,
+      endTime: formattedHour,
+      activityType: 'Kasus Mendesak',
+      title: `Pembinaan Rujukan: ${catLabel}`,
+      description: `Kronologi & Restitusi: ${payload.pembinaanKronologi}\nHasil: ${payload.pembinaanResult}\nRencana Tindak Lanjut: ${payload.pembinaanFollowUpPlan || '-'}`,
+      target: `${orig.studentName} (${orig.studentClass})`,
+      status: payload.pembinaanStatus === 'Selesai' ? 'Selesai' : 'Perlu Tindak Lanjut',
+      counselorId: activeCounselor?.id,
+    });
+
+    setPembinaanTargetViolation(null);
+    showToast(
+      `Pembinaan ${orig.studentName} berhasil disimpan (${payload.pembinaanStatus}).`,
+      'success'
+    );
+
+    if (payload.scheduleCounseling) {
+      const matchedStudent = filteredStudents.find(
+        (s) =>
+          s.id === orig.studentId ||
+          (s.name &&
+            orig.studentName &&
+            s.name.trim().toLowerCase() === orig.studentName.trim().toLowerCase())
+      );
+      const targetStudentId = matchedStudent?.id || orig.studentId;
+      setPresetServiceData({
+        serviceType: 'Layanan Konseling Perorangan (Individual)',
+        bkComponent: 'Layanan Responsif',
+        targetType: 'Individu',
+        problem: `Pembinaan Rujukan: ${catLabel}`,
+        description: `${payload.pembinaanKronologi}${
+          payload.pembinaanFollowUpPlan
+            ? `\nRencana Tindak Lanjut: ${payload.pembinaanFollowUpPlan}`
+            : ''
+        }`,
+        studentIds: targetStudentId ? [targetStudentId] : [],
+        status: 'Terjadwal',
+        scheduleDate: payload.pembinaanDate,
+        linkedViolationId: orig.id,
+        linkedTicketId: orig.ticketId,
+        violationContext: {
+          category: catLabel,
+          pointsAdded: orig.pointsAdded || 0,
+          date: orig.date,
+          notes: orig.notes,
+          ticketId: orig.ticketId,
+          violationId: orig.id,
+        },
+      });
+      if (targetStudentId) {
+        setPreSelectedStudentId(targetStudentId);
+      }
+      setCurrentView('tambah-layanan');
+    }
+  };
+
   const executeDeleteService = (id: string) => {
     if (!isValidDeleteId(id)) {
       showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
@@ -2247,6 +2462,14 @@ export default function App() {
   const filteredHomeVisits = useMemo(() => filterHomeVisits(homeVisits, activeCounselor), [homeVisits, activeCounselor]);
   const filteredLogs = useMemo(() => filterLogs(logs, activeCounselor), [logs, activeCounselor]);
 
+  const rujukanBaruCount = useMemo(
+    () =>
+      filteredViolations.filter(
+        (v) => v && v.isDeleted !== true && isRealNonDummyViolation(v) && getRujukanItemStatus(v) === 'Baru'
+      ).length,
+    [filteredViolations]
+  );
+
   const unseenOverdueCount = useMemo(
     () => overdueFollowUpIds.filter((id) => !seenOverdueIds.includes(id)).length,
     [overdueFollowUpIds, seenOverdueIds]
@@ -2270,11 +2493,12 @@ export default function App() {
             activeCounselor={activeCounselor}
             onNavigateToTab={handleNavigateToTab}
             onNavigateToForm={handleNavigateToForm}
+            onTindakLanjuti={(v) => setPembinaanTargetViolation(v)}
             onOpenViolationDetail={(v) => {
               setViolationInitialTab('arsip');
               setViolationInitialSearch(v.ticketId || v.studentName || '');
               setViolationInitialOpenId(v.id);
-              setCurrentView('pelanggaran');
+              setCurrentView('arsip-pembinaan');
             }}
             onUpdateViolationStatus={handleUpdateViolationStatus}
             onUpdateServiceStatus={handleUpdateServiceStatus}
@@ -2322,15 +2546,31 @@ export default function App() {
             setSearchQuery={setSearchQuery}
           />
         );
-      case 'pelanggaran':
+      case 'rujukan-piket':
+      case 'rujukan':
+      case 'catat':
       case 'catat-pelanggaran':
+      case 'catat-kasus':
+        return (
+          <RujukanPiketView
+            violations={filteredViolations}
+            initialSearch={rujukanInitialSearch}
+            onTindakLanjuti={(v) => setPembinaanTargetViolation(v)}
+            onNavigateToProfile={handleNavigateToProfile}
+            onOpenArsip={() => setCurrentView('arsip-pembinaan')}
+          />
+        );
+      case 'arsip-pembinaan':
+      case 'arsip-pelanggaran':
+      case 'arsip-restitusi':
+      case 'pelanggaran':
         return (
           <CatatPelanggaranForm
             students={filteredStudents}
             violations={filteredViolations}
             activeCounselor={activeCounselor}
             preSelectedStudentId={preSelectedStudentId}
-            initialTab={violationInitialTab}
+            initialTab="arsip"
             initialArchiveSearch={violationInitialSearch}
             initialOpenViolationId={violationInitialOpenId}
             onClearInitialOpenViolation={() => setViolationInitialOpenId(undefined)}
@@ -2340,6 +2580,7 @@ export default function App() {
             onDeleteViolation={(id) => handleDeleteViolation(id, true)}
             onUpdateStudent={handleUpdateStudent}
             onDeleteStudent={(id) => handleDeleteStudent(id, true)}
+            onTindakLanjuti={(v) => setPembinaanTargetViolation(v)}
             onCreateFollowUpCounseling={(data) => {
               const studentId = data.students[0]?.id;
               setPresetServiceData({
@@ -2798,6 +3039,7 @@ export default function App() {
             <LainnyaView
               onNavigate={handleNavigateToTab}
               activeCounselor={activeCounselor}
+              allCounselors={allCounselors}
               onLogout={handleLogout}
               students={filteredStudents}
               violations={filteredViolations}
@@ -2863,11 +3105,12 @@ export default function App() {
             activeCounselor={activeCounselor}
             onNavigateToTab={handleNavigateToTab}
             onNavigateToForm={handleNavigateToForm}
+            onTindakLanjuti={(v) => setPembinaanTargetViolation(v)}
             onOpenViolationDetail={(v) => {
               setViolationInitialTab('arsip');
               setViolationInitialSearch(v.ticketId || v.studentName || '');
               setViolationInitialOpenId(v.id);
-              setCurrentView('pelanggaran');
+              setCurrentView('arsip-pembinaan');
             }}
             onUpdateViolationStatus={handleUpdateViolationStatus}
             onUpdateServiceStatus={handleUpdateServiceStatus}
@@ -3091,8 +3334,16 @@ export default function App() {
         return searchQuery ? `Data Siswa (Pencarian: "${searchQuery}")` : 'Data Siswa Sekolah';
       case 'absensi':
         return selectedAbsensiClass ? `Presensi Kelas ${selectedAbsensiClass}` : 'Absen Siswa Hari Ini';
-      case 'pelanggaran':
+      case 'rujukan-piket':
+      case 'rujukan':
+      case 'catat':
       case 'catat-pelanggaran':
+      case 'catat-kasus':
+        return 'Rujukan dari Piket';
+      case 'arsip-pembinaan':
+      case 'arsip-pelanggaran':
+      case 'arsip-restitusi':
+      case 'pelanggaran':
         return 'Arsip Pembinaan & Riwayat Pelanggaran';
       case 'tambah-layanan':
       case 'input-konseling':
@@ -3156,7 +3407,8 @@ export default function App() {
     'konseling',
     'form-layanan',
     'pelanggaran',
-    'catat-pelanggaran',
+    'arsip-pembinaan',
+    'rujukan-piket',
     'apresiasi',
     'catat-apresiasi',
     'layanan-bk',
@@ -3173,7 +3425,8 @@ export default function App() {
     editingService !== null ||
     detailService !== null ||
     pendingPostSaveService !== null ||
-    globalEvalServiceTarget !== null;
+    globalEvalServiceTarget !== null ||
+    pembinaanTargetViolation !== null;
 
   const showFab =
     isLoggedIn &&
@@ -3226,19 +3479,41 @@ export default function App() {
                 <AlertTriangle className="w-5 h-5 shrink-0" />
                 <span>GAGAL KONEK FIREBASE: {firebaseConnectionError}</span>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setFirebaseConnectionError(null);
-                  stopRealtimeFirestoreSync();
-                  initRealtimeFirestoreSync();
-                  forceFullCloudSync().catch((err: any) => setFirebaseConnectionError(err?.message || String(err)));
-                }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white text-red-700 text-xs font-extrabold hover:bg-red-50 cursor-pointer shrink-0"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Hubungkan Ulang</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {!auth.currentUser && /permission|izin|insufficient/i.test(firebaseConnectionError) && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await googleSignIn();
+                        setFirebaseConnectionError(null);
+                        stopRealtimeFirestoreSync();
+                        await initRealtimeFirestoreSync();
+                        await forceFullCloudSync();
+                        showToast('Sesi Cloud Firebase BK terverifikasi.', 'success');
+                      } catch (err: any) {
+                        setFirebaseConnectionError(err?.message || String(err));
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-300 text-[#0b1c30] text-xs font-extrabold hover:bg-amber-200 cursor-pointer shrink-0"
+                  >
+                    <span>Verifikasi Google BK</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFirebaseConnectionError(null);
+                    stopRealtimeFirestoreSync();
+                    initRealtimeFirestoreSync();
+                    forceFullCloudSync().catch((err: any) => setFirebaseConnectionError(err?.message || String(err)));
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white text-red-700 text-xs font-extrabold hover:bg-red-50 cursor-pointer shrink-0"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Hubungkan Ulang</span>
+                </button>
+              </div>
             </div>
           )}
           <div className="max-w-7xl mx-auto app-content-container">
@@ -3296,12 +3571,33 @@ export default function App() {
 
       {/* 
         Bottom Navigation Bar - ALWAYS VISIBLE on BOTH Mobile and Laptop
-        [Beranda] [Siswa] [+ Catat] [Laporan] [Lainnya]
+        [Beranda] [Siswa] [Layanan] [Rujukan] [Arsip] [Lainnya]
       */}
       <BottomNavBar
         currentView={currentView}
         onNavigate={handleNavigateToTab}
         studentCount={filteredStudents.length}
+        rujukanBaruCount={rujukanBaruCount}
+      />
+
+      {/* Modal Form Pembinaan 3 Langkah (Tindak Lanjut Rujukan Piket & Riwayat Lama) */}
+      <FormPembinaanModal
+        violation={pembinaanTargetViolation}
+        student={
+          pembinaanTargetViolation
+            ? filteredStudents.find(
+                (s) =>
+                  s.id === pembinaanTargetViolation.studentId ||
+                  (s.name &&
+                    pembinaanTargetViolation.studentName &&
+                    s.name.trim().toLowerCase() ===
+                      pembinaanTargetViolation.studentName.trim().toLowerCase())
+              ) || null
+            : null
+        }
+        activeCounselor={activeCounselor}
+        onClose={() => setPembinaanTargetViolation(null)}
+        onSubmit={handleSavePembinaan}
       />
 
       {/* Edit Scheduled Service Modal */}

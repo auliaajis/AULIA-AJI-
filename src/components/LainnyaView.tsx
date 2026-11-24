@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   ArrowLeft,
   Calendar,
@@ -14,13 +14,25 @@ import {
   LogOut,
   Bot,
   Mail,
+  Users,
+  Link2,
+  Copy,
+  Check,
+  Search,
+  X,
 } from 'lucide-react';
 import { Counselor, CounselingService, Student, ViolationRecord } from '../types';
 import PanduanGabunganModal from './PanduanGabunganModal';
+import { subscribeTeachers, TeacherDirectoryEntry } from '../utils/firestoreSync';
+import { getPiketLinkUrl } from '../utils/rujukanHelper';
+import { defaultWaliKelasList } from '../utils/classNormalizer';
+import { loadSchoolData } from '../utils/schoolConfig';
+import { showToast } from '../utils/toast';
 
 interface LainnyaViewProps {
   onNavigate: (view: string) => void;
   activeCounselor?: Counselor;
+  allCounselors?: Counselor[];
   onLogout?: () => void;
   students?: Student[];
   violations?: ViolationRecord[];
@@ -41,11 +53,100 @@ interface MenuItemCard {
 export const LainnyaView: React.FC<LainnyaViewProps> = ({
   onNavigate,
   activeCounselor,
+  allCounselors = [],
   onLogout,
 }) => {
   const [showAlihTanganModal, setShowAlihTanganModal] = useState(false);
   const [showPilarModal, setShowPilarModal] = useState(false);
   const [showPanduanModal, setShowPanduanModal] = useState(false);
+  const [showDaftarGuruModal, setShowDaftarGuruModal] = useState(false);
+  const [guruSearch, setGuruSearch] = useState('');
+  const [copiedPiketLink, setCopiedPiketLink] = useState(false);
+  const [teachersList, setTeachersList] = useState<TeacherDirectoryEntry[]>([]);
+
+  useEffect(() => {
+    const unsub = subscribeTeachers((list) => {
+      setTeachersList(list);
+    }, activeCounselor?.schoolId);
+    return () => unsub();
+  }, [activeCounselor?.schoolId]);
+
+  const piketUrl = useMemo(() => getPiketLinkUrl(), []);
+
+  const handleCopyLinkPiket = async () => {
+    try {
+      await navigator.clipboard.writeText(piketUrl);
+      setCopiedPiketLink(true);
+      showToast('Link Piket berhasil disalin! Bagikan ke Guru Piket.', 'success');
+      setTimeout(() => setCopiedPiketLink(false), 3000);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = piketUrl;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      setCopiedPiketLink(true);
+      showToast('Link Piket berhasil disalin!', 'success');
+      setTimeout(() => setCopiedPiketLink(false), 3000);
+    }
+  };
+
+  // Gabungkan daftar guru dari Firestore `teachers`, Guru BK aktif (`allCounselors`), & Wali Kelas
+  const combinedTeachers = useMemo(() => {
+    const map = new Map<string, { name: string; role: string; source: string; extra?: string }>();
+
+    teachersList.forEach((t) => {
+      const cleanName = String(t.name || '').trim();
+      if (!cleanName) return;
+      map.set(cleanName.toLowerCase(), {
+        name: cleanName,
+        role: t.role || 'Guru / Guru Piket',
+        source: 'Cloud Teachers',
+      });
+    });
+
+    (allCounselors || []).forEach((c) => {
+      const cleanName = String(c.name || '').trim();
+      if (!cleanName || map.has(cleanName.toLowerCase())) return;
+      map.set(cleanName.toLowerCase(), {
+        name: cleanName,
+        role: c.role || 'Guru BK',
+        source: 'Guru BK',
+        extra: c.nip && c.nip !== '-' ? c.nip : undefined,
+      });
+    });
+
+    const waliList = loadSchoolData('bk_walikelas_config', defaultWaliKelasList, activeCounselor?.schoolId);
+    (waliList || []).forEach((w: any) => {
+      const cleanName = String(w.name || '').trim();
+      if (!cleanName) return;
+      const existing = map.get(cleanName.toLowerCase());
+      if (existing) {
+        if (!existing.extra && w.class) existing.extra = `Wali Kelas ${w.class}`;
+      } else {
+        map.set(cleanName.toLowerCase(), {
+          name: cleanName,
+          role: `Wali Kelas ${w.class || ''}`.trim(),
+          source: 'Wali Kelas',
+          extra: w.phone || w.email || undefined,
+        });
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, 'id'));
+  }, [teachersList, allCounselors, activeCounselor?.schoolId]);
+
+  const filteredTeachers = useMemo(() => {
+    const q = guruSearch.trim().toLowerCase();
+    if (!q) return combinedTeachers;
+    return combinedTeachers.filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        t.role.toLowerCase().includes(q) ||
+        (t.extra || '').toLowerCase().includes(q)
+    );
+  }, [combinedTeachers, guruSearch]);
 
   // PERANGKAT & ADMINISTRASI BK (7 kartu)
   const perangkatItems: MenuItemCard[] = [
@@ -147,7 +248,7 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
     },
   ];
 
-  // PENGATURAN (1 kartu)
+  // PENGATURAN, DAFTAR GURU, & LINK PIKET (3 kartu)
   const pengaturanItems: MenuItemCard[] = [
     {
       id: 'pengaturan',
@@ -156,6 +257,22 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
       icon: <Settings className="w-5 h-5 text-slate-700" />,
       tag: 'Sistem',
       action: () => onNavigate('pengaturan'),
+    },
+    {
+      id: 'daftar-guru',
+      title: 'Daftar Guru',
+      desc: `Direktori Guru Piket, Wali Kelas, & Guru BK (${combinedTeachers.length} guru terdaftar)`,
+      icon: <Users className="w-5 h-5 text-[#00685f]" />,
+      tag: `${combinedTeachers.length} Guru`,
+      action: () => setShowDaftarGuruModal(true),
+    },
+    {
+      id: 'salin-link-piket',
+      title: copiedPiketLink ? 'Link Piket Tersalin ✓' : 'Salin Link Piket',
+      desc: `Salin tautan form rujukan untuk Guru Piket: ${piketUrl}`,
+      icon: copiedPiketLink ? <Check className="w-5 h-5 text-emerald-600" /> : <Link2 className="w-5 h-5 text-[#00685f]" />,
+      tag: copiedPiketLink ? 'Tersalin' : 'Salin URL',
+      action: handleCopyLinkPiket,
     },
   ];
 
@@ -227,7 +344,7 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
             Menu Lainnya
           </h1>
           <p className="text-xs sm:text-sm text-[#3d4947] mt-1 font-medium">
-            Program tahunan, instrumen sosiometri, RPL, backup &amp; keamanan data, serta panduan resmi BK.
+            Program tahunan, instrumen sosiometri, RPL, backup &amp; keamanan data, daftar guru, serta salin link piket.
           </p>
         </div>
 
@@ -244,17 +361,17 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
         )}
       </div>
 
-      {/* 1. PERANGKAT & ADMINISTRASI BK (7 kartu) */}
+      {/* 1. PERANGKAT & ADMINISTRASI BK */}
       {renderSection('Perangkat & Administrasi BK', 'bg-[#00685f]', perangkatItems, 'grid-cols-1 md:grid-cols-2')}
 
-      {/* 2. DATA & KEAMANAN (1 kartu gabungan) */}
+      {/* 2. DATA & KEAMANAN */}
       {renderSection('Data & Keamanan', 'bg-emerald-600', dataKeamananItems, 'grid-cols-1')}
 
-      {/* 3. ALAT BANTU & REFERENSI (3 kartu) */}
+      {/* 3. ALAT BANTU & REFERENSI */}
       {renderSection('Alat Bantu & Referensi', 'bg-blue-600', alatBantuItems, 'grid-cols-1 md:grid-cols-2')}
 
-      {/* 4. PENGATURAN (1 kartu) */}
-      {renderSection('Pengaturan Sistem', 'bg-slate-600', pengaturanItems, 'grid-cols-1')}
+      {/* 4. PENGATURAN, DAFTAR GURU & LINK PIKET */}
+      {renderSection('Pengaturan, Daftar Guru & Link Piket', 'bg-slate-600', pengaturanItems, 'grid-cols-1 md:grid-cols-2')}
 
       {/* Tombol Keluar / Ganti Akun */}
       {onLogout && (
@@ -277,6 +394,99 @@ export const LainnyaView: React.FC<LainnyaViewProps> = ({
             </div>
             <ChevronRight className="w-4 h-4 text-rose-500 shrink-0" />
           </button>
+        </div>
+      )}
+
+      {/* Modal Daftar Guru */}
+      {showDaftarGuruModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+          onClick={() => setShowDaftarGuruModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-2xl w-full p-5 sm:p-6 space-y-4 shadow-2xl border border-gray-200 max-h-[88vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-[#e6f4f1] text-[#00685f]">
+                  <Users className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-[#0b1c30]">Daftar Guru &amp; Tim Piket</h3>
+                  <p className="text-xs text-gray-500">
+                    Total {combinedTeachers.length} guru (Cloud Teachers, Guru BK, &amp; Wali Kelas)
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDaftarGuruModal(false)}
+                className="p-1.5 text-gray-400 hover:text-gray-700 rounded-full hover:bg-gray-100 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="relative shrink-0">
+              <Search className="w-4 h-4 text-[#00685f] absolute left-3.5 top-3 pointer-events-none" />
+              <input
+                type="text"
+                value={guruSearch}
+                onChange={(e) => setGuruSearch(e.target.value)}
+                placeholder="Cari nama guru atau jabatan..."
+                className="w-full bg-[#f8faf9] border border-[#bcc9c6]/60 focus:border-[#00685f] rounded-xl pl-10 pr-4 py-2.5 text-xs sm:text-sm font-semibold text-[#0b1c30] focus:outline-none"
+              />
+            </div>
+
+            <div className="overflow-y-auto flex-1 space-y-2 pr-1">
+              {filteredTeachers.length === 0 ? (
+                <div className="p-8 text-center text-xs text-gray-500 font-semibold">
+                  Tidak ada data guru yang cocok dengan pencarian "{guruSearch}".
+                </div>
+              ) : (
+                filteredTeachers.map((t, idx) => (
+                  <div
+                    key={`${t.name}-${idx}`}
+                    className="p-3 rounded-xl bg-[#f8faf9] border border-[#bcc9c6]/40 flex items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs sm:text-sm font-extrabold text-[#0b1c30] truncate">
+                        {t.name}
+                      </p>
+                      <p className="text-[11px] text-[#3d4947] truncate">
+                        {t.role} {t.extra ? `• ${t.extra}` : ''}
+                      </p>
+                    </div>
+                    <span className="px-2.5 py-0.5 rounded-lg bg-white border border-gray-200 text-[10px] font-bold text-[#00685f] shrink-0">
+                      {t.source}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="pt-3 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleCopyLinkPiket}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#e6f4f1] hover:bg-[#00685f] text-[#00685f] hover:text-white rounded-xl text-xs font-extrabold transition-colors cursor-pointer"
+              >
+                {copiedPiketLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedPiketLink ? 'Link Piket Tersalin' : 'Salin Link Piket'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDaftarGuruModal(false);
+                  onNavigate('pengaturan');
+                }}
+                className="px-4 py-2 bg-[#00685f] hover:bg-[#005049] text-white rounded-xl text-xs font-extrabold cursor-pointer"
+              >
+                Kelola di Pengaturan
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, Bell, Calendar as CalendarIcon, Check, Menu, User, Database, Cloud, PlusCircle, ChevronDown, AlertTriangle, HeartHandshake, Home, BookOpen, Sparkles, Moon, Sun, RefreshCw, Wifi, WifiOff, CheckCircle2, ShieldAlert, Share2, MoreVertical, LogOut } from 'lucide-react';
+import { Search, Bell, Calendar as CalendarIcon, Check, Menu, User, Database, Cloud, PlusCircle, ChevronDown, AlertTriangle, HeartHandshake, Home, BookOpen, Sparkles, Moon, Sun, RefreshCw, Wifi, WifiOff, CheckCircle2, ShieldAlert, Share2, MoreVertical, LogOut, Inbox, Archive } from 'lucide-react';
 import { Counselor, CounselingService, ViolationRecord, Student } from '../types';
 import CalendarModal from './CalendarModal';
 import UserManualModal from './UserManualModal';
@@ -349,12 +349,12 @@ export default function Header({
       const needsHandling = !v.handledBy || v.handledBy === 'Belum Ditangani';
       list.push({
         id: `viol-${v.id}`,
-        title: needsHandling ? '⚠️ Pelanggaran Perlu Penanganan' : '📋 Laporan Pelanggaran',
-        body: `${v.studentName} (${v.studentClass}) - ${v.category} (+${v.pointsAdded} Bobot).`,
+        title: needsHandling ? '📩 Rujukan Baru Perlu Pembinaan' : '📋 Rujukan & Pembinaan',
+        body: `${v.studentName} (${v.studentClass}) - ${v.category}.`,
         time: isToday ? `Hari Ini, ${formatCardTime(v.time)}` : formatCardDateTime(v.date, v.time),
         type: 'violation',
         unread: needsHandling,
-        targetTab: 'pelanggaran',
+        targetTab: 'rujukan-piket',
         targetQuery: v.studentName,
       });
     });
@@ -783,7 +783,7 @@ export default function Header({
             <span className="xl:hidden sm:inline">{isRefreshingCloud ? 'Sinkron...' : 'Sinkron Cloud'}</span>
           </button>
 
-          {/* Satu Tombol Utama: Catat Aktivitas BK */}
+          {/* Satu Tombol Utama: Aksi BK */}
           <div ref={quickActionRef} className="relative">
             <motion.button
               type="button"
@@ -795,11 +795,11 @@ export default function Header({
                 if (showEarlyWarningMenu) setShowEarlyWarningMenu(false);
               }}
               className="bg-[#00685f] hover:bg-[#005049] text-white text-xs font-bold px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl flex items-center gap-1 sm:gap-1.5 shadow-xs cursor-pointer transition-all shrink-0"
-              title="Catat Aktivitas BK Baru & Panduan PDF"
+              title="Aksi Cepat BK, Rujukan & Panduan PDF"
             >
               <PlusCircle className="w-4 h-4 text-emerald-200 shrink-0" />
-              <span className="hidden sm:inline">Catat Aktivitas</span>
-              <span className="sm:hidden">Catat</span>
+              <span className="hidden sm:inline">Aksi BK</span>
+              <span className="sm:hidden">Aksi</span>
               <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${showQuickActionMenu ? 'rotate-180' : ''}`} />
             </motion.button>
 
@@ -816,16 +816,57 @@ export default function Header({
                 {/* Header */}
                 <div className="flex items-center justify-between pb-2 mb-2 border-b border-gray-100 px-1">
                   <div>
-                    <span className="text-xs font-extrabold text-[#0b1c30] block">Aksi Cepat & Aktivitas BK</span>
-                    <span className="text-[10px] text-gray-500 font-semibold">Pilih jenis kegiatan atau panduan</span>
+                    <span className="text-xs font-extrabold text-[#0b1c30] block">Aksi Cepat &amp; Pembinaan BK</span>
+                    <span className="text-[10px] text-gray-500 font-semibold">Pilih menu layanan, rujukan, atau panduan</span>
                   </div>
                   <span className="text-[9px] font-extrabold bg-[#00685f]/10 text-[#00685f] px-2 py-0.5 rounded-md border border-[#00685f]/20">
-                    Auto-Fill Jurnal
+                    Permendikbud 46/2023
                   </span>
                 </div>
 
-                {/* 3 Menu Utama Catat Cepat */}
+                {/* Menu Utama Aksi BK */}
                 <div className="space-y-1.5">
+                  {/* 0. Rujukan dari Piket */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowQuickActionMenu(false);
+                      if (onNavigateToTab) onNavigateToTab('rujukan-piket');
+                    }}
+                    className="w-full p-2.5 rounded-xl text-left transition-all hover:bg-amber-50/80 border border-transparent hover:border-amber-200/80 group flex items-start gap-3 cursor-pointer"
+                  >
+                    <div className="p-2 bg-amber-100 text-amber-700 rounded-lg shrink-0 group-hover:scale-105 transition-transform">
+                      <Inbox className="w-4 h-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-extrabold text-[#0b1c30] group-hover:text-amber-900">Rujukan dari Piket</span>
+                        <span className="text-[9px] text-amber-800 font-bold bg-amber-50 px-1.5 py-0.5 rounded">Tindak Lanjut</span>
+                      </div>
+                      <p className="text-[10px] text-gray-500 leading-tight mt-0.5">Lihat rujukan masuk dari Guru Piket &amp; isi pembinaan</p>
+                    </div>
+                  </button>
+
+                  {/* Arsip Pembinaan */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowQuickActionMenu(false);
+                      if (onNavigateToTab) onNavigateToTab('arsip-pembinaan');
+                    }}
+                    className="w-full p-2.5 rounded-xl text-left transition-all hover:bg-slate-50 border border-transparent hover:border-slate-200 group flex items-start gap-3 cursor-pointer"
+                  >
+                    <div className="p-2 bg-slate-100 text-slate-700 rounded-lg shrink-0 group-hover:scale-105 transition-transform">
+                      <Archive className="w-4 h-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-extrabold text-[#0b1c30] group-hover:text-[#00685f]">Arsip Pembinaan</span>
+                        <span className="text-[9px] text-slate-700 font-bold bg-slate-100 px-1.5 py-0.5 rounded">Riwayat</span>
+                      </div>
+                      <p className="text-[10px] text-gray-500 leading-tight mt-0.5">Arsip pembinaan rujukan &amp; riwayat lama siswa</p>
+                    </div>
+                  </button>
                   {/* 1. Absen Kelas */}
                   <button
                     type="button"

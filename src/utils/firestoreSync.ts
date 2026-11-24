@@ -3152,8 +3152,15 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
         if (isOfflineFirestoreError(error)) {
           notifyCloudStatusChange('offline', false);
         } else {
-          const errMsg = handleFirestoreError(error, 'list', colRef.path);
-          notifyCloudStatusChange('error', false, errMsg);
+          const isUnauthViolationBeforeLogin =
+            (colName === 'violations' || colName === 'cases') &&
+            !auth.currentUser &&
+            typeof localStorage !== 'undefined' &&
+            localStorage.getItem('bk_is_logged_in') !== 'true';
+          if (!isUnauthViolationBeforeLogin) {
+            const errMsg = handleFirestoreError(error, 'list', colRef.path);
+            notifyCloudStatusChange('error', false, errMsg);
+          }
         }
       }
     });
@@ -3173,8 +3180,15 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
           if (isOfflineFirestoreError(error)) {
             notifyCloudStatusChange('offline', false);
           } else {
-            const errMsg = handleFirestoreError(error, 'list', rootColRef.path);
-            notifyCloudStatusChange('error', false, errMsg);
+            const isUnauthViolationBeforeLogin =
+              (colName === 'violations' || colName === 'cases' || rootColName === 'violations') &&
+              !auth.currentUser &&
+              typeof localStorage !== 'undefined' &&
+              localStorage.getItem('bk_is_logged_in') !== 'true';
+            if (!isUnauthViolationBeforeLogin) {
+              const errMsg = handleFirestoreError(error, 'list', rootColRef.path);
+              notifyCloudStatusChange('error', false, errMsg);
+            }
           }
         }
       });

@@ -1,8 +1,239 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Default deny catch-all
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validasi ketat payload rujukan publik dari halaman /piket (tanpa auth)
+    function isValidPublicPiketViolation(data, violationId) {
+      return data.keys().hasAll([
+          'id',
+          'ticketId',
+          'studentId',
+          'studentName',
+          'studentClass',
+          'category',
+          'specificBehaviors',
+          'reportedBy',
+          'date',
+          'time',
+          'location',
+          'notes',
+          'piketNotes',
+          'reportedVia',
+          'source',
+          'reporterRole',
+          'handledBy',
+          'restitutionStatus',
+          'pointsAdded',
+          'schoolId',
+          'schoolName',
+          'migratedAt',
+          'isDeleted',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'ticketId',
+          'studentId',
+          'studentName',
+          'studentClass',
+          'category',
+          'specificBehaviors',
+          'reportedBy',
+          'date',
+          'time',
+          'location',
+          'notes',
+          'piketNotes',
+          'reportedVia',
+          'source',
+          'reporterRole',
+          'handledBy',
+          'restitutionStatus',
+          'pointsAdded',
+          'schoolId',
+          'schoolName',
+          'migratedAt',
+          'isDeleted',
+          'createdAt',
+          'updatedAt',
+          'proofPhotoUrl',
+          'proofPhotoName'
+        ])
+        && data.id == violationId
+        && data.ticketId is string && data.ticketId.size() >= 3 && data.ticketId.size() <= 64
+        && data.studentId is string && data.studentId.size() >= 1 && data.studentId.size() <= 128
+        && data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 120
+        && data.studentClass is string && data.studentClass.size() >= 1 && data.studentClass.size() <= 40
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 120
+        && data.specificBehaviors is list
+        && data.specificBehaviors.size() >= 1
+        && data.specificBehaviors.size() <= 20
+        && data.specificBehaviors[0] is string
+        && data.specificBehaviors[0].size() >= 1
+        && data.specificBehaviors[0].size() <= 200
+        && data.reportedBy is string && data.reportedBy.size() >= 1 && data.reportedBy.size() <= 120
+        && data.date is string && data.date.size() >= 8 && data.date.size() <= 20
+        && data.time is string && data.time.size() >= 4 && data.time.size() <= 15
+        && data.location is string && data.location.size() >= 1 && data.location.size() <= 100
+        && data.notes is string && data.notes.size() <= 1000
+        && data.piketNotes is string && data.piketNotes.size() <= 1000
+        && data.reportedVia == 'Link Piket'
+        && data.source == 'link_piket'
+        && data.reporterRole == 'Guru Piket'
+        && data.handledBy == 'Belum Ditangani'
+        && data.restitutionStatus == 'Baru Dicatat'
+        && data.pointsAdded is number && data.pointsAdded >= 0 && data.pointsAdded <= 100
+        && data.schoolId is string && data.schoolId.size() >= 1 && data.schoolId.size() <= 64
+        && data.schoolName is string && data.schoolName.size() >= 1 && data.schoolName.size() <= 120
+        && data.migratedAt == null
+        && data.isDeleted == false
+        && data.createdAt is string && data.createdAt.size() >= 10 && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() >= 10 && data.updatedAt.size() <= 40
+        && (!('proofPhotoUrl' in data) || (data.proofPhotoUrl is string && data.proofPhotoUrl.size() <= 500000))
+        && (!('proofPhotoName' in data) || (data.proofPhotoName is string && data.proofPhotoName.size() <= 150));
+    }
+
+    // Ping koneksi Firestore
+    match /_connection_check/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Daftar Guru & Petugas Piket (dibaca di /piket publik & Menu Lainnya)
+    match /teachers/{teacherId} {
+      allow read: if true;
+      allow create, update, delete: if isSignedIn() && isValidId(teacherId);
+    }
+
+    // Data Siswa (dapat dicari di /piket; UI hanya menampilkan Nama + Kelas + Foto kecil)
+    match /students/{studentId} {
+      allow read: if true;
+      allow create, update, delete: if isSignedIn() && isValidId(studentId);
+    }
+    match /schools/{schoolId}/students/{studentId} {
+      allow read: if true;
+      allow create, update, delete: if isSignedIn() && isValidId(studentId);
+    }
+
+    // Koleksi Violations (Rujukan Piket & Pembinaan):
+    // - Publik (tanpa auth) HANYA boleh create dengan field rujukan yang diizinkan
+    // - Publik DITOLAK untuk read, update, dan delete
+    // - Read, update, delete HANYA untuk user login BK (authenticated)
+    match /violations/{violationId} {
+      allow create: if (isValidId(violationId) && isValidPublicPiketViolation(incoming(), violationId))
+                    || (isSignedIn() && isValidId(violationId));
+      allow read, update, delete: if isSignedIn();
+    }
+    match /schools/{schoolId}/violations/{violationId} {
+      allow create: if (isValidId(violationId) && isValidPublicPiketViolation(incoming(), violationId))
+                    || (isSignedIn() && isValidId(violationId));
+      allow read, update, delete: if isSignedIn();
+    }
+
+    // Koleksi Kasus legacy
+    match /cases/{caseId} {
+      allow read, write: if isSignedIn();
+    }
+    match /schools/{schoolId}/cases/{caseId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Metadata Sekolah, Login Konselor & Registrasi Akun
+    match /schools/{schoolId} {
+      allow read: if true;
+      allow create, update: if isSignedIn() || (isValidId(schoolId) && incoming().schoolId is string && incoming().schoolName is string);
+      allow delete: if isSignedIn();
+    }
+    match /schools_registry/{schoolId} {
+      allow read: if true;
+      allow create, update: if isSignedIn() || isValidId(schoolId);
+      allow delete: if isSignedIn();
+    }
+    match /counselors/{counselorId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /schools/{schoolId}/counselors/{counselorId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /account_requests/{reqId} {
+      allow read, create: if true;
+      allow update, delete: if isSignedIn();
+    }
+    match /users/{userId} {
+      allow read, write: if isSignedIn();
+    }
+    match /pengaturan/{schoolId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Koleksi Operasional BK Lainnya (hanya user login BK)
+    match /services/{docId} { allow read, write: if isSignedIn(); }
+    match /counseling/{docId} { allow read, write: if isSignedIn(); }
+    match /daily_journals/{docId} { allow read, write: if isSignedIn(); }
+    match /home_visits/{docId} { allow read, write: if isSignedIn(); }
+    match /parent_summons/{docId} { allow read, write: if isSignedIn(); }
+    match /attendance_history/{docId} { allow read, write: if isSignedIn(); }
+    match /achievements/{docId} { allow read, write: if isSignedIn(); }
+    match /student_achievements/{docId} { allow read, write: if isSignedIn(); }
+    match /app_config/{docId} { allow read, write: if isSignedIn(); }
+    match /activity_logs/{docId} { allow read, write: if isSignedIn(); }
+    match /hapusLog/{docId} { allow read, write: if isSignedIn(); }
+    match /surat_perjanjian_list/{docId} { allow read, write: if isSignedIn(); }
+    match /kontrak_perilaku_list/{docId} { allow read, write: if isSignedIn(); }
+    match /jurnal_pembinaan_disiplin_list/{docId} { allow read, write: if isSignedIn(); }
+    match /komitmen_rtl_list/{docId} { allow read, write: if isSignedIn(); }
+    match /teaching_schedule/{docId} { allow read, write: if isSignedIn(); }
+    match /class_teaching_progress/{docId} { allow read, write: if isSignedIn(); }
+    match /sticky_notes/{docId} { allow read, write: if isSignedIn(); }
+    match /parent_summon_templates/{docId} { allow read, write: if isSignedIn(); }
+    match /walikelas_config/{docId} { allow read, write: if isSignedIn(); }
+    match /akpd_class_sessions/{docId} { allow read, write: if isSignedIn(); }
+    match /violation_rules/{docId} { allow read, write: if isSignedIn(); }
+    match /program_evaluations/{docId} { allow read, write: if isSignedIn(); }
+    match /service_evaluations/{docId} { allow read, write: if isSignedIn(); }
+    match /userSettings/{docId} { allow read, write: if isSignedIn(); }
+
+    // Subkoleksi sekolah per-collection (hanya user login BK)
+    match /schools/{schoolId}/services/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/counseling/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/daily_journals/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/home_visits/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/parent_summons/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/attendance_history/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/achievements/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/activity_logs/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/hapusLog/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/surat_perjanjian_list/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/kontrak_perilaku_list/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/jurnal_pembinaan_disiplin_list/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/komitmen_rtl_list/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/teaching_schedule/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/class_teaching_progress/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/sticky_notes/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/parent_summon_templates/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/walikelas_config/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/akpd_class_sessions/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/violation_rules/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/program_evaluations/{docId} { allow read, write: if isSignedIn(); }
+    match /schools/{schoolId}/service_evaluations/{docId} { allow read, write: if isSignedIn(); }
   }
 }

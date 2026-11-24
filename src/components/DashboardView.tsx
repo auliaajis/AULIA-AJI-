@@ -12,6 +12,12 @@ import {
 import { getCloudCollectionData, subscribeCloudCollection } from '../utils/firestoreSync';
 import { isRealNonDummyService, isRealNonDummyViolation } from '../utils/purgeDummyData';
 import { getViolationRestitutionStatus } from './CatatPelanggaranForm';
+import RujukanCard from './RujukanCard';
+import {
+  getRujukanItemStatus,
+  RujukanStatusTab,
+  sortRujukanList,
+} from '../utils/rujukanHelper';
 import { ChevronRight } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -37,6 +43,7 @@ interface DashboardViewProps {
   ) => void;
   onNavigateToForm: (form: string, selectStudentId?: string) => void;
   onOpenViolationDetail?: (violation: ViolationRecord) => void;
+  onTindakLanjuti?: (violation: ViolationRecord) => void;
   onUpdateViolationStatus?: (id: string, status: any, progress: string) => void;
   onUpdateServiceStatus?: (id: string, status: any, followUp?: string) => void;
   onEditService?: (service: CounselingService) => void;
@@ -56,31 +63,6 @@ const DAILY_BK_TIPS: string[] = [
   'Siswa yang nilainya tiba-tiba turun atau menjadi pendiam sering menyimpan masalah di rumah—lakukan check-in singkat.',
 ];
 
-const getInitials = (name: string): string => {
-  const parts = String(name || 'S')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (parts.length === 0) return 'S';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
-};
-
-const getAvatarTintClass = (name: string): string => {
-  const tints = [
-    'bg-rose-100 text-rose-800',
-    'bg-amber-100 text-amber-800',
-    'bg-sky-100 text-sky-800',
-    'bg-teal-100 text-teal-800',
-    'bg-indigo-100 text-indigo-800',
-  ];
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = (hash * 31 + name.charCodeAt(i)) % tints.length;
-  }
-  return tints[Math.abs(hash) % tints.length];
-};
-
 const toLocalYmd = (d: Date): string => {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -95,8 +77,10 @@ export default function DashboardView({
   activeCounselor,
   onNavigateToTab,
   onOpenViolationDetail,
+  onTindakLanjuti,
 }: DashboardViewProps) {
   const [now, setNow] = useState<Date>(() => new Date());
+  const [rujukanFilter, setRujukanFilter] = useState<RujukanStatusTab>('Semua');
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -146,35 +130,48 @@ export default function DashboardView({
     [dailyJournals]
   );
 
-  // Kasus violations yang statusnya belum selesai, diurutkan dari yang terbaru
-  const unfinishedViolations = useMemo(() => {
-    return realViolations
-      .filter((v) => getViolationRestitutionStatus(v) !== 'Selesai / Dipantau')
-      .slice()
-      .sort((a, b) => {
-        const dateA = String(a.date || '').slice(0, 10);
-        const dateB = String(b.date || '').slice(0, 10);
-        if (dateB !== dateA) return dateB.localeCompare(dateA);
+  const sortedReferrals = useMemo(
+    () => sortRujukanList(realViolations),
+    [realViolations]
+  );
 
-        const timeA = String(a.time || '');
-        const timeB = String(b.time || '');
-        if (timeB !== timeA) return timeB.localeCompare(timeA);
+  const rujukanCounts = useMemo(() => {
+    let baru = 0;
+    let ditindak = 0;
+    let selesai = 0;
+    sortedReferrals.forEach((v) => {
+      const st = getRujukanItemStatus(v);
+      if (st === 'Baru') baru++;
+      else if (st === 'Sudah Ditindaklanjuti') ditindak++;
+      else selesai++;
+    });
+    return {
+      Semua: sortedReferrals.length,
+      Baru: baru,
+      'Sudah Ditindaklanjuti': ditindak,
+      Selesai: selesai,
+    };
+  }, [sortedReferrals]);
 
-        const updA = Number((a as any)._updatedAt || 0);
-        const updB = Number((b as any)._updatedAt || 0);
-        return updB - updA;
-      });
-  }, [realViolations]);
+  const unfinishedViolationsCount = useMemo(
+    () => realViolations.filter((v) => getViolationRestitutionStatus(v) !== 'Selesai / Dipantau').length,
+    [realViolations]
+  );
 
-  const topThreeAttention = useMemo(
-    () => unfinishedViolations.slice(0, 3),
-    [unfinishedViolations]
+  const filteredReferrals = useMemo(() => {
+    if (rujukanFilter === 'Semua') return sortedReferrals;
+    return sortedReferrals.filter((v) => getRujukanItemStatus(v) === rujukanFilter);
+  }, [sortedReferrals, rujukanFilter]);
+
+  const displayedReferrals = useMemo(
+    () => filteredReferrals.slice(0, 6),
+    [filteredReferrals]
   );
 
   // Hitung layanan minggu ini (Senin s.d. Minggu minggu berjalan)
   const servicesThisWeekCount = useMemo(() => {
     const startOfWeek = new Date(now);
-    const dayOfWeek = startOfWeek.getDay(); // 0=Min, 1=Sen ... 6=Sab
+    const dayOfWeek = startOfWeek.getDay();
     const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
     startOfWeek.setDate(startOfWeek.getDate() + diffToMonday);
     const endOfWeek = new Date(startOfWeek);
@@ -189,7 +186,6 @@ export default function DashboardView({
     }).length;
   }, [realServices, now]);
 
-  // Hitung agenda hari ini (jurnal harian hari ini + sesi terjadwal hari ini jika ada)
   const todayStr = useMemo(() => toLocalYmd(now), [now]);
 
   const agendaTodayCount = useMemo(() => {
@@ -205,7 +201,6 @@ export default function DashboardView({
     return 'Selamat Malam, rekap hari ini yuk! 🌙';
   }, [now]);
 
-  // Hari, Tanggal lengkap bahasa Indonesia (misal: Senin, 23 November 2026)
   const formattedDate = useMemo(() => {
     try {
       return new Intl.DateTimeFormat('id-ID', {
@@ -219,17 +214,20 @@ export default function DashboardView({
     }
   }, [now, todayStr]);
 
-  // 4. Tips BK Harian (rotasi otomatis Senin-Minggu)
   const todayTip = useMemo(() => {
     return DAILY_BK_TIPS[now.getDay()] || DAILY_BK_TIPS[1];
   }, [now]);
 
-  const handleOpenCaseDetail = (v: ViolationRecord) => {
+  const handleTindakLanjuti = (v: ViolationRecord) => {
+    if (onTindakLanjuti) {
+      onTindakLanjuti(v);
+      return;
+    }
     if (onOpenViolationDetail) {
       onOpenViolationDetail(v);
       return;
     }
-    onNavigateToTab('arsip-pelanggaran', v.ticketId || v.studentName);
+    onNavigateToTab('rujukan-piket', v.studentName);
   };
 
   return (
@@ -244,16 +242,16 @@ export default function DashboardView({
             {formattedDate}
           </p>
           <p className="text-[15px] text-[#3d4947] leading-relaxed">
-            {unfinishedViolations.length > 0 ? (
+            {unfinishedViolationsCount > 0 ? (
               <>
                 Ada{' '}
                 <span className="font-bold text-[#0b1c30] tabular-nums">
-                  {unfinishedViolations.length} kasus
+                  {unfinishedViolationsCount} rujukan
                 </span>{' '}
                 yang perlu ditindaklanjuti
               </>
             ) : (
-              'Semua kasus sudah tertangani hari ini'
+              'Semua rujukan sudah tertangani hari ini'
             )}
           </p>
         </div>
@@ -286,19 +284,19 @@ export default function DashboardView({
           </div>
         </button>
 
-        {/* Pelanggaran */}
+        {/* Rujukan Piket */}
         <button
           type="button"
-          onClick={() => onNavigateToTab('arsip-pelanggaran')}
+          onClick={() => onNavigateToTab('rujukan-piket')}
           className="rounded-2xl bg-[#fff1f2] hover:bg-[#ffe4e6] border border-rose-200/80 shadow-[0_2px_8px_rgba(11,28,48,0.04)] p-3.5 sm:p-4 text-left transition-all duration-150 active:scale-[0.98] cursor-pointer flex flex-col justify-between min-h-[104px]"
         >
           <div className="flex items-center justify-between gap-2">
-            <span className="text-[15px] font-bold text-rose-950">Pelanggaran</span>
+            <span className="text-[15px] font-bold text-rose-950">Rujukan</span>
             <span
               aria-hidden="true"
               className="w-8 h-8 rounded-xl bg-rose-100/90 flex items-center justify-center text-base shrink-0"
             >
-              ⚠️
+              📩
             </span>
           </div>
           <div className="mt-2">
@@ -306,7 +304,7 @@ export default function DashboardView({
               {realViolations.length}
             </p>
             <p className="text-[13px] font-medium text-rose-800 mt-1.5 truncate">
-              {unfinishedViolations.length} belum selesai
+              {rujukanCounts.Baru} baru belum dibina
             </p>
           </div>
         </button>
@@ -373,82 +371,103 @@ export default function DashboardView({
         </p>
       </section>
 
-      {/* 4. 1 KARTU PERLU PERHATIAN HARI INI (ALA NOTIFIKASI CHAT, MAKS 3 ITEM) */}
-      <section>
-        {topThreeAttention.length === 0 ? (
-          <div className="rounded-2xl bg-emerald-50 border border-emerald-200/90 shadow-[0_2px_10px_rgba(11,28,48,0.04)] p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">
-            <p className="text-[15px] sm:text-base font-semibold text-emerald-950 leading-snug flex-1 min-w-[210px]">
-              🎉 Aman! Tidak ada kasus mendesak hari ini. Semua sudah tertangani.
+      {/* 4. RUJUKAN BARU DARI PIKET YANG PERLU DIBINA */}
+      <section className="rounded-2xl bg-white border border-[#bcc9c6]/35 shadow-[0_2px_12px_rgba(11,28,48,0.05)] overflow-hidden">
+        <div className="p-4 sm:p-5 border-b border-slate-100 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base sm:text-lg font-extrabold text-[#0b1c30]">
+                Rujukan Baru dari Piket yang Perlu Dibina
+              </h2>
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-xs font-black tabular-nums ${
+                  rujukanCounts.Baru > 0
+                    ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                    : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                }`}
+              >
+                {rujukanCounts.Baru} Baru
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => onNavigateToTab('rujukan-piket')}
+              className="inline-flex items-center gap-0.5 text-sm font-bold text-[#00685f] hover:text-[#005049] whitespace-nowrap shrink-0 cursor-pointer py-1 px-2 rounded-lg hover:bg-[#e6f4f1]/60 transition-colors"
+            >
+              <span>Semua Rujukan</span>
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Filter: [Semua] [Baru] [Sudah Ditindaklanjuti] [Selesai] */}
+          <div className="flex flex-wrap items-center gap-1.5 bg-gray-100 p-1.5 rounded-2xl border border-[#bcc9c6]/30 w-fit max-w-full">
+            {(['Semua', 'Baru', 'Sudah Ditindaklanjuti', 'Selesai'] as RujukanStatusTab[]).map((tab) => {
+              const active = rujukanFilter === tab;
+              return (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setRujukanFilter(tab)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    active
+                      ? 'bg-[#00685f] text-white shadow-xs'
+                      : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-gray-200/50'
+                  }`}
+                >
+                  <span>{tab}</span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full text-[10px] font-black tabular-nums ${
+                      active ? 'bg-white/20 text-white' : 'bg-white text-[#3d4947]'
+                    }`}
+                  >
+                    {rujukanCounts[tab]}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {displayedReferrals.length === 0 ? (
+          <div className="p-6 text-center space-y-2.5 bg-emerald-50/40">
+            <p className="text-[15px] font-semibold text-emerald-950">
+              {rujukanFilter === 'Baru'
+                ? '🎉 Aman! Tidak ada rujukan baru yang belum ditindaklanjuti.'
+                : 'Belum ada rujukan pada filter ini.'}
             </p>
             <button
               type="button"
-              onClick={() => onNavigateToTab('arsip-pelanggaran')}
-              className="inline-flex items-center gap-1 px-3.5 py-2 min-h-[40px] rounded-xl bg-white hover:bg-emerald-100/70 text-emerald-800 border border-emerald-300/80 text-sm font-bold whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+              onClick={() => onNavigateToTab('arsip-pembinaan')}
+              className="inline-flex items-center gap-1 px-3.5 py-2 rounded-xl bg-white hover:bg-emerald-50 text-[#00685f] border border-[#00685f]/25 text-xs font-extrabold transition-colors cursor-pointer"
             >
-              <span>Lihat Semua Arsip</span>
+              <span>Buka Arsip Pembinaan</span>
               <ChevronRight className="w-4 h-4" />
             </button>
           </div>
         ) : (
-          <div className="rounded-2xl bg-white border border-[#bcc9c6]/35 shadow-[0_2px_12px_rgba(11,28,48,0.05)] overflow-hidden">
-            <div className="px-4 py-3.5 border-b border-slate-100 flex items-center justify-between gap-2">
-              <h2 className="text-base font-extrabold text-[#0b1c30]">
-                Perlu Perhatian Hari Ini
-              </h2>
-              <button
-                type="button"
-                onClick={() => onNavigateToTab('arsip-pelanggaran')}
-                className="inline-flex items-center gap-0.5 text-sm font-bold text-[#00685f] hover:text-[#005049] whitespace-nowrap shrink-0 cursor-pointer py-1 px-1.5 rounded-lg hover:bg-[#e6f4f1]/60 transition-colors"
-              >
-                <span>Lihat Arsip</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="divide-y divide-slate-100">
-              {topThreeAttention.map((v) => {
-                const studentName = v.studentName || 'Siswa';
-                const studentClass = v.studentClass || '-';
-                const summaryText =
-                  v.notes && v.notes.trim() && v.notes.trim() !== '-'
-                    ? `${v.category} · ${v.notes.trim()}`
-                    : v.category || 'Perlu tindak lanjut';
-
-                return (
-                  <div
-                    key={v.id}
-                    className="px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-slate-50/70 transition-colors"
-                  >
-                    <div className="flex items-center gap-3 min-w-0 flex-1">
-                      <div
-                        className={`w-10 h-10 rounded-full flex items-center justify-center font-extrabold text-sm shrink-0 ${getAvatarTintClass(
-                          studentName
-                        )}`}
-                      >
-                        {getInitials(studentName)}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-[15px] sm:text-base font-bold text-[#0b1c30] truncate leading-snug">
-                          {studentName} - {studentClass}
-                        </p>
-                        <p className="text-[14px] sm:text-[15px] text-[#3d4947] truncate mt-0.5 leading-snug">
-                          {summaryText}
-                        </p>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => handleOpenCaseDetail(v)}
-                      className="inline-flex items-center gap-1 px-3 py-2 min-h-[40px] rounded-xl bg-[#e6f4f1] hover:bg-[#00685f] text-[#00685f] hover:text-white text-sm font-bold whitespace-nowrap shrink-0 transition-colors cursor-pointer active:scale-[0.98]"
-                    >
-                      <span>Tangani</span>
-                      <ChevronRight className="w-4 h-4" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
+          <div className="p-4 space-y-3 bg-[#f8faf9]">
+            {displayedReferrals.map((v) => (
+              <RujukanCard
+                key={v.id}
+                violation={v}
+                compact
+                onTindakLanjuti={handleTindakLanjuti}
+                onOpenProfile={(sId) => onNavigateToTab('profil-siswa', sId)}
+              />
+            ))}
+            {filteredReferrals.length > displayedReferrals.length && (
+              <div className="pt-1 text-center">
+                <button
+                  type="button"
+                  onClick={() => onNavigateToTab('rujukan-piket')}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-[#e6f4f1] text-[#00685f] border border-[#00685f]/30 text-xs font-extrabold cursor-pointer shadow-2xs transition-colors"
+                >
+                  <span>Lihat {filteredReferrals.length - displayedReferrals.length} Rujukan Lainnya</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
           </div>
         )}
       </section>

@@ -70,20 +70,53 @@
       },
       "required": ["schoolId", "schoolName"]
     },
-    "violations": {
-      "title": "Pelanggaran Siswa",
-      "description": "Catatan pelanggaran dan pendampingan disiplin",
+    "teachers": {
+      "title": "Daftar Guru & Petugas Piket",
+      "description": "Direktori nama guru untuk dropdown pelapor di halaman publik /piket dan menu Daftar Guru",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "studentId": { "type": "string" },
-        "studentName": { "type": "string" },
-        "date": { "type": "string" },
-        "category": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
         "schoolId": { "type": "string" },
-        "schoolName": { "type": "string" }
+        "isDeleted": { "type": "boolean" }
       },
-      "required": ["schoolId", "schoolName"]
+      "required": ["name"]
+    },
+    "violations": {
+      "title": "Pelanggaran & Rujukan Piket Siswa",
+      "description": "Catatan rujukan piket dan pendampingan pembinaan disiplin (create publik terbatas untuk link /piket, read/update/delete hanya BK)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ticketId": { "type": "string" },
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "studentClass": { "type": "string", "maxLength": 40 },
+        "date": { "type": "string", "maxLength": 20 },
+        "time": { "type": "string", "maxLength": 15 },
+        "category": { "type": "string", "maxLength": 120 },
+        "specificBehaviors": { "type": "array" },
+        "reportedBy": { "type": "string", "maxLength": 120 },
+        "location": { "type": "string", "maxLength": 100 },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "piketNotes": { "type": "string", "maxLength": 1000 },
+        "reportedVia": { "type": "string" },
+        "source": { "type": "string" },
+        "reporterRole": { "type": "string" },
+        "handledBy": { "type": "string" },
+        "restitutionStatus": { "type": "string" },
+        "pointsAdded": { "type": "number" },
+        "proofPhotoUrl": { "type": "string", "maxLength": 500000 },
+        "proofPhotoName": { "type": "string", "maxLength": 150 },
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" },
+        "migratedAt": { "type": "string" },
+        "isDeleted": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["studentId", "studentName", "category", "reportedBy", "date", "time", "location", "schoolId", "schoolName"]
     },
     "counseling": {
       "title": "Layanan Konseling",
@@ -191,13 +224,25 @@
       "schema": "users",
       "description": "Koleksi akun pengguna guru BK"
     },
+    "/teachers/{teacherId}": {
+      "schema": "teachers",
+      "description": "Direktori guru dan petugas piket"
+    },
     "/students/{studentId}": {
       "schema": "students",
       "description": "Koleksi siswa bimbingan konseling"
     },
+    "/violations/{violationId}": {
+      "schema": "violations",
+      "description": "Koleksi rujukan piket dan catatan pembinaan pelanggaran siswa"
+    },
     "/cases/{caseId}": {
       "schema": "cases",
       "description": "Koleksi kasus pelanggaran disiplin siswa"
+    },
+    "/services/{serviceId}": {
+      "schema": "services",
+      "description": "Koleksi layanan BK siswa"
     },
     "/counseling/{counselingId}": {
       "schema": "counseling",
@@ -212,11 +257,11 @@
       "description": "Data siswa bimbingan konseling per sekolah"
     },
     "/schools/{schoolId}/violations/{violationId}": {
-      "schema": "cases",
-      "description": "Catatan pelanggaran dan kasus per sekolah"
+      "schema": "violations",
+      "description": "Catatan pelanggaran dan rujukan piket per sekolah"
     },
     "/schools/{schoolId}/services/{serviceId}": {
-      "schema": "counseling",
+      "schema": "services",
       "description": "Catatan layanan konseling per sekolah"
     }
   }

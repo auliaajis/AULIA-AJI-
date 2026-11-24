@@ -82,6 +82,18 @@ export interface ViolationRecord {
   reportedVia?: string;
   source?: string;
   reporterRole?: string;
+  specificBehaviors?: string[] | string;
+  perilakuSpesifik?: string[] | string;
+  behaviorChips?: string[] | string;
+  selectedBehaviors?: string[] | string;
+  behaviors?: string[] | string;
+  piketNotes?: string;
+  pembinaanDate?: string;
+  pembinaanKronologi?: string;
+  pembinaanResult?: string;
+  pembinaanFollowUpPlan?: string;
+  pembinaanStatus?: 'Proses' | 'Selesai';
+  pembinaanCounselor?: string;
   migratedAt?: string | null;
   createdAt?: string | number;
   updatedAt?: string | number;
