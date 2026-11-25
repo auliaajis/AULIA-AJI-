@@ -11,14 +11,15 @@ import {
 } from '../types';
 import { getCloudCollectionData, subscribeCloudCollection } from '../utils/firestoreSync';
 import { isRealNonDummyService, isRealNonDummyViolation } from '../utils/purgeDummyData';
-import { getViolationRestitutionStatus } from './CatatPelanggaranForm';
-import RujukanCard from './RujukanCard';
 import {
+  formatCompactRujukanTime,
+  getRujukanCategoryLabel,
   getRujukanItemStatus,
-  RujukanStatusTab,
-  sortRujukanList,
+  getRujukanSpecificBehaviors,
+  getViolationSortMs,
+  isRujukanBaruPiket,
 } from '../utils/rujukanHelper';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, UserCheck, Users, X } from 'lucide-react';
 
 interface DashboardViewProps {
   students: Student[];
@@ -80,7 +81,7 @@ export default function DashboardView({
   onTindakLanjuti,
 }: DashboardViewProps) {
   const [now, setNow] = useState<Date>(() => new Date());
-  const [rujukanFilter, setRujukanFilter] = useState<RujukanStatusTab>('Semua');
+  const [showTipBanner, setShowTipBanner] = useState<boolean>(true);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -130,43 +131,35 @@ export default function DashboardView({
     [dailyJournals]
   );
 
-  const sortedReferrals = useMemo(
-    () => sortRujukanList(realViolations),
+  const todayStr = useMemo(() => toLocalYmd(now), [now]);
+
+  // Pisahkan Rujukan Baru dari Piket vs Data Lama / Absensi Harian
+  const newPiketOnlyList = useMemo(
+    () => realViolations.filter((v) => isRujukanBaruPiket(v) && !v.archivedFromRujukan),
     [realViolations]
   );
 
-  const rujukanCounts = useMemo(() => {
-    let baru = 0;
-    let ditindak = 0;
-    let selesai = 0;
-    sortedReferrals.forEach((v) => {
-      const st = getRujukanItemStatus(v);
-      if (st === 'Baru') baru++;
-      else if (st === 'Sudah Ditindaklanjuti') ditindak++;
-      else selesai++;
-    });
-    return {
-      Semua: sortedReferrals.length,
-      Baru: baru,
-      'Sudah Ditindaklanjuti': ditindak,
-      Selesai: selesai,
-    };
-  }, [sortedReferrals]);
-
-  const unfinishedViolationsCount = useMemo(
-    () => realViolations.filter((v) => getViolationRestitutionStatus(v) !== 'Selesai / Dipantau').length,
-    [realViolations]
+  const rujukanBaruPiketCount = useMemo(
+    () => newPiketOnlyList.filter((v) => getRujukanItemStatus(v) === 'Baru').length,
+    [newPiketOnlyList]
   );
 
-  const filteredReferrals = useMemo(() => {
-    if (rujukanFilter === 'Semua') return sortedReferrals;
-    return sortedReferrals.filter((v) => getRujukanItemStatus(v) === rujukanFilter);
-  }, [sortedReferrals, rujukanFilter]);
-
-  const displayedReferrals = useMemo(
-    () => filteredReferrals.slice(0, 6),
-    [filteredReferrals]
+  const unfinishedPiketCount = useMemo(
+    () => newPiketOnlyList.filter((v) => getRujukanItemStatus(v) !== 'Selesai').length,
+    [newPiketOnlyList]
   );
+
+  // Beranda: MAKSIMAL 5 item terbaru HARI INI dari Link Piket yang statusnya Baru (tanpa Absensi/Data Lama)
+  const todayCompactReferrals = useMemo(() => {
+    return newPiketOnlyList
+      .filter(
+        (v) =>
+          getRujukanItemStatus(v) === 'Baru' &&
+          String(v.date || '').slice(0, 10) === todayStr
+      )
+      .sort((a, b) => getViolationSortMs(b) - getViolationSortMs(a))
+      .slice(0, 5);
+  }, [newPiketOnlyList, todayStr]);
 
   // Hitung layanan minggu ini (Senin s.d. Minggu minggu berjalan)
   const servicesThisWeekCount = useMemo(() => {
@@ -185,8 +178,6 @@ export default function DashboardView({
       return dStr >= startStr && dStr <= endStr;
     }).length;
   }, [realServices, now]);
-
-  const todayStr = useMemo(() => toLocalYmd(now), [now]);
 
   const agendaTodayCount = useMemo(() => {
     return activeJournals.filter((j) => String(j.date || '').slice(0, 10) === todayStr).length;
@@ -242,16 +233,24 @@ export default function DashboardView({
             {formattedDate}
           </p>
           <p className="text-[15px] text-[#3d4947] leading-relaxed">
-            {unfinishedViolationsCount > 0 ? (
+            {rujukanBaruPiketCount > 0 ? (
               <>
                 Ada{' '}
                 <span className="font-bold text-[#0b1c30] tabular-nums">
-                  {unfinishedViolationsCount} rujukan
+                  {rujukanBaruPiketCount} rujukan baru dari Piket
                 </span>{' '}
                 yang perlu ditindaklanjuti
               </>
+            ) : unfinishedPiketCount > 0 ? (
+              <>
+                Ada{' '}
+                <span className="font-bold text-[#0b1c30] tabular-nums">
+                  {unfinishedPiketCount} rujukan Piket
+                </span>{' '}
+                yang masih dalam proses pembinaan
+              </>
             ) : (
-              'Semua rujukan sudah tertangani hari ini'
+              'Semua rujukan Piket hari ini sudah tertangani'
             )}
           </p>
         </div>
@@ -284,7 +283,7 @@ export default function DashboardView({
           </div>
         </button>
 
-        {/* Rujukan Piket */}
+        {/* Rujukan Piket vs Data Lama */}
         <button
           type="button"
           onClick={() => onNavigateToTab('rujukan-piket')}
@@ -300,11 +299,14 @@ export default function DashboardView({
             </span>
           </div>
           <div className="mt-2">
-            <p className="text-2xl sm:text-[26px] font-extrabold text-[#0b1c30] leading-none">
-              {realViolations.length}
+            <p className="text-[12px] sm:text-[13px] font-extrabold text-[#0b1c30] leading-snug">
+              Rujukan Baru Piket:{' '}
+              <span className="text-lg sm:text-xl font-black text-rose-700 tabular-nums">
+                {rujukanBaruPiketCount}
+              </span>
             </p>
-            <p className="text-[13px] font-medium text-rose-800 mt-1.5 truncate">
-              {rujukanCounts.Baru} baru belum dibina
+            <p className="text-[11px] sm:text-[12px] font-medium text-rose-900/75 mt-1 truncate">
+              Total + Data Lama: {realViolations.length}
             </p>
           </div>
         </button>
@@ -360,117 +362,135 @@ export default function DashboardView({
         </button>
       </section>
 
-      {/* 3. 1 KARTU TIPS BK HARIAN */}
-      <section className="rounded-2xl bg-[#fefce8] border border-amber-200/80 shadow-[0_2px_8px_rgba(11,28,48,0.03)] px-4 py-3.5 flex items-start gap-3">
-        <span aria-hidden="true" className="text-lg leading-none mt-0.5 shrink-0">
-          💡
-        </span>
-        <p className="text-[15px] text-[#3d4947] leading-snug">
-          <strong className="font-bold text-[#0b1c30]">Tips BK Hari Ini:</strong>{' '}
-          {todayTip}
-        </p>
+      {/* Menu Cepat Kelola Siswa & Kelola Guru Piket */}
+      <section className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onNavigateToTab('data-siswa')}
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white hover:bg-[#e6f4f1] text-[#0b1c30] hover:text-[#00685f] border border-[#bcc9c6]/50 text-xs font-extrabold transition-colors cursor-pointer shadow-2xs"
+        >
+          <Users className="w-3.5 h-3.5 text-[#00685f]" />
+          <span>Kelola Siswa</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onNavigateToTab('kelola-guru-piket')}
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white hover:bg-[#e6f4f1] text-[#0b1c30] hover:text-[#00685f] border border-[#bcc9c6]/50 text-xs font-extrabold transition-colors cursor-pointer shadow-2xs"
+        >
+          <UserCheck className="w-3.5 h-3.5 text-[#00685f]" />
+          <span>Kelola Guru Piket</span>
+        </button>
       </section>
 
-      {/* 4. RUJUKAN BARU DARI PIKET YANG PERLU DIBINA */}
+      {/* 3. PERLU DIBINA HARI INI (COMPACT MAX 5 ITEM HARI INI DARI LINK PIKET) */}
       <section className="rounded-2xl bg-white border border-[#bcc9c6]/35 shadow-[0_2px_12px_rgba(11,28,48,0.05)] overflow-hidden">
-        <div className="p-4 sm:p-5 border-b border-slate-100 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-base sm:text-lg font-extrabold text-[#0b1c30]">
-                Rujukan Baru dari Piket yang Perlu Dibina
-              </h2>
-              <span
-                className={`px-2.5 py-0.5 rounded-full text-xs font-black tabular-nums ${
-                  rujukanCounts.Baru > 0
-                    ? 'bg-rose-100 text-rose-800 border border-rose-200'
-                    : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                }`}
-              >
-                {rujukanCounts.Baru} Baru
-              </span>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => onNavigateToTab('rujukan-piket')}
-              className="inline-flex items-center gap-0.5 text-sm font-bold text-[#00685f] hover:text-[#005049] whitespace-nowrap shrink-0 cursor-pointer py-1 px-2 rounded-lg hover:bg-[#e6f4f1]/60 transition-colors"
+        <div className="px-4 py-3.5 sm:px-5 border-b border-slate-100 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <h2 className="text-base sm:text-lg font-extrabold text-[#0b1c30] truncate">
+              Perlu Dibina Hari Ini
+            </h2>
+            <span
+              className={`px-2.5 py-0.5 rounded-full text-xs font-black tabular-nums shrink-0 ${
+                todayCompactReferrals.length > 0
+                  ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                  : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+              }`}
             >
-              <span>Semua Rujukan</span>
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Filter: [Semua] [Baru] [Sudah Ditindaklanjuti] [Selesai] */}
-          <div className="flex flex-wrap items-center gap-1.5 bg-gray-100 p-1.5 rounded-2xl border border-[#bcc9c6]/30 w-fit max-w-full">
-            {(['Semua', 'Baru', 'Sudah Ditindaklanjuti', 'Selesai'] as RujukanStatusTab[]).map((tab) => {
-              const active = rujukanFilter === tab;
-              return (
-                <button
-                  key={tab}
-                  type="button"
-                  onClick={() => setRujukanFilter(tab)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
-                    active
-                      ? 'bg-[#00685f] text-white shadow-xs'
-                      : 'text-[#3d4947] hover:text-[#0b1c30] hover:bg-gray-200/50'
-                  }`}
-                >
-                  <span>{tab}</span>
-                  <span
-                    className={`px-1.5 py-0.5 rounded-full text-[10px] font-black tabular-nums ${
-                      active ? 'bg-white/20 text-white' : 'bg-white text-[#3d4947]'
-                    }`}
-                  >
-                    {rujukanCounts[tab]}
-                  </span>
-                </button>
-              );
-            })}
+              {todayCompactReferrals.length} Baru
+            </span>
           </div>
         </div>
 
-        {displayedReferrals.length === 0 ? (
-          <div className="p-6 text-center space-y-2.5 bg-emerald-50/40">
-            <p className="text-[15px] font-semibold text-emerald-950">
-              {rujukanFilter === 'Baru'
-                ? '🎉 Aman! Tidak ada rujukan baru yang belum ditindaklanjuti.'
-                : 'Belum ada rujukan pada filter ini.'}
+        {todayCompactReferrals.length === 0 ? (
+          <div className="px-4 py-6 text-center space-y-3 bg-emerald-50/30">
+            <p className="text-sm font-semibold text-emerald-950">
+              Belum ada rujukan baru dari Link Piket hari ini.
             </p>
             <button
               type="button"
-              onClick={() => onNavigateToTab('arsip-pembinaan')}
-              className="inline-flex items-center gap-1 px-3.5 py-2 rounded-xl bg-white hover:bg-emerald-50 text-[#00685f] border border-[#00685f]/25 text-xs font-extrabold transition-colors cursor-pointer"
+              onClick={() => onNavigateToTab('rujukan-piket')}
+              className="inline-flex items-center gap-1 px-4 py-2 rounded-xl bg-white hover:bg-[#e6f4f1] text-[#00685f] border border-[#00685f]/30 text-xs font-extrabold transition-colors cursor-pointer shadow-2xs"
             >
-              <span>Buka Arsip Pembinaan</span>
+              <span>Lihat Semua {realViolations.length} Rujukan</span>
               <ChevronRight className="w-4 h-4" />
             </button>
           </div>
         ) : (
-          <div className="p-4 space-y-3 bg-[#f8faf9]">
-            {displayedReferrals.map((v) => (
-              <RujukanCard
-                key={v.id}
-                violation={v}
-                compact
-                onTindakLanjuti={handleTindakLanjuti}
-                onOpenProfile={(sId) => onNavigateToTab('profil-siswa', sId)}
-              />
-            ))}
-            {filteredReferrals.length > displayedReferrals.length && (
-              <div className="pt-1 text-center">
+          <div className="divide-y divide-slate-100">
+            {todayCompactReferrals.map((v) => {
+              const catLabel = getRujukanCategoryLabel(v);
+              const firstBehavior = getRujukanSpecificBehaviors(v)[0];
+              const categoryDisplay =
+                firstBehavior && firstBehavior.toLowerCase() !== catLabel.toLowerCase()
+                  ? `${catLabel} - ${firstBehavior}`
+                  : catLabel;
+              const timeDisplay = formatCompactRujukanTime(v);
+              const studentClass = String(v.studentClass || '').trim();
+
+              return (
                 <button
+                  key={v.id}
                   type="button"
-                  onClick={() => onNavigateToTab('rujukan-piket')}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-[#e6f4f1] text-[#00685f] border border-[#00685f]/30 text-xs font-extrabold cursor-pointer shadow-2xs transition-colors"
+                  onClick={() => handleTindakLanjuti(v)}
+                  className="w-full px-4 py-3 sm:px-5 flex items-center justify-between gap-2.5 text-left hover:bg-[#f8faf9] active:bg-[#e6f4f1]/40 transition-colors cursor-pointer group"
                 >
-                  <span>Lihat {filteredReferrals.length - displayedReferrals.length} Rujukan Lainnya</span>
-                  <ChevronRight className="w-4 h-4" />
+                  <div className="min-w-0 flex-1 flex items-center gap-2 text-xs sm:text-sm">
+                    <span className="font-extrabold text-[#0b1c30] truncate max-w-[42%] shrink-0">
+                      {v.studentName || 'Siswa'}
+                      {studentClass ? ` - ${studentClass}` : ''}
+                    </span>
+                    <span className="text-slate-300 shrink-0">|</span>
+                    <span className="font-semibold text-[#3d4947] truncate">
+                      {categoryDisplay}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs font-bold text-[#00685f] bg-[#e6f4f1] px-2 py-0.5 rounded-lg tabular-nums">
+                      {timeDisplay}
+                    </span>
+                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-[#00685f] transition-colors" />
+                  </div>
                 </button>
-              </div>
-            )}
+              );
+            })}
+
+            <div className="p-3 sm:px-5 bg-[#f8faf9] text-center">
+              <button
+                type="button"
+                onClick={() => onNavigateToTab('rujukan-piket')}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-[#e6f4f1] text-[#00685f] border border-[#00685f]/30 text-xs font-extrabold cursor-pointer shadow-2xs transition-colors"
+              >
+                <span>Lihat Semua {realViolations.length} Rujukan</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
       </section>
+
+      {/* 4. TIPS BK HARIAN (DI PALING BAWAH & BISA DI-CLOSE) */}
+      {showTipBanner && (
+        <section className="rounded-2xl bg-[#fefce8] border border-amber-200/80 shadow-[0_2px_8px_rgba(11,28,48,0.03)] px-4 py-3 flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <span aria-hidden="true" className="text-base leading-none mt-0.5 shrink-0">
+              💡
+            </span>
+            <p className="text-xs sm:text-sm text-[#3d4947] leading-snug">
+              <strong className="font-bold text-[#0b1c30]">Tips BK Hari Ini:</strong>{' '}
+              {todayTip}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowTipBanner(false)}
+            aria-label="Tutup Tips BK Hari Ini"
+            className="p-1 rounded-lg text-amber-800/70 hover:text-amber-950 hover:bg-amber-200/50 transition-colors cursor-pointer shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </section>
+      )}
     </div>
   );
 }

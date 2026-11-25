@@ -168,7 +168,7 @@ export default function Sidebar({
   useEffect(() => {
     if (['dashboard', 'jurnal-harian'].includes(currentView)) {
       setOpenGroups((prev) => ({ ...prev, dashboard: true }));
-    } else if (['data-siswa', 'absensi'].includes(currentView)) {
+    } else if (['data-siswa', 'absensi', 'kelola-guru-piket'].includes(currentView)) {
       setOpenGroups((prev) => ({ ...prev, dataUtama: true }));
     } else if (['pelanggaran', 'pembinaan-pendisiplinan', 'apresiasi', 'layanan-bk', 'tambah-layanan', 'home-visit', 'panggilan-ortu', 'asesmen-bk'].includes(currentView)) {
       setOpenGroups((prev) => ({ ...prev, layanan: true }));
@@ -381,7 +381,27 @@ export default function Sidebar({
                   </span>
                 </button>
 
-                {/* 2.2 Absensi Kelas */}
+                {/* 2.2 Kelola Guru Piket */}
+                <button
+                  onClick={() => onNavigate('kelola-guru-piket')}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
+                    currentView === 'kelola-guru-piket'
+                      ? 'bg-[#00685f] text-white shadow-2xs font-extrabold'
+                      : 'text-[#3d4947] hover:bg-gray-100/80 hover:text-[#0b1c30]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <UserPlus className="w-4 h-4 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold block leading-tight">Kelola Guru Piket</span>
+                      <span className={`text-[10px] block leading-tight truncate ${currentView === 'kelola-guru-piket' ? 'text-teal-100 font-medium' : 'text-gray-400'}`}>
+                        Upload CSV &amp; Daftar Piket
+                      </span>
+                    </div>
+                  </div>
+                </button>
+
+                {/* 2.3 Absensi Kelas */}
                 <button
                   onClick={() => onNavigate('absensi')}
                   className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${

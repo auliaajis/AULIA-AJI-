@@ -1,5 +1,9 @@
 import { ViolationRecord } from '../types';
-import { getViolationRestitutionStatus, isPiketReferralViolation } from '../components/CatatPelanggaranForm';
+import {
+  getViolationRestitutionStatus,
+  isAttendanceViolation,
+  isPiketReferralViolation,
+} from '../components/CatatPelanggaranForm';
 
 export const RUJUKAN_CATEGORIES = [
   'Perundungan',
@@ -10,9 +14,70 @@ export const RUJUKAN_CATEGORIES = [
   'Integritas Akademik',
 ] as const;
 
-export type RujukanStatusTab = 'Semua' | 'Baru' | 'Sudah Ditindaklanjuti' | 'Selesai';
+export type RujukanStatusTab =
+  | 'Semua'
+  | 'Baru'
+  | 'Sudah Ditindaklanjuti'
+  | 'Selesai'
+  | 'Data Lama';
 
 export type RujukanItemStatus = 'Baru' | 'Sudah Ditindaklanjuti' | 'Selesai';
+
+export function isAbsensiHarianViolation(v: ViolationRecord | any): boolean {
+  if (!v) return false;
+  const rep = String(v.reportedBy || '').toLowerCase();
+  const via = String(v.reportedVia || '').toLowerCase();
+  const src = String(v.source || '').toLowerCase();
+  const loc = String(v.location || '').toLowerCase();
+  const notes = String(v.notes || '').toLowerCase();
+  const prog = String(v.handlingProgress || '').toLowerCase();
+  return (
+    rep.includes('absensi') ||
+    via.includes('absensi') ||
+    src.includes('absensi') ||
+    loc.includes('absensi') ||
+    notes.includes('absensi harian') ||
+    prog.includes('absensi harian') ||
+    (isAttendanceViolation(v) && !isPiketReferralViolation(v))
+  );
+}
+
+export function isDataLamaViolation(v: ViolationRecord | any): boolean {
+  if (!v) return false;
+  if (isAbsensiHarianViolation(v)) return true;
+  if (!isPiketReferralViolation(v)) return true;
+  if (v.isLegacyUnmigrated === true) return true;
+  return false;
+}
+
+export function isRujukanBaruPiket(v: ViolationRecord | any): boolean {
+  return isPiketReferralViolation(v) && !isDataLamaViolation(v);
+}
+
+export function formatCompactRujukanTime(v: ViolationRecord | any): string {
+  const rawTime = String(v?.time || '').trim();
+  const match = rawTime.match(/(\d{1,2})[:.](\d{2})/);
+  if (match) {
+    return `${match[1].padStart(2, '0')}.${match[2]}`;
+  }
+  const ca = v?.createdAt;
+  if (typeof ca === 'string' && ca.includes('T')) {
+    const d = new Date(ca);
+    if (!Number.isNaN(d.getTime())) {
+      return `${String(d.getHours()).padStart(2, '0')}.${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+  }
+  return '-';
+}
+
+export function formatCompactRujukanDate(dateStr?: string): string {
+  const raw = String(dateStr || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw || '-';
+  const d = new Date(`${raw}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return raw;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+  return `${d.getDate()} ${months[d.getMonth()] || ''}`.trim();
+}
 
 export function getRujukanItemStatus(v: ViolationRecord): RujukanItemStatus {
   const restStatus = getViolationRestitutionStatus(v);

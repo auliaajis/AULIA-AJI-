@@ -23,7 +23,7 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
 }) => {
   const isNavActive = (key: string) => {
     if (key === 'dashboard') return currentView === 'dashboard';
-    if (key === 'data-siswa') return currentView === 'data-siswa';
+    if (key === 'data-siswa') return currentView === 'data-siswa' || currentView === 'kelola-guru-piket';
     if (key === 'layanan') {
       return [
         'layanan-bk',

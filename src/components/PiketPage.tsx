@@ -6,7 +6,7 @@ import {
   onSnapshot,
   setDoc,
 } from 'firebase/firestore';
-import { db } from '../firebase';
+import { auth, db } from '../firebase';
 import { PRESET_KURIKULUM_MERDEKA_PPKSP, ViolationCategory } from '../utils/violationRulesConfig';
 import {
   AlertTriangle,
@@ -34,6 +34,35 @@ interface PiketTeacherOption {
   role?: string;
 }
 
+const GUEST_USES_STORAGE_KEY = 'piket_guest_teacher_uses_v1';
+
+function readGuestTeacherUses(): Record<string, { name: string; count: number }> {
+  try {
+    const raw = localStorage.getItem(GUEST_USES_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function recordGuestTeacherUse(name: string): { name: string; count: number } {
+  const clean = name.trim();
+  const key = clean.toLowerCase();
+  const map = readGuestTeacherUses();
+  const prev = map[key];
+  const next = {
+    name: prev?.name || clean,
+    count: (prev?.count || 0) + 1,
+  };
+  map[key] = next;
+  try {
+    localStorage.setItem(GUEST_USES_STORAGE_KEY, JSON.stringify(map));
+  } catch {}
+  return next;
+}
+
 interface PiketStudentSearchItem {
   id: string;
   name: string;
@@ -43,7 +72,14 @@ interface PiketStudentSearchItem {
   initials: string;
   schoolId: string;
   schoolName: string;
+  isManual?: boolean;
 }
+
+const CLASS_OPTIONS = [
+  '7A', '7B', '7C', '7D', '7E', '7F', '7G',
+  '8A', '8B', '8C', '8D', '8E', '8F', '8G',
+  '9A', '9B', '9C', '9D', '9E', '9F', '9G',
+] as const;
 
 const LOCATION_OPTIONS = [
   'Kelas',
@@ -171,15 +207,25 @@ export default function PiketPage() {
   // Daftar guru piket dari koleksi `teachers` (tanpa auth)
   const [teachers, setTeachers] = useState<PiketTeacherOption[]>([]);
   const [teachersLoading, setTeachersLoading] = useState(true);
+  const [teachersError, setTeachersError] = useState<string | null>(null);
+  const [teachersRetryKey, setTeachersRetryKey] = useState(0);
   const [selectedTeacherName, setSelectedTeacherName] = useState('');
+  const [teacherDropdownOpen, setTeacherDropdownOpen] = useState(false);
+  const [teacherSearchQuery, setTeacherSearchQuery] = useState('');
   const [useCustomTeacher, setUseCustomTeacher] = useState(false);
   const [customTeacherName, setCustomTeacherName] = useState('');
+  const [guestUsesVersion, setGuestUsesVersion] = useState(0);
 
   // Direktori pencarian siswa (disimpan di memori hanya untuk pencarian >= 2 karakter, tidak pernah ditampilkan utuh)
   const [searchableStudents, setSearchableStudents] = useState<PiketStudentSearchItem[]>([]);
   const [studentsLoading, setStudentsLoading] = useState(true);
+  const [studentsError, setStudentsError] = useState(false);
+  const [studentsRetryKey, setStudentsRetryKey] = useState(0);
   const [studentQuery, setStudentQuery] = useState('');
   const [selectedStudents, setSelectedStudents] = useState<PiketStudentSearchItem[]>([]);
+  const [showManualStudentForm, setShowManualStudentForm] = useState(false);
+  const [manualStudentName, setManualStudentName] = useState('');
+  const [manualStudentClass, setManualStudentClass] = useState<string>('7A');
 
   // Form 2 Tingkat (6 Kategori PPKSP & Perilaku Spesifik)
   const categories: ViolationCategory[] = PRESET_KURIKULUM_MERDEKA_PPKSP;
@@ -216,48 +262,116 @@ export default function PiketPage() {
     return () => clearInterval(timer);
   }, []);
 
-  // Ambil daftar guru piket secara real-time dari Firestore koleksi `teachers`
+  // Ambil daftar guru piket secara real-time dari Firestore koleksi `teachers` (batas waktu 5 detik)
   useEffect(() => {
+    let active = true;
+    let settled = false;
     setTeachersLoading(true);
+    setTeachersError(null);
+
+    const timeoutId = setTimeout(() => {
+      if (!active || settled) return;
+      settled = true;
+      setTeachersLoading(false);
+      setTeachersError('Gagal memuat daftar guru. Cek koneksi / Firestore Rules.');
+    }, 5000);
+
     const teachersCol = collection(db, 'teachers');
+    const parseTeachersSnapshot = (snapshot: any) => {
+      const list: PiketTeacherOption[] = [];
+      const seen = new Set<string>();
+      snapshot.forEach((d: any) => {
+        const data = d.data() as any;
+        if (!data || data.isDeleted === true || data.isActive === false) return;
+        const rawName = String(
+          data.name || data.nama || data.fullName || data.displayName || ''
+        ).trim();
+        if (!rawName) return;
+        const key = rawName.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        list.push({
+          id: d.id,
+          name: rawName,
+          role: String(data.subject || data.mapel || data.role || data.jabatan || data.posisi || '').trim() || undefined,
+        });
+      });
+      list.sort((a, b) => a.name.localeCompare(b.name, 'id'));
+      return list;
+    };
+
     const unsub = onSnapshot(
       teachersCol,
       (snapshot) => {
-        const list: PiketTeacherOption[] = [];
-        const seen = new Set<string>();
-        snapshot.forEach((d) => {
-          const data = d.data() as any;
-          if (!data || data.isDeleted === true) return;
-          const rawName = String(
-            data.name || data.nama || data.fullName || data.displayName || ''
-          ).trim();
-          if (!rawName) return;
-          const key = rawName.toLowerCase();
-          if (seen.has(key)) return;
-          seen.add(key);
-          list.push({
-            id: d.id,
-            name: rawName,
-            role: String(data.role || data.jabatan || data.posisi || '').trim() || undefined,
-          });
-        });
-        list.sort((a, b) => a.name.localeCompare(b.name, 'id'));
-        setTeachers(list);
-        setTeachersLoading(false);
+        if (!active) return;
+        const list = parseTeachersSnapshot(snapshot);
+        // Abaikan snapshot cache kosong kalau server belum merespon; kalau ada isi atau metadata !fromCache langsung selesai
+        if (list.length > 0 || !snapshot.metadata?.fromCache) {
+          settled = true;
+          clearTimeout(timeoutId);
+          setTeachers(list);
+          setTeachersLoading(false);
+          setTeachersError(
+            list.length === 0 && !snapshot.metadata?.fromCache
+              ? null
+              : null
+          );
+        }
       },
       (err) => {
+        if (!active) return;
+        settled = true;
+        clearTimeout(timeoutId);
         console.warn('[PiketPage] Gagal memuat koleksi teachers:', err?.message || err);
         setTeachersLoading(false);
+        setTeachersError('Gagal memuat daftar guru. Cek koneksi / Firestore Rules.');
       }
     );
-    return () => unsub();
-  }, []);
 
-  // Muat indeks pencarian minimal dari `students` (hanya id, name, class, avatarUrl, initials)
+    // Fallback getDocs paralel agar cepat muncul jika snapshot tertahan
+    getDocs(teachersCol)
+      .then((snap) => {
+        if (!active) return;
+        const list = parseTeachersSnapshot(snap);
+        if (list.length > 0 || !settled) {
+          settled = true;
+          clearTimeout(timeoutId);
+          setTeachers(list);
+          setTeachersLoading(false);
+          setTeachersError(null);
+        }
+      })
+      .catch((err) => {
+        if (!active || settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        console.warn('[PiketPage] getDocs teachers error:', err?.message || err);
+        setTeachersLoading(false);
+        setTeachersError('Gagal memuat daftar guru. Cek koneksi / Firestore Rules.');
+      });
+
+    return () => {
+      active = false;
+      clearTimeout(timeoutId);
+      unsub();
+    };
+  }, [teachersRetryKey]);
+
+  // Muat indeks pencarian minimal dari `students` (hanya id, name, class, avatarUrl, initials; batas waktu 5 detik)
   useEffect(() => {
     let active = true;
+    let settled = false;
+
+    const timeoutId = setTimeout(() => {
+      if (!active || settled) return;
+      settled = true;
+      setStudentsLoading(false);
+      setStudentsError(true);
+    }, 5000);
+
     const loadSearchDirectory = async () => {
       setStudentsLoading(true);
+      setStudentsError(false);
       try {
         const map = new Map<string, PiketStudentSearchItem>();
         const ingestSnapshot = (snap: any) => {
@@ -267,7 +381,6 @@ export default function PiketPage() {
             const rawName = String(data.name || data.nama || '').trim();
             if (!rawName) return;
             const lowName = rawName.toLowerCase();
-            // Skip placeholder dummy
             if (lowName.startsWith('siswa demo') || lowName.startsWith('dummy ')) return;
             const className = String(data.class || data.kelas || '-').trim();
             const nisSearch = String(data.nis || data.nisn || '').trim();
@@ -293,28 +406,32 @@ export default function PiketPage() {
         const rootSnap = await getDocs(collection(db, 'students'));
         ingestSnapshot(rootSnap);
 
-        if (map.size === 0) {
-          const schoolSnap = await getDocs(collection(db, 'schools', 'sch_20320123', 'students'));
-          ingestSnapshot(schoolSnap);
-        }
-
         if (active) {
+          settled = true;
+          clearTimeout(timeoutId);
           setSearchableStudents(
             Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, 'id'))
           );
+          setStudentsLoading(false);
+          setStudentsError(false);
         }
       } catch (err: any) {
         console.warn('[PiketPage] Pencarian siswa cloud belum termuat:', err?.message || err);
-      } finally {
-        if (active) setStudentsLoading(false);
+        if (active) {
+          settled = true;
+          clearTimeout(timeoutId);
+          setStudentsLoading(false);
+          setStudentsError(true);
+        }
       }
     };
 
     void loadSearchDirectory();
     return () => {
       active = false;
+      clearTimeout(timeoutId);
     };
-  }, []);
+  }, [studentsRetryKey]);
 
   const selectedCategory = useMemo(
     () => categories.find((c) => c.id === selectedCategoryId) || null,
@@ -327,6 +444,34 @@ export default function PiketPage() {
     if (useCustomTeacher) return customTeacherName.trim();
     return selectedTeacherName.trim();
   }, [useCustomTeacher, customTeacherName, selectedTeacherName]);
+
+  // Gabungkan daftar guru aktif A-Z + guru tamu yang sudah dipakai >= 3x
+  const dropdownTeachers = useMemo(() => {
+    const merged = [...teachers];
+    const seen = new Set(teachers.map((t) => t.name.trim().toLowerCase()));
+    const guestUses = readGuestTeacherUses();
+    Object.entries(guestUses).forEach(([key, entry]) => {
+      if (entry && entry.count >= 3 && entry.name && !seen.has(key)) {
+        seen.add(key);
+        merged.push({
+          id: `guest_${key}`,
+          name: entry.name,
+          role: 'Guru Tamu',
+        });
+      }
+    });
+    return merged.sort((a, b) => a.name.localeCompare(b.name, 'id'));
+  }, [teachers, guestUsesVersion]);
+
+  const filteredDropdownTeachers = useMemo(() => {
+    const q = teacherSearchQuery.trim().toLowerCase();
+    if (!q) return dropdownTeachers;
+    return dropdownTeachers.filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        (t.role || '').toLowerCase().includes(q)
+    );
+  }, [dropdownTeachers, teacherSearchQuery]);
 
   // Hasil pencarian siswa: HANYA tampil jika query >= 2 karakter, maksimal 10 hasil
   const filteredStudentResults = useMemo(() => {
@@ -463,7 +608,7 @@ export default function PiketPage() {
           const payload: Record<string, any> = {
             id: docId,
             ticketId,
-            studentId: stu.id,
+            studentId: stu.isManual ? 'manual' : stu.id,
             studentName: stu.name,
             studentClass: stu.className,
             category: categoryShort,
@@ -494,6 +639,30 @@ export default function PiketPage() {
           return setDoc(doc(db, 'violations', docId), payload);
         })
       );
+
+      // Jika nama berasal dari guru tamu (+ Nama Lain) dan belum ada di daftar teachers, hitung pemakaian
+      const existsInTeachers = teachers.some(
+        (t) => t.name.trim().toLowerCase() === activeReporterName.toLowerCase()
+      );
+      if (!existsInTeachers) {
+        const guestEntry = recordGuestTeacherUse(activeReporterName);
+        setGuestUsesVersion((v) => v + 1);
+        if (guestEntry.count >= 3 && auth.currentUser) {
+          const guestDocId = `tch_guest_${nowMs}_${Math.random().toString(36).slice(2, 6)}`;
+          setDoc(doc(db, 'teachers', guestDocId), {
+            id: guestDocId,
+            name: guestEntry.name,
+            nip: '',
+            subject: 'Guru Piket',
+            phone: '',
+            isActive: true,
+            source: 'auto_guest_3x',
+            createdAt: nowIso,
+            schoolId: 'sch_20320123',
+            isDeleted: false,
+          }).catch(() => {});
+        }
+      }
 
       setSubmittedSummary({
         reporterName: activeReporterName,
@@ -650,32 +819,136 @@ export default function PiketPage() {
               </div>
 
               {!useCustomTeacher ? (
-                <select
-                  value={selectedTeacherName}
-                  onChange={(e) => {
-                    if (e.target.value === '__CUSTOM__') {
-                      setUseCustomTeacher(true);
-                      setSelectedTeacherName('');
-                    } else {
-                      setSelectedTeacherName(e.target.value);
-                    }
-                    setSubmitError(null);
-                  }}
-                  className="w-full bg-[#f8faf9] border border-[#bcc9c6]/70 focus:border-[#00685f] focus:bg-white rounded-xl px-3.5 py-3 text-sm font-bold text-[#0b1c30] focus:outline-none"
-                >
-                  <option value="">
-                    {teachersLoading
-                      ? 'Memuat daftar guru piket...'
-                      : 'Pilih Nama Guru Piket ▼'}
-                  </option>
-                  {teachers.map((t) => (
-                    <option key={t.id} value={t.name}>
-                      {t.name}
-                      {t.role ? ` (${t.role})` : ''}
-                    </option>
-                  ))}
-                  <option value="__CUSTOM__">+ Nama Lain...</option>
-                </select>
+                <div className="space-y-2 relative">
+                  <button
+                    type="button"
+                    onClick={() => setTeacherDropdownOpen((prev) => !prev)}
+                    className="w-full bg-[#f8faf9] border border-[#bcc9c6]/70 focus:border-[#00685f] hover:border-[#00685f] rounded-xl px-3.5 py-3 text-sm font-bold text-[#0b1c30] flex items-center justify-between gap-2 text-left cursor-pointer transition-colors"
+                  >
+                    <span className={selectedTeacherName ? 'text-[#0b1c30] truncate' : 'text-[#3d4947] truncate'}>
+                      {selectedTeacherName
+                        ? selectedTeacherName
+                        : teachersLoading
+                        ? 'Memuat daftar guru piket...'
+                        : 'Pilih Nama Guru Piket'}
+                    </span>
+                    <ChevronDown
+                      className={`w-4 h-4 text-[#00685f] shrink-0 transition-transform ${
+                        teacherDropdownOpen ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+
+                  {teacherDropdownOpen && (
+                    <div className="border border-[#bcc9c6]/80 rounded-2xl bg-white shadow-lg overflow-hidden z-30">
+                      {/* Kolom pencarian di dalam dropdown */}
+                      <div className="p-2.5 border-b border-slate-100 bg-[#f8faf9] flex items-center gap-2">
+                        <Search className="w-4 h-4 text-[#00685f] shrink-0" />
+                        <input
+                          type="text"
+                          autoFocus
+                          value={teacherSearchQuery}
+                          onChange={(e) => setTeacherSearchQuery(e.target.value)}
+                          placeholder="Cari nama guru (misal: Bud)..."
+                          className="w-full bg-transparent text-xs sm:text-sm font-semibold text-[#0b1c30] focus:outline-none"
+                        />
+                        {teacherSearchQuery && (
+                          <button
+                            type="button"
+                            onClick={() => setTeacherSearchQuery('')}
+                            className="p-0.5 text-gray-400 hover:text-gray-700 cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="max-h-60 overflow-y-auto divide-y divide-slate-100">
+                        {teachersLoading && dropdownTeachers.length === 0 ? (
+                          <div className="p-3 text-xs text-[#3d4947] font-medium">
+                            Memuat daftar guru piket...
+                          </div>
+                        ) : filteredDropdownTeachers.length > 0 ? (
+                          filteredDropdownTeachers.map((t) => {
+                            const active = selectedTeacherName === t.name;
+                            return (
+                              <button
+                                key={t.id}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedTeacherName(t.name);
+                                  setTeacherDropdownOpen(false);
+                                  setTeacherSearchQuery('');
+                                  setSubmitError(null);
+                                }}
+                                className={`w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-left text-xs sm:text-sm transition-colors cursor-pointer ${
+                                  active
+                                    ? 'bg-[#e6f4f1] text-[#00685f] font-extrabold'
+                                    : 'hover:bg-[#f8faf9] text-[#0b1c30] font-bold'
+                                }`}
+                              >
+                                <span className="truncate">
+                                  {t.name}
+                                  {t.role ? (
+                                    <span className="text-[11px] font-medium text-[#3d4947] ml-1.5">
+                                      ({t.role})
+                                    </span>
+                                  ) : null}
+                                </span>
+                                {active && <Check className="w-4 h-4 text-[#00685f] shrink-0" />}
+                              </button>
+                            );
+                          })
+                        ) : (
+                          <div className="p-3 text-xs text-[#3d4947] font-medium">
+                            Nama guru "{teacherSearchQuery}" tidak ditemukan di daftar.
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUseCustomTeacher(true);
+                            setCustomTeacherName(teacherSearchQuery.trim());
+                            setSelectedTeacherName('');
+                            setTeacherDropdownOpen(false);
+                            setTeacherSearchQuery('');
+                            setSubmitError(null);
+                          }}
+                          className="w-full px-3.5 py-2.5 flex items-center gap-1.5 text-left text-xs font-extrabold text-[#00685f] bg-[#f8faf9] hover:bg-[#e6f4f1] cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Nama Lain (Guru Tamu)...</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {teachersError && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-900">
+                      <span className="font-bold">{teachersError}</span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setTeachersRetryKey((k) => k + 1)}
+                          className="px-2.5 py-1 rounded-lg bg-white border border-amber-300 font-extrabold text-amber-900 hover:bg-amber-100 cursor-pointer"
+                        >
+                          Coba Lagi
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUseCustomTeacher(true);
+                            setSubmitError(null);
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-[#00685f] text-white font-extrabold hover:bg-[#005049] cursor-pointer"
+                        >
+                          + Nama Lain
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               ) : (
                 <input
                   type="text"
@@ -684,7 +957,7 @@ export default function PiketPage() {
                     setCustomTeacherName(e.target.value);
                     setSubmitError(null);
                   }}
-                  placeholder="Ketik nama Guru Piket yang bertugas..."
+                  placeholder="Ketik nama Guru Piket tamu yang bertugas..."
                   className="w-full bg-[#f8faf9] border border-[#bcc9c6]/70 focus:border-[#00685f] focus:bg-white rounded-xl px-3.5 py-3 text-sm font-bold text-[#0b1c30] focus:outline-none"
                 />
               )}
@@ -904,12 +1177,108 @@ export default function PiketPage() {
                       </button>
                     ))
                   ) : (
-                    <div className="p-3 text-xs text-[#3d4947]">
-                      Siswa dengan kata kunci "{studentQuery.trim()}" tidak ditemukan.
+                    <div className="p-3.5 text-xs text-[#3d4947] space-y-2">
+                      <p className="font-semibold">
+                        Tidak ditemukan / Gagal memuat. Coba ketik NIS atau pakai tombol [Tambah Siswa Manual].
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {studentsError && (
+                          <button
+                            type="button"
+                            onClick={() => setStudentsRetryKey((k) => k + 1)}
+                            className="px-2.5 py-1.5 rounded-lg bg-[#f8faf9] border border-[#bcc9c6]/70 text-[#0b1c30] font-extrabold hover:bg-gray-100 cursor-pointer"
+                          >
+                            Coba Muat Ulang
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowManualStudentForm(true);
+                            if (studentQuery.trim() && !manualStudentName.trim()) {
+                              setManualStudentName(studentQuery.trim());
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-[#00685f] text-white font-extrabold hover:bg-[#005049] cursor-pointer"
+                        >
+                          Tambah Siswa Manual
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
               )}
+
+              {/* Tombol darurat di bawah pencarian siswa: [Input Siswa Manual - Ketik Nama + Kelas] */}
+              <div className="pt-1 space-y-2.5">
+                <button
+                  type="button"
+                  onClick={() => setShowManualStudentForm((prev) => !prev)}
+                  className="w-full py-2.5 px-3.5 rounded-xl border border-dashed border-[#00685f]/50 bg-[#f8faf9] hover:bg-[#e6f4f1] text-[#00685f] text-xs font-extrabold transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Input Siswa Manual - Ketik Nama + Kelas</span>
+                </button>
+
+                {showManualStudentForm && (
+                  <div className="bg-[#f8faf9] border border-[#bcc9c6]/60 rounded-xl p-3.5 space-y-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <input
+                        type="text"
+                        value={manualStudentName}
+                        onChange={(e) => setManualStudentName(e.target.value)}
+                        placeholder="Ketik nama lengkap siswa..."
+                        className="sm:col-span-2 bg-white border border-[#bcc9c6]/70 focus:border-[#00685f] rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-[#0b1c30] focus:outline-none"
+                      />
+                      <select
+                        value={manualStudentClass}
+                        onChange={(e) => setManualStudentClass(e.target.value)}
+                        className="bg-white border border-[#bcc9c6]/70 focus:border-[#00685f] rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-[#0b1c30] focus:outline-none"
+                      >
+                        {CLASS_OPTIONS.map((cls) => (
+                          <option key={cls} value={cls}>
+                            Kelas {cls}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowManualStudentForm(false)}
+                        className="px-3 py-1.5 rounded-lg bg-white border border-gray-200 text-xs font-bold text-[#3d4947] cursor-pointer"
+                      >
+                        Tutup
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cleanName = manualStudentName.trim();
+                          if (!cleanName) {
+                            showToast('Ketik nama siswa terlebih dahulu.', 'warning');
+                            return;
+                          }
+                          handleAddStudent({
+                            id: `manual_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                            name: cleanName,
+                            className: manualStudentClass || '7A',
+                            nisSearch: '',
+                            initials: getInitials(cleanName),
+                            schoolId: 'sch_20320123',
+                            schoolName: 'SMP N 2 Susukan',
+                            isManual: true,
+                          });
+                          setManualStudentName('');
+                          setShowManualStudentForm(false);
+                        }}
+                        className="px-3.5 py-1.5 rounded-lg bg-[#00685f] hover:bg-[#005049] text-white text-xs font-extrabold cursor-pointer"
+                      >
+                        + Tambah Siswa
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </section>
 
             {/* 4. Lokasi & Waktu + Catatan & Foto Opsional */}

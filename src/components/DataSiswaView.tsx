@@ -15,6 +15,7 @@ import {
   Check,
   X,
   User,
+  Users,
   HeartHandshake,
   Download,
   Mail,
@@ -2067,6 +2068,16 @@ export default function DataSiswaView({
             <UserPlus className="w-3.5 h-3.5" />
             <span>Tambah Siswa</span>
           </button>
+          {onNavigateToTab && (
+            <button
+              type="button"
+              onClick={() => onNavigateToTab('kelola-guru-piket')}
+              className="flex items-center gap-1.5 px-3 py-2 border border-[#00685f]/30 bg-[#e6f4f1] hover:bg-[#00685f] text-[#00685f] hover:text-white rounded-xl text-xs font-extrabold transition-all cursor-pointer"
+            >
+              <Users className="w-3.5 h-3.5" />
+              <span>Kelola Guru Piket</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handlePrintClassRecap}

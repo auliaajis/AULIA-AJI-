@@ -95,6 +95,7 @@ export interface ViolationRecord {
   pembinaanStatus?: 'Proses' | 'Selesai';
   pembinaanCounselor?: string;
   migratedAt?: string | null;
+  archivedFromRujukan?: boolean;
   createdAt?: string | number;
   updatedAt?: string | number;
   isLegacyUnmigrated?: boolean;

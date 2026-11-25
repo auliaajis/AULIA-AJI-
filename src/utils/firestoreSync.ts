@@ -3350,7 +3350,12 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
         list.push({
           id: d.id,
           name: rawName,
-          role: String(data.role || data.jabatan || data.posisi || '').trim() || undefined,
+          nip: String(data.nip || '').trim() || undefined,
+          subject: String(data.subject || data.mapel || '').trim() || undefined,
+          phone: String(data.phone || data.telepon || '').trim() || undefined,
+          isActive: data.isActive !== false,
+          createdAt: data.createdAt,
+          role: String(data.role || data.jabatan || data.posisi || data.subject || data.mapel || '').trim() || undefined,
           schoolId: data.schoolId ? sanitizeSchoolId(data.schoolId) : undefined,
         });
       });
@@ -3368,6 +3373,11 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
 export interface TeacherDirectoryEntry {
   id: string;
   name: string;
+  nip?: string;
+  subject?: string;
+  phone?: string;
+  isActive?: boolean;
+  createdAt?: string | number;
   role?: string;
   schoolId?: string;
 }
@@ -3393,6 +3403,75 @@ export function subscribeTeachers(
   return () => {
     window.removeEventListener('bk_teachers_updated', handler);
   };
+}
+
+const promotedGuestNamesSession = new Set<string>();
+
+/**
+ * Otomatis promosikan guru piket tamu (+ Nama Lain) yang sudah dipakai >= 3x di laporan Piket ke koleksi `teachers`
+ */
+export async function promoteFrequentGuestTeachers(
+  violations: any[],
+  schoolId?: string
+): Promise<void> {
+  if (!Array.isArray(violations) || violations.length === 0 || isQuotaExceeded) return;
+  try {
+    const counts = new Map<string, { displayName: string; count: number }>();
+    violations.forEach((v) => {
+      if (!v || v.isDeleted === true) return;
+      const via = String(v.reportedVia || '').toLowerCase();
+      const src = String(v.source || '').toLowerCase();
+      if (!via.includes('piket') && src !== 'link_piket') return;
+      const rawRep = String(v.reportedBy || '').trim();
+      if (!rawRep) return;
+      const key = rawRep.toLowerCase();
+      if (key === 'guru piket' || key.includes('absensi')) return;
+      const prev = counts.get(key);
+      counts.set(key, {
+        displayName: prev?.displayName || rawRep,
+        count: (prev?.count || 0) + 1,
+      });
+    });
+
+    const candidates = Array.from(counts.entries()).filter(
+      ([key, info]) => info.count >= 3 && !promotedGuestNamesSession.has(key)
+    );
+    if (candidates.length === 0) return;
+
+    await ensureFirebaseAuth();
+    const targetSchoolId = sanitizeSchoolId(schoolId || getActiveSchoolId());
+    const snap = await getDocs(collection(db, 'teachers'));
+    const existingKeys = new Set<string>();
+    snap.forEach((d) => {
+      const data = d.data() as any;
+      if (!data || data.isDeleted === true) return;
+      const n = String(data.name || data.nama || '').trim().toLowerCase();
+      if (n) existingKeys.add(n);
+    });
+
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    for (const [key, info] of candidates) {
+      promotedGuestNamesSession.add(key);
+      if (existingKeys.has(key)) continue;
+      existingKeys.add(key);
+      const docId = `tch_guest_${nowMs}_${Math.random().toString(36).slice(2, 6)}`;
+      await setDoc(doc(db, 'teachers', docId), {
+        id: docId,
+        name: info.displayName,
+        nip: '',
+        subject: 'Guru Piket',
+        phone: '',
+        isActive: true,
+        source: 'auto_guest_3x',
+        createdAt: nowIso,
+        schoolId: targetSchoolId,
+        isDeleted: false,
+      });
+    }
+  } catch {
+    // Non-blocking best effort
+  }
 }
 
 /**

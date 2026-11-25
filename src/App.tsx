@@ -34,7 +34,7 @@ import FloatingSiBecik from './components/FloatingSiBecik';
 import AiAssistantWidget from './components/AiAssistantWidget';
 import RujukanPiketView from './components/RujukanPiketView';
 import FormPembinaanModal, { PembinaanSubmitPayload } from './components/FormPembinaanModal';
-import { getRujukanItemStatus, getRujukanCategoryLabel } from './utils/rujukanHelper';
+import { getRujukanItemStatus, getRujukanCategoryLabel, isRujukanBaruPiket } from './utils/rujukanHelper';
 import {
   getLocalSiBecikFabEnabled,
   saveSiBecikFabSettings,
@@ -77,11 +77,13 @@ import {
   getCloudCollectionData,
   setCloudCollectionData,
   getCloudConnectionInfo,
-  testConnection
+  testConnection,
+  promoteFrequentGuestTeachers
 } from './utils/firestoreSync';
 import { firebaseConfig, auth } from './firebase';
 import { googleSignIn } from './utils/firebaseAuth';
 import PiketPage from './components/PiketPage';
+import KelolaGuruPiketView from './components/KelolaGuruPiketView';
 import { getActiveSchoolId, setActiveSchoolId, getSchoolConfig, loadSchoolData, saveSchoolData, sanitizeSchoolId, switchSchoolWorkspace, getRegisteredSchools, getValidatedSchoolIdentity, buildSchoolStamp, enforceCanonicalSchoolCacheRepair } from './utils/schoolConfig';
 import { runStartupStorageCheck } from './utils/storageQuota';
 import { purgeDummyData, purgeDummyStudents, isDummyStudent, deduplicateAndPurgeAllData, isRealNonDummyViolation } from './utils/purgeDummyData';
@@ -1954,6 +1956,81 @@ function AuthenticatedBkApp() {
     }
   };
 
+  // Tandai Semua Alpa Lama Sudah Dibina (1 klik tanpa menghapus data lama)
+  const handleBulkMarkAlpaDone = async (targetItems: ViolationRecord[]) => {
+    if (!targetItems || targetItems.length === 0) return;
+    const currentSchoolId = getActiveSchoolId();
+    const counselorName = activeCounselor?.name || 'Guru BK';
+    const nowDate = new Date().toISOString().slice(0, 10);
+    const nowIso = new Date().toISOString();
+    const targetIds = new Set(targetItems.map((it) => it.id));
+
+    const updatedMap = new Map<string, ViolationRecord>();
+    violations.forEach((v) => {
+      if (!targetIds.has(v.id)) return;
+      updatedMap.set(v.id, {
+        ...v,
+        schoolId: v.schoolId || currentSchoolId,
+        pembinaanStatus: 'Selesai',
+        pembinaanDate: v.pembinaanDate || nowDate,
+        pembinaanCounselor: v.pembinaanCounselor || counselorName,
+        handledBy: v.handledBy && v.handledBy !== 'Belum Ditangani' ? v.handledBy : 'Guru BK',
+        handlingProgress: v.handlingProgress || 'Alpa lama ditandai sudah dibina oleh Guru BK',
+        restitutionStatus: 'Selesai / Dipantau',
+        restitutionCompletedDate: v.restitutionCompletedDate || nowDate,
+        updatedAt: nowIso,
+      });
+    });
+
+    const updatedItems = Array.from(updatedMap.values());
+    if (updatedItems.length === 0) return;
+
+    setViolations((prev) => prev.map((v) => updatedMap.get(v.id) || v));
+    await saveBulkToFirestore('bk_violations', updatedItems, currentSchoolId, false, {
+      stampMissingSchoolId: true,
+    });
+    showToast(`${updatedItems.length} catatan Alpa lama ditandai sudah dibina.`, 'success');
+  };
+
+  // Arsipkan Semua Data Lama dari daftar Rujukan aktif (tetap tersimpan aman di Firestore & Arsip)
+  const handleArchiveAllDataLama = async (targetItems: ViolationRecord[]) => {
+    if (!targetItems || targetItems.length === 0) return;
+    const currentSchoolId = getActiveSchoolId();
+    const counselorName = activeCounselor?.name || 'Guru BK';
+    const nowDate = new Date().toISOString().slice(0, 10);
+    const nowIso = new Date().toISOString();
+    const targetIds = new Set(targetItems.map((it) => it.id));
+
+    const updatedMap = new Map<string, ViolationRecord>();
+    violations.forEach((v) => {
+      if (!targetIds.has(v.id)) return;
+      updatedMap.set(v.id, {
+        ...v,
+        schoolId: v.schoolId || currentSchoolId,
+        archivedFromRujukan: true,
+        pembinaanStatus: v.pembinaanStatus || 'Selesai',
+        pembinaanDate: v.pembinaanDate || nowDate,
+        pembinaanCounselor: v.pembinaanCounselor || counselorName,
+        handledBy: v.handledBy && v.handledBy !== 'Belum Ditangani' ? v.handledBy : 'Guru BK',
+        handlingProgress: v.handlingProgress || 'Data lama diarsipkan ke Arsip Pembinaan',
+        restitutionStatus: 'Selesai / Dipantau',
+        updatedAt: nowIso,
+      });
+    });
+
+    const updatedItems = Array.from(updatedMap.values());
+    if (updatedItems.length === 0) return;
+
+    setViolations((prev) => prev.map((v) => updatedMap.get(v.id) || v));
+    await saveBulkToFirestore('bk_violations', updatedItems, currentSchoolId, false, {
+      stampMissingSchoolId: true,
+    });
+    showToast(
+      `${updatedItems.length} data lama diarsipkan. Tetap bisa diakses di tab Data Lama & Arsip.`,
+      'success'
+    );
+  };
+
   const executeDeleteService = (id: string) => {
     if (!isValidDeleteId(id)) {
       showToast('Gagal: ID data tidak valid, hapus dibatalkan', 'error');
@@ -2465,10 +2542,22 @@ function AuthenticatedBkApp() {
   const rujukanBaruCount = useMemo(
     () =>
       filteredViolations.filter(
-        (v) => v && v.isDeleted !== true && isRealNonDummyViolation(v) && getRujukanItemStatus(v) === 'Baru'
+        (v) =>
+          v &&
+          v.isDeleted !== true &&
+          isRealNonDummyViolation(v) &&
+          isRujukanBaruPiket(v) &&
+          !v.archivedFromRujukan &&
+          getRujukanItemStatus(v) === 'Baru'
       ).length,
     [filteredViolations]
   );
+
+  // Otomatis masukkan guru tamu (+ Nama Lain) ke koleksi `teachers` jika sudah dipakai >= 3x di laporan Piket
+  useEffect(() => {
+    if (!isLoggedIn || filteredViolations.length === 0) return;
+    void promoteFrequentGuestTeachers(filteredViolations, activeCounselor?.schoolId);
+  }, [isLoggedIn, filteredViolations, activeCounselor?.schoolId]);
 
   const unseenOverdueCount = useMemo(
     () => overdueFollowUpIds.filter((id) => !seenOverdueIds.includes(id)).length,
@@ -2546,6 +2635,14 @@ function AuthenticatedBkApp() {
             setSearchQuery={setSearchQuery}
           />
         );
+      case 'kelola-guru-piket':
+      case 'guru-piket':
+        return (
+          <KelolaGuruPiketView
+            activeCounselor={activeCounselor}
+            onBack={() => setCurrentView('dashboard')}
+          />
+        );
       case 'rujukan-piket':
       case 'rujukan':
       case 'catat':
@@ -2558,6 +2655,8 @@ function AuthenticatedBkApp() {
             onTindakLanjuti={(v) => setPembinaanTargetViolation(v)}
             onNavigateToProfile={handleNavigateToProfile}
             onOpenArsip={() => setCurrentView('arsip-pembinaan')}
+            onBulkMarkAlpaDone={handleBulkMarkAlpaDone}
+            onArchiveAllDataLama={handleArchiveAllDataLama}
           />
         );
       case 'arsip-pembinaan':
@@ -3332,6 +3431,9 @@ function AuthenticatedBkApp() {
     switch (view) {
       case 'data-siswa':
         return searchQuery ? `Data Siswa (Pencarian: "${searchQuery}")` : 'Data Siswa Sekolah';
+      case 'kelola-guru-piket':
+      case 'guru-piket':
+        return 'Kelola Guru Piket';
       case 'absensi':
         return selectedAbsensiClass ? `Presensi Kelas ${selectedAbsensiClass}` : 'Absen Siswa Hari Ini';
       case 'rujukan-piket':
