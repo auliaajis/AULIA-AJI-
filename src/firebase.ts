@@ -1,9 +1,6 @@
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import {
   getFirestore,
-  initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
   getDocFromServer,
   doc,
   Firestore,
@@ -16,33 +13,14 @@ import firebaseConfig from '../firebase-applet-config.json';
 export { firebaseConfig };
 
 export const firebaseConfigObj = firebaseConfig;
+export const FIRESTORE_DATABASE_ID = 'ai-studio-sistemadministra-39ee735c';
 
-console.log('Firebase Project:', firebaseConfig.projectId, '(Default Gemini Project)');
+console.log('Firebase Project:', firebaseConfig.projectId, 'Database:', FIRESTORE_DATABASE_ID);
 
 // Canonical singleton Firebase App (shared identically across AI Studio Preview & Vercel)
 export const app: FirebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
-const firestoreDatabaseId = (firebaseConfig as any).firestoreDatabaseId || '(default)';
-
-// Initialize Firestore with multi-tab IndexedDB persistent cache for offline support & auto-sync
-function createFirestoreInstance(): Firestore {
-  try {
-    return initializeFirestore(
-      app,
-      {
-        localCache: persistentLocalCache({
-          tabManager: persistentMultipleTabManager(),
-        }),
-      },
-      firestoreDatabaseId
-    );
-  } catch (err) {
-    // Already initialized (e.g., module reload) -> reuse existing instance cleanly
-    return getFirestore(app, firestoreDatabaseId);
-  }
-}
-
-export const db: Firestore = createFirestoreInstance();
+export const db: Firestore = getFirestore(app, FIRESTORE_DATABASE_ID);
 export const auth: Auth = getAuth(app);
 export const storage: FirebaseStorage = getStorage(app);
 
@@ -55,13 +33,14 @@ try {
 
 export async function testConnection(): Promise<{ ok: boolean; error?: string }> {
   try {
-    await getDocFromServer(doc(db, '_connection_check', 'ping'));
+    await getDocFromServer(doc(db, 'students', '__ping__'));
     return { ok: true };
   } catch (error: any) {
+    const code = error?.code ? String(error.code) : '';
     const msg = error?.message || String(error);
-    if (msg.includes('the client is offline') || error?.code === 'unavailable') {
-      return { ok: false, error: 'Klien sedang offline (tidak dapat menjangkau server Firestore)' };
-    }
-    return { ok: false, error: msg };
+    return {
+      ok: false,
+      error: code && !msg.includes(code) ? `${code}: ${msg}` : msg,
+    };
   }
 }

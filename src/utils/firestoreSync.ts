@@ -18,7 +18,7 @@ import {
 } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { app, db, auth, firebaseConfig, testConnection } from '../firebase';
+import { app, db, auth, firebaseConfig, testConnection, FIRESTORE_DATABASE_ID } from '../firebase';
 import { getDeletedIds, registerDeletedId, unregisterDeletedId } from './deletionTracker';
 import { isDummyRecord } from './purgeDummyData';
 import { showToast } from './toast';
@@ -530,7 +530,7 @@ export function markCloudSyncCompleted(schoolId?: string, counts?: Record<string
   return info;
 }
 
-let currentCloudStatus: CloudStatus = typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'connected';
+let currentCloudStatus: CloudStatus = 'syncing';
 let lastSyncTimestamp: string = (() => {
   const saved = getLastCloudSyncInfo();
   if (saved.syncedAtIso) return saved.timeLabel;
@@ -542,18 +542,20 @@ export function getCloudConnectionInfo(): CloudConnectionInfo {
   const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
   const resolvedStatus: CloudStatus = isQuotaExceeded
     ? 'quota_exceeded'
+    : lastCloudError || currentCloudStatus === 'error'
+    ? 'error'
     : !isOnline
-    ? 'offline'
+    ? 'error'
     : currentCloudStatus;
   return {
     status: resolvedStatus,
     activeCollections: Object.keys(SYNC_MAP).length,
     lastSyncTime: lastSyncTimestamp,
     isOnline,
-    dbName: (firebaseConfig as any).firestoreDatabaseId || '(default)',
+    dbName: FIRESTORE_DATABASE_ID,
     activeSchoolId: getActiveSchoolId(),
     activeSchoolName: currentSchool.schoolName || 'SMP N 2 Susukan',
-    lastError: lastCloudError,
+    lastError: lastCloudError || (!isOnline ? 'unavailable: Perangkat sedang tidak tersambung ke internet' : undefined),
     conflictsPrevented: conflictsPreventedCount,
     lastConflictTime: lastConflictTime || undefined,
     clientTabId: CLIENT_TAB_ID
@@ -849,7 +851,7 @@ if (typeof window !== 'undefined') {
   });
 
   window.addEventListener('offline', () => {
-    notifyCloudStatusChange('offline', false);
+    notifyCloudStatusChange('error', false, 'unavailable: Koneksi internet perangkat terputus');
   });
 
   // Mobile phone screen lock / Tab background resume listener:
@@ -885,7 +887,7 @@ function checkAndHandleQuotaError(err: any): boolean {
     errStr.includes('Quota exceeded')
   ) {
     console.warn('Firestore rate limit or temporary quota warning detected:', errStr);
-    notifyCloudStatusChange('error', false, 'Kuota Firestore harian terlampaui');
+    notifyCloudStatusChange('error', false, 'resource-exhausted: Kuota Firestore harian terlampaui');
     return true;
   }
   return false;
@@ -894,14 +896,14 @@ function checkAndHandleQuotaError(err: any): boolean {
 // Validate initial connection to Firestore non-blockingly on startup
 if (typeof window !== 'undefined') {
   testConnection().then((res) => {
-    if (!res.ok) {
-      if (res.error === 'offline') {
-        notifyCloudStatusChange('offline', false);
-      } else if (res.error) {
-        notifyCloudStatusChange('error', false, res.error);
-      }
+    if (res.ok) {
+      notifyCloudStatusChange('connected');
+    } else if (res.error) {
+      notifyCloudStatusChange('error', false, res.error);
     }
-  }).catch(() => {});
+  }).catch((err: any) => {
+    notifyCloudStatusChange('error', false, err?.message || String(err));
+  });
 }
 
 // Offline-to-Cloud Pending Mutations Queue
@@ -976,9 +978,7 @@ export async function flushPendingCloudQueue(): Promise<number> {
       flushed++;
     } catch (e: any) {
       remaining.push(entry);
-      if (!isOfflineFirestoreError(e)) {
-        lastFlushError = e?.message || String(e);
-      }
+      lastFlushError = handleFirestoreError(e, 'write', `schools/${entry.schoolId}/${SYNC_MAP[entry.localKey] || entry.localKey}/${entry.id}`);
     }
   }
 
@@ -1074,7 +1074,7 @@ export async function registerSchoolToCloud(config: SchoolConfig, targetSchoolId
       setDoc(doc(db, 'pengaturan', schoolId), stampedPayload, { merge: true }),
     ]);
   } catch (err) {
-    if (!checkAndHandleQuotaError(err) && !isOfflineFirestoreError(err)) {
+    if (!checkAndHandleQuotaError(err)) {
       const msg = handleFirestoreError(err, 'write', `pengaturan/${targetSchoolId || config.schoolId || ''}`);
       notifyCloudStatusChange('error', false, msg);
     }
@@ -1127,10 +1127,6 @@ export async function syncSettingsToPengaturan(
     notifyCloudStatusChange('connected', true);
     return { success: true };
   } catch (err: any) {
-    if (isOfflineFirestoreError(err)) {
-      notifyCloudStatusChange('offline', false);
-      return { success: false, error: 'Offline - perubahan pengaturan akan otomatis tersinkron saat online' };
-    }
     const msg = handleFirestoreError(err, 'write', `pengaturan/${schoolId}`);
     notifyCloudStatusChange('error', false, msg);
     showToast(`Gagal menyinkronkan pengaturan ke Firestore: ${msg}`, 'error');
@@ -1387,10 +1383,6 @@ export async function saveToFirestore(
           schoolId,
           enqueuedAt: Date.now()
         });
-        if (isOfflineFirestoreError(setErr)) {
-          notifyCloudStatusChange('offline', false);
-          return { success: true, isStale: false, version: nextVersion, updatedAt: now };
-        }
         const errMsg = handleFirestoreError(setErr, 'write', docRef.path);
         notifyCloudStatusChange('error', false, errMsg);
         showToast(`Gagal sinkron ke Firestore: ${errMsg}`, 'error');
@@ -1402,13 +1394,9 @@ export async function saveToFirestore(
     return result;
   } catch (err: any) {
     if (!checkAndHandleQuotaError(err)) {
-      if (isOfflineFirestoreError(err)) {
-        notifyCloudStatusChange('offline', false);
-      } else {
-        const errMsg = handleFirestoreError(err, 'write', docRef.path);
-        notifyCloudStatusChange('error', false, errMsg);
-        showToast(`Gagal sinkron ke Firestore: ${errMsg}`, 'error');
-      }
+      const errMsg = handleFirestoreError(err, 'write', docRef.path);
+      notifyCloudStatusChange('error', false, errMsg);
+      showToast(`Gagal sinkron ke Firestore: ${errMsg}`, 'error');
     }
     return { success: false, error: err };
   }
@@ -2269,17 +2257,11 @@ export async function pushCollectionToFirestore(
     return { success: true, count: writtenCount };
   } catch (err: any) {
     const errMsg = checkAndHandleQuotaError(err)
-      ? 'Kuota Firestore harian terlampaui'
-      : isOfflineFirestoreError(err)
-        ? 'Offline - menunggu sinkron'
-        : handleFirestoreError(err, 'write', `schools/${schoolId}/${colName}`);
+      ? 'resource-exhausted: Kuota Firestore harian terlampaui'
+      : handleFirestoreError(err, 'write', `schools/${schoolId}/${colName}`);
 
     if (!isQuotaExceeded) {
-      if (isOfflineFirestoreError(err)) {
-        notifyCloudStatusChange('offline', false);
-      } else {
-        notifyCloudStatusChange('error', false, errMsg);
-      }
+      notifyCloudStatusChange('error', false, errMsg);
       const fallbackSchoolName = schoolId === 'sch_20320123'
         ? 'SMP N 2 Susukan'
         : (getSchoolConfig(schoolId).schoolName || 'SMP N 2 Susukan');
@@ -2411,9 +2393,7 @@ export async function fetchCloudAttendance(schoolId?: string): Promise<any[]> {
   } catch (err) {
     if (!checkAndHandleQuotaError(err)) {
       const msg = handleFirestoreError(err, 'list', `schools/${targetSchoolId}/attendance_history`);
-      if (!isOfflineFirestoreError(err)) {
-        notifyCloudStatusChange('error', false, msg);
-      }
+      notifyCloudStatusChange('error', false, msg);
     }
   }
   return getCloudCollectionData('bk_attendance_history', targetSchoolId);
@@ -2961,18 +2941,18 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
   if (isQuotaExceeded) return;
 
   const currentSchoolId = getActiveSchoolId();
-  notifyCloudStatusChange('connected');
+  notifyCloudStatusChange('syncing');
 
-  // Test connection on sync init so connection errors immediately surface the red top banner
+  // Test connection on sync init so connection errors immediately surface the real Firebase error
   testConnection().then((res) => {
-    if (!res.ok) {
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        notifyCloudStatusChange('offline', false);
-      } else if (res.error) {
-        notifyCloudStatusChange('error', false, res.error);
-      }
+    if (res.ok) {
+      notifyCloudStatusChange('connected');
+    } else if (res.error) {
+      notifyCloudStatusChange('error', false, res.error);
     }
-  }).catch(() => {});
+  }).catch((err: any) => {
+    notifyCloudStatusChange('error', false, err?.message || String(err));
+  });
 
   // Group SYNC_MAP by unique Firestore collection to eliminate duplicate onSnapshot listeners
   const uniqueCollectionMap = new Map<string, string[]>();
@@ -3149,18 +3129,14 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
       ingestIntoMap(subDocsMap, snapshot);
     }, (error) => {
       if (!checkAndHandleQuotaError(error)) {
-        if (isOfflineFirestoreError(error)) {
-          notifyCloudStatusChange('offline', false);
-        } else {
-          const isUnauthViolationBeforeLogin =
-            (colName === 'violations' || colName === 'cases') &&
-            !auth.currentUser &&
-            typeof localStorage !== 'undefined' &&
-            localStorage.getItem('bk_is_logged_in') !== 'true';
-          if (!isUnauthViolationBeforeLogin) {
-            const errMsg = handleFirestoreError(error, 'list', colRef.path);
-            notifyCloudStatusChange('error', false, errMsg);
-          }
+        const isUnauthViolationBeforeLogin =
+          (colName === 'violations' || colName === 'cases') &&
+          !auth.currentUser &&
+          typeof localStorage !== 'undefined' &&
+          localStorage.getItem('bk_is_logged_in') !== 'true';
+        if (!isUnauthViolationBeforeLogin) {
+          const errMsg = handleFirestoreError(error, 'list', colRef.path);
+          notifyCloudStatusChange('error', false, errMsg);
         }
       }
     });
@@ -3177,18 +3153,14 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
         ingestIntoMap(aliasMap, snapshot, rootColName);
       }, (error) => {
         if (!checkAndHandleQuotaError(error)) {
-          if (isOfflineFirestoreError(error)) {
-            notifyCloudStatusChange('offline', false);
-          } else {
-            const isUnauthViolationBeforeLogin =
-              (colName === 'violations' || colName === 'cases' || rootColName === 'violations') &&
-              !auth.currentUser &&
-              typeof localStorage !== 'undefined' &&
-              localStorage.getItem('bk_is_logged_in') !== 'true';
-            if (!isUnauthViolationBeforeLogin) {
-              const errMsg = handleFirestoreError(error, 'list', rootColRef.path);
-              notifyCloudStatusChange('error', false, errMsg);
-            }
+          const isUnauthViolationBeforeLogin =
+            (colName === 'violations' || colName === 'cases' || rootColName === 'violations') &&
+            !auth.currentUser &&
+            typeof localStorage !== 'undefined' &&
+            localStorage.getItem('bk_is_logged_in') !== 'true';
+          if (!isUnauthViolationBeforeLogin) {
+            const errMsg = handleFirestoreError(error, 'list', rootColRef.path);
+            notifyCloudStatusChange('error', false, errMsg);
           }
         }
       });
@@ -3224,7 +3196,7 @@ export async function initRealtimeFirestoreSync(): Promise<void> {
       }
       notifyCloudStatusChange('connected');
     }, (error) => {
-      if (!checkAndHandleQuotaError(error) && !isOfflineFirestoreError(error)) {
+      if (!checkAndHandleQuotaError(error)) {
         const errMsg = handleFirestoreError(error, 'get', `pengaturan/${currentSchoolId}`);
         notifyCloudStatusChange('error', false, errMsg);
       }
@@ -3483,7 +3455,6 @@ export async function forceFullCloudSync(): Promise<void> {
   notifyCloudStatusChange('syncing');
 
   let firstError: string | undefined;
-  let hasOfflineErr = false;
 
   // 1. Pull global account requests
   const pullAccReqs = async () => {
@@ -3502,9 +3473,7 @@ export async function forceFullCloudSync(): Promise<void> {
         window.dispatchEvent(new CustomEvent('bk_account_requests_updated', { detail: { requests: allReqs } }));
       }
     } catch (e) {
-      if (isOfflineFirestoreError(e)) {
-        hasOfflineErr = true;
-      } else if (!checkAndHandleQuotaError(e)) {
+      if (!checkAndHandleQuotaError(e)) {
         console.warn('Force pull error for account_requests:', e);
       }
     }
@@ -3537,9 +3506,7 @@ export async function forceFullCloudSync(): Promise<void> {
         }
       }
     } catch (e) {
-      if (isOfflineFirestoreError(e)) {
-        hasOfflineErr = true;
-      } else if (!checkAndHandleQuotaError(e)) {
+      if (!checkAndHandleQuotaError(e)) {
         firstError = firstError || handleFirestoreError(e, 'get', `pengaturan/${currentSchoolId}`);
       }
     }
@@ -3589,21 +3556,15 @@ export async function forceFullCloudSync(): Promise<void> {
       rootResults.forEach((res, idx) => {
         if (res.status === 'fulfilled') {
           if (!res.value.empty) ingestSnapshot(res.value);
-        } else {
-          if (isOfflineFirestoreError(res.reason)) hasOfflineErr = true;
-          else if (!checkAndHandleQuotaError(res.reason)) {
-            firstError = firstError || handleFirestoreError(res.reason, 'list', rootAliases[idx]);
-          }
+        } else if (!checkAndHandleQuotaError(res.reason)) {
+          firstError = firstError || handleFirestoreError(res.reason, 'list', rootAliases[idx]);
         }
       });
 
       if (subRes.status === 'fulfilled') {
         if (!subRes.value.empty) ingestSnapshot(subRes.value);
-      } else {
-        if (isOfflineFirestoreError(subRes.reason)) hasOfflineErr = true;
-        else if (!checkAndHandleQuotaError(subRes.reason)) {
-          firstError = firstError || handleFirestoreError(subRes.reason, 'list', `schools/${currentSchoolId}/${colName}`);
-        }
+      } else if (!checkAndHandleQuotaError(subRes.reason)) {
+        firstError = firstError || handleFirestoreError(subRes.reason, 'list', `schools/${currentSchoolId}/${colName}`);
       }
 
       // Pastikan dokumen yang punya flag isDeleted di salah satu sumber dihapus dari docMap
@@ -3631,18 +3592,14 @@ export async function forceFullCloudSync(): Promise<void> {
         });
       }
     } catch (e: any) {
-      if (isOfflineFirestoreError(e)) {
-        hasOfflineErr = true;
-      } else if (!checkAndHandleQuotaError(e)) {
+      if (!checkAndHandleQuotaError(e)) {
         firstError = firstError || handleFirestoreError(e, 'list', colName);
       }
     }
   });
 
   await Promise.all([pullAccReqs(), pullPengaturan(), ...pullCollections]);
-  if (hasOfflineErr || (typeof navigator !== 'undefined' && !navigator.onLine)) {
-    notifyCloudStatusChange('offline', false);
-  } else if (firstError) {
+  if (firstError) {
     notifyCloudStatusChange('error', false, firstError);
   } else {
     notifyCloudStatusChange('connected', true);
@@ -3724,7 +3681,7 @@ export async function clearLocalCacheAndReloadFromCloud(): Promise<{
     const conn = await testConnection();
     if (!conn.ok) {
       const msg = conn.error || 'Tidak dapat terhubung ke server Firebase Firestore';
-      notifyCloudStatusChange(msg.toLowerCase().includes('offline') ? 'offline' : 'error', false, msg);
+      notifyCloudStatusChange('error', false, msg);
       await initRealtimeFirestoreSync();
       return { success: false, counts, error: msg };
     }

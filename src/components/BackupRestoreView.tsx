@@ -1040,12 +1040,16 @@ export default function BackupRestoreView({
                     {isCloudSynced ? (
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200">
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        Tersimpan di Cloud • Pukul {cloudInfo.timeLabel}
+                        Online - Tersambung ke Cloud • Pukul {cloudInfo.timeLabel}
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-extrabold bg-amber-50 text-amber-800 border border-amber-200">
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-extrabold border ${
+                        cloudInfo.lastError
+                          ? 'bg-rose-50 text-rose-800 border-rose-200'
+                          : 'bg-amber-50 text-amber-800 border-amber-200'
+                      }`}>
                         <AlertTriangle className="w-3.5 h-3.5" />
-                        {isOffline ? 'Offline / Belum Tersinkron' : 'Belum Tersinkron'}
+                        {cloudInfo.lastError || (isOffline ? 'Koneksi Internet Terputus' : 'Belum Tersinkron')}
                       </span>
                     )}
                   </div>

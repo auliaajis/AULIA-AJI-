@@ -3298,9 +3298,11 @@ function AuthenticatedBkApp() {
         }`}>
           <div className="flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full shrink-0 ${firebaseConnectionError ? 'bg-red-600' : 'bg-emerald-600 animate-pulse'}`} />
-            <span>Cloud: Default Gemini Project - students: {students.length} data</span>
+            <span>Cloud: ai-studio-sistemadministra-39ee735c - students: {students.length} data</span>
           </div>
-          <span className="text-[10px] opacity-80 font-mono">projectId: {firebaseConfig.projectId}</span>
+          <span className="text-[10px] opacity-80 font-mono">
+            {firebaseConnectionError ? `Error: ${firebaseConnectionError}` : 'Online - Tersambung ke Cloud'} • projectId: {firebaseConfig.projectId}
+          </span>
         </div>
         {firebaseConnectionError && (
           <div className="bg-red-600 text-white px-4 py-3 text-xs sm:text-sm font-extrabold flex flex-wrap items-center justify-between gap-2 shadow-md relative z-[1200]">
@@ -3569,10 +3571,10 @@ function AuthenticatedBkApp() {
           }`}>
             <div className="flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full shrink-0 ${firebaseConnectionError ? 'bg-red-600' : 'bg-emerald-600 animate-pulse'}`} />
-              <span>Cloud: Default Gemini Project - students: {students.length} data</span>
+              <span>Cloud: ai-studio-sistemadministra-39ee735c - students: {students.length} data</span>
             </div>
             <span className="text-[11px] opacity-80 font-mono">
-              projectId: {firebaseConfig.projectId} • violations: {violations.length} • services: {services.length}
+              {firebaseConnectionError ? `Error: ${firebaseConnectionError}` : 'Online - Tersambung ke Cloud'} • projectId: {firebaseConfig.projectId} • violations: {violations.length} • services: {services.length}
             </span>
           </div>
           {firebaseConnectionError && (
