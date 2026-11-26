@@ -1,22 +1,22 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // PIKET PUBLIK: boleh baca daftar guru (hanya nama) untuk dropdown
     match /teachers/{docId} {
       allow read: if true;
       allow create, update, delete: if request.auth != null;
     }
-    // PIKET PUBLIK: boleh cari siswa, tapi hanya untuk keperluan input
     match /students/{docId} {
       allow read: if true;
       allow create, update, delete: if request.auth != null;
     }
-    // LAPORAN PIKET: publik boleh buat, tapi TIDAK boleh baca / ubah / hapus
+    match /siswa/{docId} {
+      allow read: if true;
+      allow create, update, delete: if request.auth != null;
+    }
     match /violations/{docId} {
       allow create: if true;
       allow read, update, delete: if request.auth != null;
     }
-    // Koleksi lain tetap harus login
     match /{document=**} {
       allow read, write: if request.auth != null;
     }
